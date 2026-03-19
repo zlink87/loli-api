@@ -1,0 +1,342 @@
+{
+  "1": {
+    "inputs": {
+      "color": "0, 255, 60",
+      "device": "gpu",
+      "image": [
+        "108",
+        0
+      ],
+      "mask": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "DrawMaskOnImage",
+    "_meta": {
+      "title": "Draw Mask (ımg1)"
+    }
+  },
+  "10": {
+    "inputs": {
+      "model_path": "models/sam3/sam3.pt",
+      "precision": "fp16",
+      "attention": "flash_attn",
+      "compile": true
+    },
+    "class_type": "LoadSAM3Model",
+    "_meta": {
+      "title": "SAM3 Model"
+    }
+  },
+  "16": {
+    "inputs": {
+      "positive": "Change the masking part to full naked, keep body proportion, change nothing else"
+    },
+    "class_type": "easy positive",
+    "_meta": {
+      "title": "easy positive"
+    }
+  },
+  "24": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "operation": "add",
+      "destination": [
+        "29:28",
+        0
+      ],
+      "source": [
+        "30:19",
+        0
+      ]
+    },
+    "class_type": "MaskComposite",
+    "_meta": {
+      "title": "MaskComposite"
+    }
+  },
+  "40": {
+    "inputs": {
+      "prompt": [
+        "117",
+        0
+      ],
+      "clip": [
+        "101",
+        1
+      ],
+      "vae": [
+        "101",
+        2
+      ],
+      "image1": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Text Negative"
+    }
+  },
+  "41": {
+    "inputs": {
+      "prompt": [
+        "16",
+        0
+      ],
+      "clip": [
+        "101",
+        1
+      ],
+      "vae": [
+        "101",
+        2
+      ],
+      "image1": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Positive"
+    }
+  },
+  "67": {
+    "inputs": {
+      "pixels": [
+        "1",
+        0
+      ],
+      "vae": [
+        "101",
+        2
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "Img1 Vae Encode"
+    }
+  },
+  "101": {
+    "inputs": {
+      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "103": {
+    "inputs": {
+      "width": 1088,
+      "height": 1600,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent/ Latent Switcher"
+    }
+  },
+  "105": {
+    "inputs": {
+      "select": 3,
+      "latent_1": [
+        "103",
+        0
+      ],
+      "latent_2": [
+        "67",
+        0
+      ],
+      "latent_3": [
+        "121",
+        2
+      ]
+    },
+    "class_type": "Latent Switch (JPS)",
+    "_meta": {
+      "title": "Latent Switcher"
+    }
+  },
+  "106": {
+    "inputs": {
+      "seed": 301651179604540,
+      "steps": 8,
+      "cfg": 1.5,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "beta",
+      "denoise": 0.8,
+      "model": [
+        "101",
+        0
+      ],
+      "positive": [
+        "41",
+        0
+      ],
+      "negative": [
+        "40",
+        0
+      ],
+      "latent_image": [
+        "105",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "108": {
+    "inputs": {
+      "image": "outfit_7a2901eb1151.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Image1"
+    }
+  },
+  "116": {
+    "inputs": {
+      "images": [
+        "118",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "117": {
+    "inputs": {
+      "negative": "blurry, low resolution, deformed hands, deformed fingers, fused fingers, extra fingers, missing fingers, malformed nails, ugly toenails, deformed toes, extra toes, fused toes, poorly drawn lips, asymmetrical eyes, blurry eyes, deformed hairline, bad anatomy, imperfect body proportions, unnatural curves, cartoonish, artifacts, watermark, text, logos, mutated hands, mutated feet, extra limbs, poorly detailed skin, plastic skin, shiny skin, low detail nails, distorted pose, unnatural flexibility artifacts, flat lighting, low contrast, elderly or childish"
+    },
+    "class_type": "easy negative",
+    "_meta": {
+      "title": "easy negative"
+    }
+  },
+  "118": {
+    "inputs": {
+      "samples": [
+        "106",
+        0
+      ],
+      "vae": [
+        "101",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "119": {
+    "inputs": {
+      "expand": 5,
+      "incremental_expandrate": 0,
+      "tapered_corners": true,
+      "flip_input": false,
+      "blur_radius": 5,
+      "lerp_alpha": 1,
+      "decay_factor": 1,
+      "fill_holes": true,
+      "mask": [
+        "24",
+        0
+      ]
+    },
+    "class_type": "GrowMaskWithBlur",
+    "_meta": {
+      "title": "Grow Mask With Blur"
+    }
+  },
+  "120": {
+    "inputs": {
+      "images": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "121": {
+    "inputs": {
+      "noise_mask": false,
+      "positive": [
+        "41",
+        0
+      ],
+      "negative": [
+        "40",
+        0
+      ],
+      "vae": [
+        "101",
+        2
+      ],
+      "pixels": [
+        "108",
+        0
+      ],
+      "mask": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "InpaintModelConditioning",
+    "_meta": {
+      "title": "InpaintModelConditioning"
+    }
+  },
+  "30:19": {
+    "inputs": {
+      "confidence_threshold": 0.2,
+      "text_prompt": "torso and curves",
+      "max_detections": 1,
+      "offload_model": false,
+      "sam3_model": [
+        "10",
+        0
+      ],
+      "image": [
+        "108",
+        0
+      ]
+    },
+    "class_type": "SAM3Grounding",
+    "_meta": {
+      "title": "SAM3 Text"
+    }
+  },
+  "29:28": {
+    "inputs": {
+      "confidence_threshold": 0.2,
+      "text_prompt": "outfit/clothes",
+      "max_detections": 1,
+      "offload_model": false,
+      "sam3_model": [
+        "10",
+        0
+      ],
+      "image": [
+        "108",
+        0
+      ]
+    },
+    "class_type": "SAM3Grounding",
+    "_meta": {
+      "title": "SAM3 Text"
+    }
+  }
+}

@@ -1,0 +1,315 @@
+{
+  "3": {
+    "inputs": {
+      "seed": 810536768582078,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "75",
+        0
+      ],
+      "positive": [
+        "134",
+        0
+      ],
+      "negative": [
+        "116",
+        0
+      ],
+      "latent_image": [
+        "88",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "163",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "66": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "159",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  },
+  "75": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "66",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFGNorm"
+    }
+  },
+  "88": {
+    "inputs": {
+      "pixels": [
+        "93",
+        0
+      ],
+      "vae": [
+        "163",
+        2
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "93": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "166",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "ImageScaleToTotalPixels"
+    }
+  },
+  "109": {
+    "inputs": {
+      "image": "gen-1770383472309.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "114": {
+    "inputs": {
+      "prompt": "Make the person in image 1 do the exact same pose of the person in image 2. Changing the style and background of the image of the person in image 1 is not permitted, so don't do it. The new pose should be pixel accurate to the pose we are trying to copy. The position of the arms and head and legs should be the same as the pose we are trying to copy. Change the field of view and angle to match exactly image 2. Head tilt and eye gaze pose should match the person in image 2. Keep the original apperance, body proportion, leg proportion, skin type and outfit, facial features, background scene from image 1.",
+      "clip": [
+        "163",
+        1
+      ],
+      "vae": [
+        "163",
+        2
+      ],
+      "image1": [
+        "109",
+        0
+      ],
+      "image2": [
+        "166",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "116": {
+    "inputs": {
+      "conditioning": [
+        "114",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "134": {
+    "inputs": {
+      "reference_latents_method": "index_timestep_zero",
+      "conditioning": [
+        "114",
+        0
+      ]
+    },
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "Edit Model Reference Method"
+    }
+  },
+  "157": {
+    "inputs": {
+      "lora_name": "2511-AnyPose-base-000006250.safetensors",
+      "strength_model": 0.7,
+      "model": [
+        "163",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "159": {
+    "inputs": {
+      "lora_name": "2511-AnyPose-helper-00006000.safetensors",
+      "strength_model": 0.7,
+      "model": [
+        "157",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "163": {
+    "inputs": {
+      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "164": {
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "165": {
+    "inputs": {
+      "images": [
+        "166",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "166": {
+    "inputs": {
+      "r": 0,
+      "g": 0,
+      "b": 0,
+      "opacity": 1,
+      "mode": "fill",
+      "thickness": 4,
+      "feather": 0,
+      "image": [
+        "170",
+        0
+      ],
+      "rect": [
+        "167",
+        0
+      ]
+    },
+    "class_type": "RectFill",
+    "_meta": {
+      "title": "Rect / Fill"
+    }
+  },
+  "167": {
+    "inputs": {
+      "x": [
+        "168",
+        1
+      ],
+      "y": [
+        "168",
+        2
+      ],
+      "w": [
+        "168",
+        3
+      ],
+      "h": [
+        "168",
+        4
+      ],
+      "Open Rect / Select": "open",
+      "image": [
+        "170",
+        0
+      ]
+    },
+    "class_type": "RectSelect",
+    "_meta": {
+      "title": "Rect / Select"
+    }
+  },
+  "168": {
+    "inputs": {
+      "padding": 0,
+      "padding_percent": 0.2,
+      "index": -1,
+      "analysis_models": [
+        "169",
+        0
+      ],
+      "image": [
+        "170",
+        0
+      ]
+    },
+    "class_type": "FaceBoundingBox",
+    "_meta": {
+      "title": "Face Bounding Box"
+    }
+  },
+  "169": {
+    "inputs": {
+      "library": "insightface",
+      "provider": "CUDA"
+    },
+    "class_type": "FaceAnalysisModels",
+    "_meta": {
+      "title": "Face Analysis Models"
+    }
+  },
+  "170": {
+    "inputs": {
+      "image": "3ec9b40e-872b-4ea8-8d30-7cb4986e6bd2.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  }
+}

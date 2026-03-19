@@ -1,0 +1,221 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "2": {
+    "inputs": {
+      "seed": 483095947783965,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "beta",
+      "denoise": 0.9,
+      "model": [
+        "22",
+        0
+      ],
+      "positive": [
+        "3",
+        0
+      ],
+      "negative": [
+        "4",
+        0
+      ],
+      "latent_image": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "3": {
+    "inputs": {
+      "prompt": "Change pose to standing, show penis erect hard as fuck. Do not change any facial, hair, body, skin type, nose, eyes features",
+      "clip": [
+        "1",
+        1
+      ],
+      "vae": [
+        "1",
+        2
+      ],
+      "image1": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus Input Prompt"
+    }
+  },
+  "4": {
+    "inputs": {
+      "prompt": "blurry, low quality, low resolution,\ndistorted face, altered identity,\nbad anatomy, deformed hands, extra fingers,\nwarped body, unnatural proportions,\nharsh lighting, inconsistent lighting,\nbackground artifacts, edge artifacts,\ntext, watermark, logo",
+      "clip": [
+        "1",
+        1
+      ],
+      "vae": [
+        "1",
+        2
+      ],
+      "image1": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus Negative (leave blank)"
+    }
+  },
+  "5": {
+    "inputs": {
+      "samples": [
+        "2",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "6": {
+    "inputs": {
+      "images": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "8": {
+    "inputs": {
+      "image": "pasted/image (11).png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Optional Input Image"
+    }
+  },
+  "9": {
+    "inputs": {
+      "width": 1080,
+      "height": 1352,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Final Image Size"
+    }
+  },
+  "20": {
+    "inputs": {
+      "lora_name": "PenisLora.safetensors",
+      "strength_model": 0.7,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "22": {
+    "inputs": {
+      "select": 2,
+      "sel_mode": false,
+      "input1": [
+        "1",
+        0
+      ],
+      "input2": [
+        "20",
+        0
+      ],
+      "input3": [
+        "27",
+        0
+      ]
+    },
+    "class_type": "ImpactSwitch",
+    "_meta": {
+      "title": "Switch (Any)"
+    }
+  },
+  "25": {
+    "inputs": {
+      "detect_method": "face_recognition",
+      "image1": [
+        "32",
+        0
+      ],
+      "image2": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "Face Similarity",
+    "_meta": {
+      "title": "Face Similarity"
+    }
+  },
+  "26": {
+    "inputs": {
+      "preview": "69.63",
+      "previewMode": false,
+      "source": [
+        "25",
+        0
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Preview as Text"
+    }
+  },
+  "27": {
+    "inputs": {
+      "lora_name": "multiConceptNSFW.safetensors",
+      "strength_model": 1,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "32": {
+    "inputs": {
+      "image": "pasted/image (11).png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Optional Input Image"
+    }
+  }
+}

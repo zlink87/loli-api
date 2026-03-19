@@ -1,0 +1,92 @@
+# ===========================================
+# Python
+# ===========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ===========================================
+# Virtual environments
+# ===========================================
+venv/
+.venv/
+env/
+
+# ===========================================
+# Environment / Secrets
+# ===========================================
+.env
+*.pem
+*.key
+
+# ===========================================
+# Logs
+# ===========================================
+logs/
+*.log
+
+# ===========================================
+# IDE / Editor
+# ===========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===========================================
+# ComfyUI - Large files / runtime data
+# ===========================================
+ComfyUI/models/
+ComfyUI/output/
+ComfyUI/temp/
+
+# ===========================================
+# loli_api - Runtime / generated data
+# ===========================================
+loli_api/storage/
+loli_api/output_images/
+loli_api/test_outputs/
+loli_api/logs/
+
+# ===========================================
+# General large / binary files
+# ===========================================
+*.ckpt
+*.safetensors
+*.pth
+*.pt
+*.bin
+*.onnx
+*.pkl
+*.h5
+*.tar.gz
+*.zip
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+*.svg
+*.eps
+*.pdf
+*.doc
+*.docx
+
+# ===========================================
+# Whitelist: docs and README
+# ===========================================
+!docs/
+!docs/**
+!README.md

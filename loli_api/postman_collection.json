@@ -1,0 +1,1256 @@
+{
+  "info": {
+    "name": "Character Image Generation API",
+    "description": "API for generating character images using ComfyUI and xAI Grok-4.\n\nBase URL: http://localhost:8001\n\n**Quick Start:**\n1. Run 'Get Debug Token' first to authenticate\n2. Use any 'Create Character' request to generate images\n3. Run 'Get Job Status' - image displays automatically when ready!\n\n**New Features:**\n- Images display directly in Postman response (Visualize tab)\n- Preview URLs auto-saved for easy access\n- 'View Last Image' request for quick re-viewing",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8001",
+      "type": "string"
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "last_job_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "last_edit_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "last_preview_url",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "all_preview_urls",
+      "value": "[]",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{jwt_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "1. Health & Debug",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "description": "Check API health status, queue size, and version. No authentication required."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Debug Token (RUN THIS FIRST)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.token) {",
+                  "    pm.collectionVariables.set('jwt_token', jsonData.token);",
+                  "    console.log('✅ Token saved to collection variable');",
+                  "    console.log('User ID:', jsonData.user_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/debug/token",
+              "host": ["{{base_url}}"],
+              "path": ["debug", "token"]
+            },
+            "description": "Get a test JWT token (DEBUG MODE ONLY). The token is automatically saved to collection variables."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Debug Token (Custom User ID)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.token) {",
+                  "    pm.collectionVariables.set('jwt_token', jsonData.token);",
+                  "    console.log('✅ Token saved for user:', jsonData.user_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/debug/token?user_id=custom_user_123",
+              "host": ["{{base_url}}"],
+              "path": ["debug", "token"],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "custom_user_123",
+                  "description": "Custom user ID for the token"
+                }
+              ]
+            },
+            "description": "Get a test JWT token with a custom user ID."
+          },
+          "response": []
+        },
+        {
+          "name": "ComfyUI Status",
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/debug/comfyui-status",
+              "host": ["{{base_url}}"],
+              "path": ["debug", "comfyui-status"]
+            },
+            "description": "Check if ComfyUI server is running and accessible."
+          },
+          "response": []
+        },
+        {
+          "name": "Storage Stats",
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/debug/storage-stats",
+              "host": ["{{base_url}}"],
+              "path": ["debug", "storage-stats"]
+            },
+            "description": "Get storage statistics and disk usage information (DEBUG MODE ONLY)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Generate Character",
+      "item": [
+        {
+          "name": "Create Character - Basic (Asian Nurse)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "    console.log('Status:', jsonData.status);",
+                  "    console.log('');",
+                  "    console.log('👉 Next: Run \"Get Job Status\" and check the Visualize tab to see the image!');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 28,\n    \"hairStyle\": \"ponytail\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Estella\",\n    \"occupation\": \"nurse\"\n  },\n  \"context\": \"After a long shift, relaxing at home\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Generate a basic character with required persona fields. Job ID is saved for status polling."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Arab Photographer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "    console.log('👉 Next: Run \"Get Job Status\" to see the image!');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"arab\",\n    \"age\": 45,\n    \"hairStyle\": \"ponytail\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Layla\",\n    \"occupation\": \"photographer\"\n  },\n  \"context\": \"Professional photoshoot in urban environment during golden hour\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Arab woman photographer character."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Caucasian Fitness Coach",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"caucasian\",\n    \"age\": 26,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"blonde\",\n    \"eyeColor\": \"blue\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Emma\",\n    \"personality\": \"confident\",\n    \"occupation\": \"fitness_coach\"\n  },\n  \"context\": \"At the gym, holding dumbbells\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Caucasian fitness coach character with personality trait."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Latina Dancer with Kinks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"latina\",\n    \"age\": 30,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"brunette\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Sofia\",\n    \"personality\": \"temptress\",\n    \"occupation\": \"dancer\",\n    \"kinks\": [\"playful_teasing\", \"dirty_talk\"]\n  },\n  \"context\": \"Backstage after a salsa performance\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Latina dancer character with personality and kinks (max 3 kinks allowed)."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Black Model with Seed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"black_afro\",\n    \"age\": 24,\n    \"hairStyle\": \"bun\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Zara\",\n    \"occupation\": \"model\"\n  },\n  \"output\": {\n    \"seed\": 12345\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Character with specific seed for reproducible results (1-1,000,000,000)."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Anime Style",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"anime\",\n    \"ethnicity\": \"asian\",\n    \"age\": 22,\n    \"hairStyle\": \"bangs\",\n    \"hairColor\": \"pink\",\n    \"eyeColor\": \"blue\",\n    \"bodyType\": \"skinny\",\n    \"breastSize\": \"small\",\n    \"name\": \"Sakura\",\n    \"personality\": \"innocent\",\n    \"occupation\": \"student\"\n  },\n  \"context\": \"Cherry blossom garden in spring\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Anime-style character generation."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Full Options",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job created with all options');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"my-custom-request-id\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"caucasian\",\n    \"age\": 32,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"redhead\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Victoria\",\n    \"personality\": \"dominant\",\n    \"relationship\": \"boss\",\n    \"occupation\": \"boss_ceo\",\n    \"kinks\": [\"control\", \"dirty_talk\", \"roleplay\"],\n    \"voice\": \"sultry\"\n  },\n  \"context\": \"Executive office with city view at sunset\",\n  \"isEnhance\": true,\n  \"output\": {\n    \"aspectRatio\": \"2:3\",\n    \"resolution\": \"944x1408\",\n    \"seed\": 42,\n    \"n\": 1\n  },\n  \"providerHints\": {\n    \"model\": \"flux\",\n    \"provider\": \"comfyui\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Character generation with all available options including custom ID, personality, relationship, occupation, kinks, voice, output settings, and provider hints."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Multiple Images",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 25,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Yuki\",\n    \"occupation\": \"streamer\"\n  },\n  \"context\": \"Gaming setup with RGB lighting\",\n  \"output\": {\n    \"n\": 4\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Generate multiple images (1-4) in a single request."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Without Prompt Enhancement",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"latina\",\n    \"age\": 28,\n    \"hairStyle\": \"short\",\n    \"hairColor\": \"brunette\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Maria\",\n    \"occupation\": \"lifeguard\"\n  },\n  \"context\": \"Beach at sunset\",\n  \"isEnhance\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Generate character without xAI Grok prompt enhancement (uses raw prompt)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Job Management",
+      "item": [
+        {
+          "name": "Get Job Status (with Image Preview)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "var status = jsonData.status;",
+                  "",
+                  "// Status indicator",
+                  "var statusEmoji = {",
+                  "    'queued': '⏳',",
+                  "    'running': '🔄',",
+                  "    'succeeded': '✅',",
+                  "    'failed': '❌'",
+                  "};",
+                  "",
+                  "console.log(statusEmoji[status] + ' Status: ' + status);",
+                  "",
+                  "if (jsonData.progress) {",
+                  "    console.log('Progress: ' + (jsonData.progress * 100).toFixed(1) + '%');",
+                  "}",
+                  "",
+                  "// When job succeeds, save preview URLs and show visualizer",
+                  "if (status === 'succeeded' && jsonData.results && jsonData.results.length > 0) {",
+                  "    // Save first preview URL for quick access",
+                  "    var firstUrl = jsonData.results[0].previewUrl;",
+                  "    pm.collectionVariables.set('last_preview_url', firstUrl);",
+                  "    ",
+                  "    // Save all URLs",
+                  "    var allUrls = jsonData.results.map(function(r) { return r.previewUrl; });",
+                  "    pm.collectionVariables.set('all_preview_urls', JSON.stringify(allUrls));",
+                  "    ",
+                  "    console.log('');",
+                  "    console.log('🖼️  ' + jsonData.results.length + ' image(s) ready!');",
+                  "    console.log('📌 Preview URL saved to {{last_preview_url}}');",
+                  "    console.log('');",
+                  "    console.log('👉 Click the \"Visualize\" tab below to see the image(s)!');",
+                  "    ",
+                  "    if (jsonData.promptUsed) {",
+                  "        console.log('');",
+                  "        console.log('Prompt: ' + jsonData.promptUsed.substring(0, 100) + '...');",
+                  "    }",
+                  "    if (jsonData.seedUsed) {",
+                  "        console.log('Seed: ' + jsonData.seedUsed);",
+                  "    }",
+                  "    ",
+                  "    // Build HTML for visualizer",
+                  "    var template = `",
+                  "    <style>",
+                  "        .container { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; }",
+                  "        .status { background: #10b981; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block; margin-bottom: 20px; }",
+                  "        .images { display: flex; flex-wrap: wrap; gap: 20px; }",
+                  "        .image-card { background: #f3f4f6; border-radius: 12px; overflow: hidden; max-width: 400px; }",
+                  "        .image-card img { width: 100%; height: auto; display: block; }",
+                  "        .image-info { padding: 12px; font-size: 12px; }",
+                  "        .image-info a { color: #3b82f6; word-break: break-all; }",
+                  "        .meta { margin-top: 20px; padding: 16px; background: #f9fafb; border-radius: 8px; font-size: 13px; }",
+                  "        .meta-row { display: flex; margin-bottom: 8px; }",
+                  "        .meta-label { font-weight: 600; width: 100px; color: #6b7280; }",
+                  "        .prompt { margin-top: 12px; padding: 12px; background: #e5e7eb; border-radius: 6px; font-size: 12px; line-height: 1.5; max-height: 150px; overflow-y: auto; }",
+                  "    </style>",
+                  "    <div class='container'>",
+                  "        <div class='status'>✅ Job Succeeded</div>",
+                  "        <div class='images'>",
+                  "            {{#each results}}",
+                  "            <div class='image-card'>",
+                  "                <img src='{{previewUrl}}' alt='Generated Image {{@index}}' />",
+                  "                <div class='image-info'>",
+                  "                    <strong>Image {{math @index '+' 1}}</strong><br>",
+                  "                    <a href='{{previewUrl}}' target='_blank'>Open in new tab ↗</a>",
+                  "                </div>",
+                  "            </div>",
+                  "            {{/each}}",
+                  "        </div>",
+                  "        <div class='meta'>",
+                  "            <div class='meta-row'><span class='meta-label'>Job ID:</span> {{jobId}}</div>",
+                  "            {{#if seedUsed}}<div class='meta-row'><span class='meta-label'>Seed:</span> {{seedUsed}}</div>{{/if}}",
+                  "            {{#if expiresAt}}<div class='meta-row'><span class='meta-label'>Expires:</span> {{expiresAt}}</div>{{/if}}",
+                  "            {{#if promptUsed}}<div class='prompt'><strong>Prompt:</strong><br>{{promptUsed}}</div>{{/if}}",
+                  "        </div>",
+                  "    </div>",
+                  "    `;",
+                  "    ",
+                  "    // Add helper for math",
+                  "    pm.visualizer.set(template, jsonData);",
+                  "",
+                  "} else if (status === 'failed') {",
+                  "    console.log('');",
+                  "    console.log('Error:', jsonData.error ? jsonData.error.code + ' - ' + jsonData.error.message : 'Unknown error');",
+                  "    ",
+                  "    var errorTemplate = `",
+                  "    <div style='font-family: sans-serif; padding: 20px;'>",
+                  "        <div style='background: #ef4444; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block;'>❌ Job Failed</div>",
+                  "        <div style='margin-top: 20px; padding: 16px; background: #fef2f2; border-radius: 8px; border: 1px solid #fecaca;'>",
+                  "            <strong>Error:</strong> {{error.code}}<br>",
+                  "            <span style='color: #991b1b;'>{{error.message}}</span>",
+                  "        </div>",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(errorTemplate, jsonData);",
+                  "    ",
+                  "} else {",
+                  "    // Still processing",
+                  "    console.log('');",
+                  "    console.log('⏳ Job still processing. Run this request again to check status.');",
+                  "    ",
+                  "    var progressTemplate = `",
+                  "    <div style='font-family: sans-serif; padding: 20px; text-align: center;'>",
+                  "        <div style='font-size: 48px; margin-bottom: 20px;'>{{#if (eq status 'queued')}}⏳{{else}}🔄{{/if}}</div>",
+                  "        <div style='background: #3b82f6; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block;'>{{status}}</div>",
+                  "        {{#if progress}}",
+                  "        <div style='margin-top: 20px;'>",
+                  "            <div style='background: #e5e7eb; border-radius: 10px; height: 20px; overflow: hidden;'>",
+                  "                <div style='background: #3b82f6; height: 100%; width: {{math progress '*' 100}}%;'></div>",
+                  "            </div>",
+                  "            <div style='margin-top: 8px; color: #6b7280;'>{{math progress '*' 100}}% complete</div>",
+                  "        </div>",
+                  "        {{/if}}",
+                  "        <p style='color: #6b7280; margin-top: 20px;'>Run this request again to refresh status</p>",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(progressTemplate, jsonData);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/jobs/{{last_job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "jobs", "{{last_job_id}}"]
+            },
+            "description": "Poll job status with automatic image preview!\n\n**When job succeeds:**\n- Click the 'Visualize' tab to see the image(s) directly\n- Preview URL is saved to {{last_preview_url}}\n- Click 'Open in new tab' to view full size\n\n**Status progression:** queued → running → succeeded/failed"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Job Status (Manual ID)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/jobs/imgjob_xxxxx",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "jobs", "imgjob_xxxxx"]
+            },
+            "description": "Replace 'imgjob_xxxxx' with actual job ID."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Job",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/jobs/{{last_job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "jobs", "{{last_job_id}}"]
+            },
+            "description": "Cancel a queued job. Only works for jobs in 'queued' status. Returns 204 No Content on success."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. View Images",
+      "item": [
+        {
+          "name": "View Last Generated Image",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    console.log('✅ Image loaded successfully!');",
+                  "    console.log('');",
+                  "    console.log('👉 Check the response body or Visualize tab to see the image.');",
+                  "    ",
+                  "    // Display image in visualizer",
+                  "    var template = `",
+                  "    <div style='font-family: sans-serif; padding: 20px;'>",
+                  "        <div style='background: #10b981; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block; margin-bottom: 20px;'>✅ Image Loaded</div>",
+                  "        <div style='background: #f3f4f6; border-radius: 12px; overflow: hidden; display: inline-block;'>",
+                  "            <img src='{{url}}' style='max-width: 100%; max-height: 80vh; display: block;' />",
+                  "        </div>",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(template, { url: pm.collectionVariables.get('last_preview_url') });",
+                  "} else {",
+                  "    console.log('❌ Failed to load image. Status:', pm.response.code);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "var previewUrl = pm.collectionVariables.get('last_preview_url');",
+                  "if (!previewUrl) {",
+                  "    console.log('❌ No preview URL saved. Generate an image first!');",
+                  "    throw new Error('No preview URL available. Run a generate request first.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{last_preview_url}}",
+              "host": ["{{last_preview_url}}"]
+            },
+            "description": "Quickly view the last generated image without copying URLs!\n\nThis uses the automatically saved {{last_preview_url}} from the job status.\n\n**Prerequisites:**\n1. Generate an image\n2. Run 'Get Job Status' until succeeded\n3. Run this request to view the image"
+          },
+          "response": []
+        },
+        {
+          "name": "View Image (Paste URL Here)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var template = `",
+                  "    <div style='font-family: sans-serif; padding: 20px;'>",
+                  "        <img src='{{url}}' style='max-width: 100%; max-height: 80vh;' />",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(template, { url: pm.request.url.toString() });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/preview/PASTE_TOKEN_HERE?path=PASTE_PATH_HERE",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "preview", "PASTE_TOKEN_HERE"],
+              "query": [{"key": "path", "value": "PASTE_PATH_HERE"}]
+            },
+            "description": "Paste a full preview URL here to view any image.\n\nReplace the URL with the previewUrl from job status response."
+          },
+          "response": []
+        },
+        {
+          "name": "Check Image Exists (HEAD)",
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "HEAD",
+            "header": [],
+            "url": {
+              "raw": "{{last_preview_url}}",
+              "host": ["{{last_preview_url}}"]
+            },
+            "description": "Check if the last preview image still exists and token is valid (without downloading)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Edit Image",
+      "item": [
+        {
+          "name": "Edit Image - Basic",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.editId) {",
+                  "    pm.collectionVariables.set('last_edit_id', jsonData.editId);",
+                  "    console.log('✅ Edit ID:', jsonData.editId);",
+                  "}",
+                  "if (jsonData.results && jsonData.results.length > 0) {",
+                  "    pm.collectionVariables.set('last_preview_url', jsonData.results[0].previewUrl);",
+                  "    console.log('🖼️  ' + jsonData.results.length + ' image(s) edited!');",
+                  "    console.log('📌 Preview URL saved to {{last_preview_url}}');",
+                  "    ",
+                  "    // Build visualizer",
+                  "    var template = `",
+                  "    <style>",
+                  "        .container { font-family: sans-serif; padding: 20px; }",
+                  "        .status { background: #10b981; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block; margin-bottom: 20px; }",
+                  "        .image-card { background: #f3f4f6; border-radius: 12px; overflow: hidden; display: inline-block; }",
+                  "        .image-card img { max-width: 100%; max-height: 70vh; display: block; }",
+                  "        .info { padding: 12px; }",
+                  "        .info a { color: #3b82f6; }",
+                  "    </style>",
+                  "    <div class='container'>",
+                  "        <div class='status'>✅ Edit Complete</div>",
+                  "        {{#each results}}",
+                  "        <div class='image-card'>",
+                  "            <img src='{{previewUrl}}' />",
+                  "            <div class='info'><a href='{{previewUrl}}' target='_blank'>Open in new tab ↗</a></div>",
+                  "        </div>",
+                  "        {{/each}}",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(template, jsonData);",
+                  "}",
+                  "if (jsonData.expiresAt) {",
+                  "    console.log('Expires at:', jsonData.expiresAt);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Input image file (PNG, JPEG, WebP)"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "image"]
+            },
+            "description": "Edit an image using ComfyUI workflow. Select an image file to upload.\n\nSupported formats: PNG, JPEG, JPG, WebP\n\nReturns synchronously with edited image preview URL.\n\n**After running:** Check the Visualize tab to see the result!"
+          },
+          "response": []
+        },
+        {
+          "name": "Edit Image - With Prompt Override",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.editId) {",
+                  "    pm.collectionVariables.set('last_edit_id', jsonData.editId);",
+                  "}",
+                  "if (jsonData.results && jsonData.results.length > 0) {",
+                  "    pm.collectionVariables.set('last_preview_url', jsonData.results[0].previewUrl);",
+                  "    console.log('✅ Edit complete! Check Visualize tab.');",
+                  "    ",
+                  "    var template = `<div style='padding:20px;'><img src='{{results.0.previewUrl}}' style='max-width:100%;max-height:80vh;'/></div>`;",
+                  "    pm.visualizer.set(template, jsonData);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Input image file (PNG, JPEG, WebP)"
+                },
+                {
+                  "key": "prompt",
+                  "value": "beautiful woman, professional photo, studio lighting",
+                  "type": "text",
+                  "description": "Custom prompt override"
+                },
+                {
+                  "key": "negativePrompt",
+                  "value": "blurry, low quality, distorted",
+                  "type": "text",
+                  "description": "Custom negative prompt override"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "image"]
+            },
+            "description": "Edit an image with custom prompt and negative prompt overrides."
+          },
+          "response": []
+        },
+        {
+          "name": "Edit Image - With Seed (Reproducible)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.editId) {",
+                  "    pm.collectionVariables.set('last_edit_id', jsonData.editId);",
+                  "}",
+                  "if (jsonData.results && jsonData.results.length > 0) {",
+                  "    pm.collectionVariables.set('last_preview_url', jsonData.results[0].previewUrl);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Input image file (PNG, JPEG, WebP)"
+                },
+                {
+                  "key": "seed",
+                  "value": "12345",
+                  "type": "text",
+                  "description": "Seed for reproducible results (1-1,000,000,000)"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "image"]
+            },
+            "description": "Edit an image with a specific seed for reproducible results."
+          },
+          "response": []
+        },
+        {
+          "name": "Edit Image - Full Options",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.editId) {",
+                  "    pm.collectionVariables.set('last_edit_id', jsonData.editId);",
+                  "    console.log('✅ Edit completed successfully');",
+                  "}",
+                  "if (jsonData.results && jsonData.results.length > 0) {",
+                  "    pm.collectionVariables.set('last_preview_url', jsonData.results[0].previewUrl);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Input image file (PNG, JPEG, WebP)"
+                },
+                {
+                  "key": "prompt",
+                  "value": "beautiful woman, professional photo",
+                  "type": "text",
+                  "description": "Custom prompt override"
+                },
+                {
+                  "key": "negativePrompt",
+                  "value": "blurry, low quality",
+                  "type": "text",
+                  "description": "Custom negative prompt override"
+                },
+                {
+                  "key": "seed",
+                  "value": "42",
+                  "type": "text",
+                  "description": "Seed for reproducible results"
+                },
+                {
+                  "key": "inputUrl",
+                  "value": "https://example.com/original-image.jpg",
+                  "type": "text",
+                  "description": "Original image URL for logging purposes"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "image"]
+            },
+            "description": "Edit an image with all available options."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. Pose Edit",
+      "item": [
+        {
+          "name": "Edit Pose - Standing Front",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Pose job created:', jsonData.jobId);",
+                  "    console.log('Status:', jsonData.status);",
+                  "    console.log('');",
+                  "    console.log('👉 Next: Run \"Get Job Status\" to check progress');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source_image\": \"https://xxx.supabase.co/storage/v1/object/public/images/test.png\",\n  \"pose\": \"standing_front\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/pose",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "pose"]
+            },
+            "description": "Change pose to standing front. Replace source_image with an actual Supabase image URL."
+          },
+          "response": []
+        },
+        {
+          "name": "Edit Pose - Sitting Casual",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Pose job created:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source_image\": \"https://xxx.supabase.co/storage/v1/object/public/images/test.png\",\n  \"pose\": \"sitting_casual\",\n  \"seed\": 12345\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/pose",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "pose"]
+            },
+            "description": "Change pose to sitting casual with a seed for reproducibility."
+          },
+          "response": []
+        },
+        {
+          "name": "Edit Pose - Lying Back",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Pose job created:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source_image\": \"https://xxx.supabase.co/storage/v1/object/public/images/test.png\",\n  \"pose\": \"lying_back\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/pose",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "pose"]
+            },
+            "description": "Change pose to lying back."
+          },
+          "response": []
+        },
+        {
+          "name": "Edit Pose - All Fours",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Pose job created:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source_image\": \"https://xxx.supabase.co/storage/v1/object/public/images/test.png\",\n  \"pose\": \"all_fours\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/edit/pose",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "edit", "pose"]
+            },
+            "description": "Change pose to all fours."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "7. Error Testing",
+      "item": [
+        {
+          "name": "Test 401 - Missing Auth Token",
+          "request": {
+            "auth": {"type": "noauth"},
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 25,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Test\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Test 401 Unauthorized response when JWT token is missing."
+          },
+          "response": []
+        },
+        {
+          "name": "Test 422 - Invalid Persona (Missing Required)",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"name\": \"Test\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Test 422 Validation Error when required persona fields are missing."
+          },
+          "response": []
+        },
+        {
+          "name": "Test 422 - Invalid Age Range",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 15,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Test\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Test 422 Validation Error when age is out of range (must be 18-99)."
+          },
+          "response": []
+        },
+        {
+          "name": "Test 422 - Too Many Kinks",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 25,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Test\",\n    \"kinks\": [\"bondage\", \"spanking\", \"roleplay\", \"dirty_talk\"]\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Test 422 Validation Error when more than 3 kinks are provided."
+          },
+          "response": []
+        },
+        {
+          "name": "Test 404 - Job Not Found",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/jobs/imgjob_nonexistent",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "jobs", "imgjob_nonexistent"]
+            },
+            "description": "Test 404 Not Found when job ID doesn't exist."
+          },
+          "response": []
+        },
+        {
+          "name": "Test 422 - Invalid Seed Range",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 25,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Test\"\n  },\n  \"output\": {\n    \"seed\": 2000000000\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/generate/image",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "generate", "image"]
+            },
+            "description": "Test 422 Validation Error when seed is out of range (must be 1-1,000,000,000)."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

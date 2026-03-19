@@ -1,0 +1,141 @@
+# =============================================================================
+# Consolidated requirements.txt
+# Merged from:
+#   - ComfyUI/requirements.txt
+#   - ComfyUI/tests-unit/requirements.txt
+#   - ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt
+#   - ComfyUI/custom_nodes/comfyui-easy-use/requirements.txt
+#   - ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt
+#   - ComfyUI/custom_nodes/comfyui-sam3/requirements.txt
+#   - ComfyUI/custom_nodes/comfyui_controlnet_aux/requirements.txt
+#   - ComfyUI/custom_nodes/ComfyUI-QwenVL/requirements.txt
+#   - loli_api/requirements.txt
+#   - (ComfyUI/custom_nodes/rgthree-comfy/requirements.txt was empty)
+# =============================================================================
+
+# --- ComfyUI core packages ---
+comfyui-frontend-package==1.38.13
+comfyui-workflow-templates==0.8.37
+comfyui-embedded-docs==0.4.1
+comfy-kitchen>=0.2.7
+comfy-aimdo>=0.1.8
+comfy-env>0.0.1
+comfy-test>0.0.1
+
+# --- PyTorch ecosystem ---
+torch
+torchvision
+torchaudio
+torchsde
+
+# --- Core ML / AI libraries ---
+transformers>=4.50.3
+tokenizers>=0.13.3
+diffusers
+accelerate
+safetensors>=0.4.2
+einops>=0.6.0
+sentencepiece
+timm>=1.0.17
+peft
+spandrel
+bitsandbytes
+onnxruntime
+
+# --- Hugging Face ---
+huggingface-hub
+hf_xet
+
+# --- Image / Video processing ---
+Pillow>=10.3.0
+# NOTE: opencv-python and opencv-python-headless conflict with each other.
+# Using opencv-python (includes GUI support, superset of headless).
+# If running headless/server-only, replace with opencv-python-headless>=4.8.0
+opencv-python>=4.8.0
+av>=14.2.0
+scikit-image>=0.19.0
+albumentations
+color-matcher
+mediapipe
+
+# --- Scientific / Numerical ---
+numpy>=1.26
+scipy
+matplotlib
+scikit-learn
+
+# --- Web framework (loli_api) ---
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+httpx>=0.26.0
+aiohttp>=3.11.8
+anyio>=4.2.0
+python-multipart
+
+# --- Data validation ---
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# --- Authentication ---
+PyJWT>=2.8.0
+
+# --- Database ---
+alembic
+SQLAlchemy
+supabase>=2.0.0
+
+# --- Configuration / Serialization ---
+pyyaml
+omegaconf
+toml
+python-dotenv>=1.0.0
+
+# --- Git / GitHub ---
+GitPython
+PyGithub
+
+# --- CLI / Display ---
+typer
+rich
+tqdm
+
+# --- Networking / HTTP ---
+requests
+yarl>=1.18.0
+websocket-client>=1.7.0
+
+# --- Computer vision utilities ---
+clip_interrogator>=0.6.0
+kornia>=0.7.1
+fvcore
+pycocotools>=2.0.6
+ftfy==6.1.1
+
+# --- Misc utilities ---
+psutil>=5.9.0
+filelock
+regex
+lark
+addict
+yacs
+yapf
+iopath>=0.1.10
+trimesh[easy]
+importlib_metadata
+python-dateutil
+typing-extensions
+chardet
+mss
+uv
+blake3
+
+# --- Messaging ---
+matrix-nio
+
+# --- Screen capture ---
+# (mss already listed above)
+
+# --- Testing ---
+pytest>=7.8.0
+pytest-aiohttp
+pytest-asyncio

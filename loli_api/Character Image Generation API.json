@@ -1,0 +1,690 @@
+{
+  "info": {
+    "_postman_id": "e91dbcd7-99bb-4adb-920f-da4c737a0556",
+    "name": "Character Image Generation API",
+    "description": "API for generating character images using ComfyUI and xAI Grok-4.\n\nBase URL: http://localhost:8001\n\n**Quick Start:**\n1. Run 'Get Debug Token' first to authenticate\n2. Use any 'Create Character' request to generate images\n3. Run 'Get Job Status' - image displays automatically when ready!\n\n**New Features:**\n- Images display directly in Postman response (Visualize tab)\n- Preview URLs auto-saved for easy access\n- 'View Last Image' request for quick re-viewing",
+    "schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json",
+    "_exporter_id": "50678339",
+    "_collection_link": "https://baochauvu124-3583551.postman.co/workspace/8441d4e7-d4f2-4e78-8278-9dc103b645c2/collection/50678339-e91dbcd7-99bb-4adb-920f-da4c737a0556?action=share&source=collection_link&creator=50678339"
+  },
+  "item": [
+    {
+      "name": "1. Health & Debug",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/health",
+            "description": "Check API health status, queue size, and version. No authentication required."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Debug Token (RUN THIS FIRST)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.token) {",
+                  "    pm.collectionVariables.set('jwt_token', jsonData.token);",
+                  "    console.log('✅ Token saved to collection variable');",
+                  "    console.log('User ID:', jsonData.user_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/debug/token",
+            "description": "Get a test JWT token (DEBUG MODE ONLY). The token is automatically saved to collection variables."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Debug Token (Custom User ID)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.token) {",
+                  "    pm.collectionVariables.set('jwt_token', jsonData.token);",
+                  "    console.log('✅ Token saved for user:', jsonData.user_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/debug/token?user_id=custom_user_123",
+              "host": ["{{base_url}}"],
+              "path": ["debug", "token"],
+              "query": [
+                {
+                  "key": "user_id",
+                  "value": "custom_user_123",
+                  "description": "Custom user ID for the token"
+                }
+              ]
+            },
+            "description": "Get a test JWT token with a custom user ID."
+          },
+          "response": []
+        },
+        {
+          "name": "ComfyUI Status",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/debug/comfyui-status",
+            "description": "Check if ComfyUI server is running and accessible."
+          },
+          "response": []
+        },
+        {
+          "name": "Storage Stats",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/debug/storage-stats",
+            "description": "Get storage statistics and disk usage information (DEBUG MODE ONLY)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Generate Character",
+      "item": [
+        {
+          "name": "Create Character - Asian Nurse (Full Options)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "    console.log('Status:', jsonData.status);",
+                  "    console.log('');",
+                  "    console.log('👉 Next: Run \"Get Job Status\" and check the Visualize tab to see the image!');",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"asian-nurse-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 28,\n    \"hairStyle\": \"ponytail\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Estella\",\n    \"personality\": \"caregiver\",\n    \"relationship\": \"work_colleague\",\n    \"occupation\": \"nurse\",\n    \"kinks\": [\"slow_sensual\", \"cuddling\"],\n    \"voice\": null\n  },\n  \"context\": \"After a long shift, relaxing at home in comfortable clothes\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+            },
+            "url": "{{base_url}}/v1/generate/image",
+            "description": "Asian nurse character with all available options.\n\n**Persona:** Estella, 28yo Asian nurse with caregiver personality\n**Relationship:** Work colleague\n**Kinks:** slow_sensual, cuddling\n**Output:** Reproducible with seed 12345"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Arab Photographer (Full Options)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "    console.log('👉 Next: Run \"Get Job Status\" to see the image!');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"arab-photographer-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"arab\",\n    \"age\": 35,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Layla\",\n    \"personality\": \"confidant\",\n    \"relationship\": \"friend\",\n    \"occupation\": \"photographer\",\n    \"kinks\": [\"roleplay\", \"playful_teasing\", \"dirty_talk\"],\n    \"voice\": null\n  },\n  \"context\": \"Professional photoshoot during golden hour\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+            },
+            "url": "{{base_url}}/v1/generate/image",
+            "description": "Arab photographer character with all available options.\n\n**Persona:** Layla, 35yo Arab photographer with confidant personality\n**Relationship:** Friend\n**Kinks:** roleplay, playful_teasing, dirty_talk\n**Output:** Reproducible with seed 23456"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Latina Dancer (Full Options)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"latina-dancer-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"latina\",\n    \"age\": 30,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"brunette\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Sofia\",\n    \"personality\": \"temptress\",\n    \"relationship\": \"mistress\",\n    \"occupation\": \"dancer\",\n    \"kinks\": [\"playful_teasing\", \"dirty_talk\"],\n    \"voice\": null\n  },\n  \"context\": \"Backstage after a salsa performance\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+            },
+            "url": "{{base_url}}/v1/generate/image",
+            "description": "Latina dancer character with all available options.\n\n**Persona:** Sofia, 30yo curvy Latina dancer with temptress personality\n**Relationship:** Mistress\n**Kinks:** playful_teasing, dirty_talk, hair_pulling\n**Output:** Reproducible with seed 45678"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Caucasian Fitness Coach (Full Options)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"caucasian-fitness-coach-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"caucasian\",\n    \"age\": 26,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"blonde\",\n    \"eyeColor\": \"blue\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Emma\",\n    \"personality\": \"dominant\",\n    \"relationship\": \"boss\",\n    \"occupation\": \"fitness_coach\",\n    \"kinks\": [\"control\", \"obedience\"],\n    \"voice\": null\n  },\n  \"context\": \"At the gym wearing sports bra and leggings\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+            },
+            "url": "{{base_url}}/v1/generate/image",
+            "description": "Caucasian fitness coach character with all available options.\n\n**Persona:** Emma, 26yo athletic blonde fitness coach with dominant personality\n**Relationship:** Boss\n**Kinks:** control, obedience, edging\n**Output:** Reproducible with seed 34567"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Character - Black Model (Full Options)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.jobId) {",
+                  "    pm.collectionVariables.set('last_job_id', jsonData.jobId);",
+                  "    console.log('✅ Job ID saved:', jsonData.jobId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"black-model-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"black_afro\",\n    \"age\": 24,\n    \"hairStyle\": \"bun\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Zara\",\n    \"personality\": \"queen\",\n    \"relationship\": \"girlfriend\",\n    \"occupation\": \"model\",\n    \"kinks\": [\"oral_play\", \"spanking\"],\n    \"voice\": null\n  },\n  \"context\": \"High fashion photoshoot in studio\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+            },
+            "url": "{{base_url}}/v1/generate/image",
+            "description": "Black model character with all available options.\n\n**Persona:** Zara, 24yo athletic Black model with queen personality\n**Relationship:** Girlfriend\n**Kinks:** oral_play, breeding, spanking\n**Output:** Reproducible with seed 56789"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Job Management",
+      "item": [
+        {
+          "name": "Get Job Status (with Image Preview)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "var status = jsonData.status;",
+                  "",
+                  "// Status indicator",
+                  "var statusEmoji = {",
+                  "    'queued': '⏳',",
+                  "    'running': '🔄',",
+                  "    'succeeded': '✅',",
+                  "    'failed': '❌'",
+                  "};",
+                  "",
+                  "console.log(statusEmoji[status] + ' Status: ' + status);",
+                  "",
+                  "if (jsonData.progress) {",
+                  "    console.log('Progress: ' + (jsonData.progress * 100).toFixed(1) + '%');",
+                  "}",
+                  "",
+                  "// When job succeeds, save preview URLs and show visualizer",
+                  "if (status === 'succeeded' && jsonData.results && jsonData.results.length > 0) {",
+                  "    // Save first preview URL for quick access",
+                  "    var firstUrl = jsonData.results[0].previewUrl;",
+                  "    pm.collectionVariables.set('last_preview_url', firstUrl);",
+                  "    ",
+                  "    // Save all URLs",
+                  "    var allUrls = jsonData.results.map(function(r) { return r.previewUrl; });",
+                  "    pm.collectionVariables.set('all_preview_urls', JSON.stringify(allUrls));",
+                  "    ",
+                  "    console.log('');",
+                  "    console.log('🖼️  ' + jsonData.results.length + ' image(s) ready!');",
+                  "    console.log('📌 Preview URL saved to {{last_preview_url}}');",
+                  "    console.log('');",
+                  "    console.log('👉 Click the \"Visualize\" tab below to see the image(s)!');",
+                  "    ",
+                  "    if (jsonData.promptUsed) {",
+                  "        console.log('');",
+                  "        console.log('Prompt: ' + jsonData.promptUsed.substring(0, 100) + '...');",
+                  "    }",
+                  "    if (jsonData.seedUsed) {",
+                  "        console.log('Seed: ' + jsonData.seedUsed);",
+                  "    }",
+                  "    ",
+                  "    // Build HTML for visualizer",
+                  "    var template = `",
+                  "    <style>",
+                  "        .container { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; }",
+                  "        .status { background: #10b981; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block; margin-bottom: 20px; }",
+                  "        .images { display: flex; flex-wrap: wrap; gap: 20px; }",
+                  "        .image-card { background: #f3f4f6; border-radius: 12px; overflow: hidden; max-width: 400px; }",
+                  "        .image-card img { width: 100%; height: auto; display: block; }",
+                  "        .image-info { padding: 12px; font-size: 12px; }",
+                  "        .image-info a { color: #3b82f6; word-break: break-all; }",
+                  "        .meta { margin-top: 20px; padding: 16px; background: #f9fafb; border-radius: 8px; font-size: 13px; }",
+                  "        .meta-row { display: flex; margin-bottom: 8px; }",
+                  "        .meta-label { font-weight: 600; width: 100px; color: #6b7280; }",
+                  "        .prompt { margin-top: 12px; padding: 12px; background: #e5e7eb; border-radius: 6px; font-size: 12px; line-height: 1.5; max-height: 150px; overflow-y: auto; }",
+                  "    </style>",
+                  "    <div class='container'>",
+                  "        <div class='status'>✅ Job Succeeded</div>",
+                  "        <div class='images'>",
+                  "            {{#each results}}",
+                  "            <div class='image-card'>",
+                  "                <img src='{{previewUrl}}' alt='Generated Image {{@index}}' />",
+                  "                <div class='image-info'>",
+                  "                    <strong>Image {{math @index '+' 1}}</strong><br>",
+                  "                    <a href='{{previewUrl}}' target='_blank'>Open in new tab ↗</a>",
+                  "                </div>",
+                  "            </div>",
+                  "            {{/each}}",
+                  "        </div>",
+                  "        <div class='meta'>",
+                  "            <div class='meta-row'><span class='meta-label'>Job ID:</span> {{jobId}}</div>",
+                  "            {{#if seedUsed}}<div class='meta-row'><span class='meta-label'>Seed:</span> {{seedUsed}}</div>{{/if}}",
+                  "            {{#if expiresAt}}<div class='meta-row'><span class='meta-label'>Expires:</span> {{expiresAt}}</div>{{/if}}",
+                  "            {{#if promptUsed}}<div class='prompt'><strong>Prompt:</strong><br>{{promptUsed}}</div>{{/if}}",
+                  "        </div>",
+                  "    </div>",
+                  "    `;",
+                  "    ",
+                  "    // Add helper for math",
+                  "    pm.visualizer.set(template, jsonData);",
+                  "",
+                  "} else if (status === 'failed') {",
+                  "    console.log('');",
+                  "    console.log('Error:', jsonData.error ? jsonData.error.code + ' - ' + jsonData.error.message : 'Unknown error');",
+                  "    ",
+                  "    var errorTemplate = `",
+                  "    <div style='font-family: sans-serif; padding: 20px;'>",
+                  "        <div style='background: #ef4444; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block;'>❌ Job Failed</div>",
+                  "        <div style='margin-top: 20px; padding: 16px; background: #fef2f2; border-radius: 8px; border: 1px solid #fecaca;'>",
+                  "            <strong>Error:</strong> {{error.code}}<br>",
+                  "            <span style='color: #991b1b;'>{{error.message}}</span>",
+                  "        </div>",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(errorTemplate, jsonData);",
+                  "    ",
+                  "} else {",
+                  "    // Still processing",
+                  "    console.log('');",
+                  "    console.log('⏳ Job still processing. Run this request again to check status.');",
+                  "    ",
+                  "    var progressTemplate = `",
+                  "    <div style='font-family: sans-serif; padding: 20px; text-align: center;'>",
+                  "        <div style='font-size: 48px; margin-bottom: 20px;'>{{#if (eq status 'queued')}}⏳{{else}}🔄{{/if}}</div>",
+                  "        <div style='background: #3b82f6; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block;'>{{status}}</div>",
+                  "        {{#if progress}}",
+                  "        <div style='margin-top: 20px;'>",
+                  "            <div style='background: #e5e7eb; border-radius: 10px; height: 20px; overflow: hidden;'>",
+                  "                <div style='background: #3b82f6; height: 100%; width: {{math progress '*' 100}}%;'></div>",
+                  "            </div>",
+                  "            <div style='margin-top: 8px; color: #6b7280;'>{{math progress '*' 100}}% complete</div>",
+                  "        </div>",
+                  "        {{/if}}",
+                  "        <p style='color: #6b7280; margin-top: 20px;'>Run this request again to refresh status</p>",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(progressTemplate, jsonData);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/v1/jobs/{{last_job_id}}",
+            "description": "Poll job status with automatic image preview!\n\n**When job succeeds:**\n- Click the 'Visualize' tab to see the image(s) directly\n- Preview URL is saved to {{last_preview_url}}\n- Click 'Open in new tab' to view full size\n\n**Status progression:** queued → running → succeeded/failed"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Job Status (Manual ID)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/v1/jobs/imgjob_xxxxx",
+            "description": "Replace 'imgjob_xxxxx' with actual job ID."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Job",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{base_url}}/v1/jobs/{{last_job_id}}",
+            "description": "Cancel a queued job. Only works for jobs in 'queued' status. Returns 204 No Content on success."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. View Images",
+      "item": [
+        {
+          "name": "View Last Generated Image",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    console.log('✅ Image loaded successfully!');",
+                  "    console.log('');",
+                  "    console.log('👉 Check the response body or Visualize tab to see the image.');",
+                  "    ",
+                  "    // Display image in visualizer",
+                  "    var template = `",
+                  "    <div style='font-family: sans-serif; padding: 20px;'>",
+                  "        <div style='background: #10b981; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block; margin-bottom: 20px;'>✅ Image Loaded</div>",
+                  "        <div style='background: #f3f4f6; border-radius: 12px; overflow: hidden; display: inline-block;'>",
+                  "            <img src='{{url}}' style='max-width: 100%; max-height: 80vh; display: block;' />",
+                  "        </div>",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(template, { url: pm.collectionVariables.get('last_preview_url') });",
+                  "} else {",
+                  "    console.log('❌ Failed to load image. Status:', pm.response.code);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "var previewUrl = pm.collectionVariables.get('last_preview_url');",
+                  "if (!previewUrl) {",
+                  "    console.log('❌ No preview URL saved. Generate an image first!');",
+                  "    throw new Error('No preview URL available. Run a generate request first.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{last_preview_url}}",
+            "description": "Quickly view the last generated image without copying URLs!\n\nThis uses the automatically saved {{last_preview_url}} from the job status.\n\n**Prerequisites:**\n1. Generate an image\n2. Run 'Get Job Status' until succeeded\n3. Run this request to view the image"
+          },
+          "response": []
+        },
+        {
+          "name": "View Image (Paste URL Here)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var template = `",
+                  "    <div style='font-family: sans-serif; padding: 20px;'>",
+                  "        <img src='{{url}}' style='max-width: 100%; max-height: 80vh;' />",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(template, { url: pm.request.url.toString() });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/preview/PASTE_TOKEN_HERE?path=PASTE_PATH_HERE",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "preview", "PASTE_TOKEN_HERE"],
+              "query": [
+                {
+                  "key": "path",
+                  "value": "PASTE_PATH_HERE"
+                }
+              ]
+            },
+            "description": "Paste a full preview URL here to view any image.\n\nReplace the URL with the previewUrl from job status response."
+          },
+          "response": []
+        },
+        {
+          "name": "Check Image Exists (HEAD)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "HEAD",
+            "header": [],
+            "url": "{{last_preview_url}}",
+            "description": "Check if the last preview image still exists and token is valid (without downloading)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Edit Image",
+      "item": [
+        {
+          "name": "Edit Image - Basic",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.editId) {",
+                  "    pm.collectionVariables.set('last_edit_id', jsonData.editId);",
+                  "    console.log('✅ Edit ID:', jsonData.editId);",
+                  "}",
+                  "if (jsonData.results && jsonData.results.length > 0) {",
+                  "    pm.collectionVariables.set('last_preview_url', jsonData.results[0].previewUrl);",
+                  "    console.log('🖼️  ' + jsonData.results.length + ' image(s) edited!');",
+                  "    console.log('📌 Preview URL saved to {{last_preview_url}}');",
+                  "    ",
+                  "    // Build visualizer",
+                  "    var template = `",
+                  "    <style>",
+                  "        .container { font-family: sans-serif; padding: 20px; }",
+                  "        .status { background: #10b981; color: white; padding: 8px 16px; border-radius: 20px; display: inline-block; margin-bottom: 20px; }",
+                  "        .image-card { background: #f3f4f6; border-radius: 12px; overflow: hidden; display: inline-block; }",
+                  "        .image-card img { max-width: 100%; max-height: 70vh; display: block; }",
+                  "        .info { padding: 12px; }",
+                  "        .info a { color: #3b82f6; }",
+                  "    </style>",
+                  "    <div class='container'>",
+                  "        <div class='status'>✅ Edit Complete</div>",
+                  "        {{#each results}}",
+                  "        <div class='image-card'>",
+                  "            <img src='{{previewUrl}}' />",
+                  "            <div class='info'><a href='{{previewUrl}}' target='_blank'>Open in new tab ↗</a></div>",
+                  "        </div>",
+                  "        {{/each}}",
+                  "    </div>",
+                  "    `;",
+                  "    pm.visualizer.set(template, jsonData);",
+                  "}",
+                  "if (jsonData.expiresAt) {",
+                  "    console.log('Expires at:', jsonData.expiresAt);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "value": "",
+                  "description": "Input image file (PNG, JPEG, WebP)",
+                  "type": "file"
+                }
+              ]
+            },
+            "url": "{{base_url}}/v1/edit/image",
+            "description": "Edit an image using ComfyUI workflow. Select an image file to upload.\n\nSupported formats: PNG, JPEG, JPG, WebP\n\nReturns synchronously with edited image preview URL.\n\n**After running:** Check the Visualize tab to see the result!"
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": {
+      "token": "{{jwt_token}}"
+    }
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://62.107.25.198:37104",
+      "type": "string"
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "last_job_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "last_edit_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "last_preview_url",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "all_preview_urls",
+      "value": "[]",
+      "type": "string"
+    }
+  ]
+}
