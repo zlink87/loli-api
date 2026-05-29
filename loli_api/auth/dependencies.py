@@ -1,12 +1,39 @@
 """
 FastAPI security dependencies for authentication.
+
+Primary auth is a Supabase-issued user JWT (verified with SUPABASE_JWT_SECRET),
+so the frontends send the real signed-in user's token instead of minting one from
+the old /debug/token endpoint. The internal HS256 JWT is kept as a fallback for
+local development / service tokens.
 """
+import logging
 from typing import Dict, Any
+
+import jwt as pyjwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .jwt_handler import JWTHandler
 from config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def _decode_supabase_token(token: str) -> Dict[str, Any]:
+    """Verify a Supabase-issued JWT. Raises ValueError on failure."""
+    if not settings.SUPABASE_JWT_SECRET:
+        raise ValueError("Supabase JWT verification not configured")
+    try:
+        return pyjwt.decode(
+            token,
+            settings.SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            audience=settings.SUPABASE_JWT_AUDIENCE or None,
+        )
+    except pyjwt.ExpiredSignatureError:
+        raise ValueError("Token has expired")
+    except pyjwt.InvalidTokenError as e:
+        raise ValueError(f"Invalid token: {e}")
 
 # Security scheme for Swagger UI
 security = HTTPBearer(
@@ -49,6 +76,13 @@ async def get_current_user(
     """
     token = credentials.credentials
 
+    # Prefer Supabase token verification when configured; fall back to internal JWT.
+    if settings.SUPABASE_JWT_SECRET:
+        try:
+            return _decode_supabase_token(token)
+        except ValueError:
+            pass  # fall through to internal handler (legacy/service tokens)
+
     try:
         payload = jwt_handler.decode_token(token)
         return payload
@@ -74,6 +108,12 @@ async def get_optional_user(
     """
     if credentials is None:
         return None
+
+    if settings.SUPABASE_JWT_SECRET:
+        try:
+            return _decode_supabase_token(credentials.credentials)
+        except ValueError:
+            pass
 
     try:
         return jwt_handler.decode_token(credentials.credentials)

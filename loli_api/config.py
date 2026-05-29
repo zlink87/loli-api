@@ -20,13 +20,31 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60
 
-    # ComfyUI
+    # ComfyUI (workflow templates are still loaded locally and sent to RunPod;
+    # COMFYUI_SERVER_ADDRESS is only used for the optional local-dev fallback.)
     COMFYUI_SERVER_ADDRESS: str = "127.0.0.1:8188"
     COMFYUI_WORKFLOW_PATH: str = "workflows/amazing-z-photo_API_Create_CHAR.json"
     COMFYUI_EDIT_WORKFLOW_PATH: str = "workflows/edit.json"
     COMFYUI_OUTFIT_WORKFLOW_PATH: str = "workflows/test_final_API.json"
     COMFYUI_POSE_WORKFLOW_PATH: str = "workflows/edit_pose_action.json"
     COMFYUI_INPUT_DIR: str = "../ComfyUI/input"
+
+    # GPU execution backend: "runpod" (serverless) or "local" (legacy WebSocket)
+    GPU_BACKEND: str = "runpod"
+
+    # RunPod Serverless
+    RUNPOD_API_KEY: str = ""
+    RUNPOD_ENDPOINT_ID: str = ""
+    RUNPOD_BASE_URL: str = "https://api.runpod.ai/v2"
+    RUNPOD_EXECUTION_TIMEOUT_MS: int = 600_000   # policy.executionTimeout (per-job cap)
+    RUNPOD_TTL_MS: int = 3_600_000               # policy.ttl (total job lifespan)
+    RUNPOD_WEBHOOK_SECRET: str = ""              # shared secret validating inbound webhooks
+    RUNPOD_POLL_INTERVAL_SECONDS: int = 5        # reconciler poll cadence
+    RUNPOD_RECONCILE_AFTER_SECONDS: int = 30     # start polling if no webhook by then
+    RUNPOD_MAX_IN_FLIGHT: int = 50               # bound concurrent submissions
+    # How the worker receives the source image for edits: "url" (worker fetches the
+    # Supabase URL) or "base64" (FastAPI streams bytes into input.images[]).
+    RUNPOD_SOURCE_IMAGE_MODE: str = "url"
 
     # Image Cache (for outfit edit)
     IMAGE_CACHE_TTL_SECONDS: int = 1800  # 30 minutes
@@ -60,6 +78,39 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_ROLE_KEY: str = ""
     SUPABASE_BUCKET_NAME: str = "images_generated"
     SUPABASE_UPDATE_BASE_URL_API_KEY: str = ""
+
+    # Supabase Auth (verify user JWTs issued by Supabase, instead of /debug/token)
+    # Symmetric JWT secret from the Supabase project (Settings → API → JWT secret).
+    SUPABASE_JWT_SECRET: str = ""
+    SUPABASE_JWT_AUDIENCE: str = "authenticated"
+
+    # Supabase Storage S3-compatible endpoint (used by the RunPod worker to upload
+    # output images directly). Mirror these onto the RunPod endpoint env vars.
+    SUPABASE_S3_ENDPOINT: str = ""               # https://{project}.supabase.co/storage/v1/s3
+    SUPABASE_S3_REGION: str = "us-east-1"
+    SUPABASE_S3_ACCESS_KEY_ID: str = ""
+    SUPABASE_S3_SECRET_ACCESS_KEY: str = ""
+
+    # Job persistence (durable job state in a Supabase table; falls back to
+    # in-memory only when disabled). Survives FastAPI restarts so late webhooks finalize.
+    JOB_PERSISTENCE_ENABLED: bool = False
+    JOB_TABLE_NAME: str = "image_jobs"
+
+    # Security
+    # Comma-separated allowlist of CORS origins (admin panel + website). Empty -> deny cross-origin.
+    CORS_ALLOW_ORIGINS: str = ""
+    # Comma-separated allowlist of hosts permitted as source_image (e.g. the Supabase domain).
+    SOURCE_IMAGE_ALLOWED_HOSTS: str = ""
+
+    @property
+    def cors_allow_origins_list(self) -> list[str]:
+        """Parsed CORS origin allowlist."""
+        return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def source_image_allowed_hosts_list(self) -> list[str]:
+        """Parsed source_image host allowlist (lowercased)."""
+        return [h.strip().lower() for h in self.SOURCE_IMAGE_ALLOWED_HOSTS.split(",") if h.strip()]
 
     class Config:
         env_file = ".env"

@@ -31,6 +31,10 @@ class Job:
     preview_url: Optional[str] = None
     preview_expires_at: Optional[datetime] = None
     image_hash: Optional[str] = None
+    # RunPod serverless tracking
+    runpod_id: Optional[str] = None
+    runpod_status: Optional[str] = None
+    submitted_at: Optional[datetime] = None
     # Timestamps for job lifecycle
     prompt_generated_at: Optional[datetime] = None
     image_generated_at: Optional[datetime] = None
@@ -58,8 +62,31 @@ class JobManager:
         self.background_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self.pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self.jobs: Dict[str, Job] = {}
+        # Maps RunPod job id -> local job id, so a webhook/reconciler can map back.
+        self.runpod_index: Dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._max_queue_size = max_queue_size
+        # Optional RunPod client, attached at startup, used to cancel in-flight jobs.
+        self._runpod_client = None
+
+    def attach_runpod_client(self, runpod_client) -> None:
+        """Attach the RunPod client so cancel_job can stop in-flight RunPod jobs."""
+        self._runpod_client = runpod_client
+
+    async def set_runpod_id(self, job_id: str, runpod_id: str) -> None:
+        """Associate a RunPod job id with a local job."""
+        async with self._lock:
+            job = self.jobs.get(job_id)
+            if job:
+                job.runpod_id = runpod_id
+                job.submitted_at = datetime.utcnow()
+                self.runpod_index[runpod_id] = job_id
+
+    async def get_job_by_runpod_id(self, runpod_id: str) -> Optional[Job]:
+        """Look up a local job by its RunPod job id (used by the webhook)."""
+        async with self._lock:
+            job_id = self.runpod_index.get(runpod_id)
+            return self.jobs.get(job_id) if job_id else None
 
     async def create_job(
         self,
@@ -373,7 +400,11 @@ class JobManager:
 
     async def cancel_job(self, job_id: str, user_id: str) -> bool:
         """
-        Cancel a queued job.
+        Cancel a queued or in-flight job.
+
+        Queued jobs are simply marked cancelled. Running jobs that were already
+        submitted to RunPod are cancelled on RunPod first (best effort), then marked
+        cancelled locally. Succeeded/failed jobs cannot be cancelled.
 
         Args:
             job_id: The job identifier
@@ -386,8 +417,15 @@ class JobManager:
         if not job:
             return False
 
-        if job.status != JobStatus.QUEUED:
-            return False  # Can only cancel queued jobs
+        if job.status in (JobStatus.SUCCEEDED, JobStatus.FAILED):
+            return False  # terminal jobs cannot be cancelled
+
+        # If it's already running on RunPod, ask RunPod to stop it.
+        if job.runpod_id and self._runpod_client is not None:
+            try:
+                await self._runpod_client.cancel(job.runpod_id)
+            except Exception:  # noqa: BLE001 - cancellation is best-effort
+                pass
 
         await self.update_job_status(
             job_id,

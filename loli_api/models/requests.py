@@ -5,6 +5,8 @@ Based on BE-AI-Tasks.docx PersonaOptions specification.
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
 
+from services.url_guard import validate_source_image, SourceImageError
+
 from .enums import (
     StyleType,
     EthnicityType,
@@ -249,6 +251,14 @@ class OutfitEditRequest(BaseModel):
         description="Random seed for reproducibility"
     )
 
+    @field_validator("source_image")
+    @classmethod
+    def validate_source_image_url(cls, v):
+        try:
+            return validate_source_image(v)
+        except SourceImageError as e:
+            raise ValueError(str(e))
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -278,6 +288,14 @@ class PoseEditRequest(BaseModel):
         le=1000000000,
         description="Random seed for reproducibility"
     )
+
+    @field_validator("source_image")
+    @classmethod
+    def validate_source_image_url(cls, v):
+        try:
+            return validate_source_image(v)
+        except SourceImageError as e:
+            raise ValueError(str(e))
 
     class Config:
         json_schema_extra = {
@@ -312,6 +330,14 @@ class BackgroundEditRequest(BaseModel):
         le=1000000000,
         description="Random seed for reproducibility"
     )
+
+    @field_validator("source_image")
+    @classmethod
+    def validate_source_image_url(cls, v):
+        try:
+            return validate_source_image(v)
+        except SourceImageError as e:
+            raise ValueError(str(e))
 
     class Config:
         json_schema_extra = {
@@ -374,6 +400,14 @@ class PipelineEditRequest(BaseModel):
         default=None,
         description="Override default pipeline order. Must contain only 'pose', 'outfit', 'background'."
     )
+
+    @field_validator("source_image")
+    @classmethod
+    def validate_source_image_url(cls, v):
+        try:
+            return validate_source_image(v)
+        except SourceImageError as e:
+            raise ValueError(str(e))
 
     @field_validator("pipeline_order")
     @classmethod

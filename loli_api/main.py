@@ -25,6 +25,7 @@ from config import settings
 from api.v1.router import api_router, configure_services
 from services.job_manager import JobManager
 from services.comfyui_client import ComfyUIClient
+from services.runpod_client import RunPodServerlessClient
 from services.prompt_generator import PromptGenerator
 from services.storage_service import StorageService
 from services.notification_service import NotificationService
@@ -66,6 +67,16 @@ job_manager = JobManager(max_queue_size=settings.MAX_QUEUE_SIZE)
 comfyui_client = ComfyUIClient(
     server_address=settings.COMFYUI_SERVER_ADDRESS
 )
+
+# RunPod Serverless client — GPU work runs on RunPod, not a local ComfyUI.
+runpod_client = RunPodServerlessClient(
+    api_key=settings.RUNPOD_API_KEY,
+    endpoint_id=settings.RUNPOD_ENDPOINT_ID,
+    base_url=settings.RUNPOD_BASE_URL,
+    default_execution_timeout_ms=settings.RUNPOD_EXECUTION_TIMEOUT_MS,
+    default_ttl_ms=settings.RUNPOD_TTL_MS,
+)
+job_manager.attach_runpod_client(runpod_client)
 
 prompt_generator = PromptGenerator(
     api_key=settings.XAI_API_KEY,
@@ -118,7 +129,8 @@ background_worker = BackgroundWorker(
     storage_service=storage_service,
     workflow_path=settings.COMFYUI_WORKFLOW_PATH,
     notification_service=notification_service,
-    supabase_storage_service=supabase_storage_service
+    supabase_storage_service=supabase_storage_service,
+    runpod_client=runpod_client
 )
 
 cleanup_worker = CleanupWorker(
@@ -133,7 +145,8 @@ outfit_worker = OutfitBackgroundWorker(
     workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
-    supabase_storage_service=supabase_storage_service
+    supabase_storage_service=supabase_storage_service,
+    runpod_client=runpod_client
 )
 
 pose_worker = PoseBackgroundWorker(
@@ -143,7 +156,8 @@ pose_worker = PoseBackgroundWorker(
     workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
-    supabase_storage_service=supabase_storage_service
+    supabase_storage_service=supabase_storage_service,
+    runpod_client=runpod_client
 )
 
 background_edit_worker = BackgroundEditWorker(
@@ -153,7 +167,8 @@ background_edit_worker = BackgroundEditWorker(
     workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,  # Same template as outfit
     image_cache_service=image_cache_service,
     notification_service=notification_service,
-    supabase_storage_service=supabase_storage_service
+    supabase_storage_service=supabase_storage_service,
+    runpod_client=runpod_client
 )
 
 pipeline_worker = PipelineBackgroundWorker(
@@ -164,8 +179,42 @@ pipeline_worker = PipelineBackgroundWorker(
     outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
-    supabase_storage_service=supabase_storage_service
+    supabase_storage_service=supabase_storage_service,
+    runpod_client=runpod_client
 )
+
+
+def _validate_production_settings() -> None:
+    """
+    Fail fast in production (DEBUG=false) if security-critical settings are missing
+    or left at their insecure defaults. Prevents shipping weak secrets or an
+    unconfigured GPU backend.
+    """
+    if settings.DEBUG:
+        return  # development mode — allow defaults
+
+    problems = []
+    if settings.JWT_SECRET_KEY in ("", "change-this-secret-key-in-production"):
+        problems.append("JWT_SECRET_KEY is unset or default")
+    if settings.STORAGE_SIGNING_SECRET in ("", "change-this-signing-secret-in-production"):
+        problems.append("STORAGE_SIGNING_SECRET is unset or default")
+    if not settings.SUPABASE_JWT_SECRET:
+        problems.append("SUPABASE_JWT_SECRET is required for user authentication")
+    if settings.GPU_BACKEND == "runpod":
+        if not settings.RUNPOD_API_KEY:
+            problems.append("RUNPOD_API_KEY is required")
+        if not settings.RUNPOD_ENDPOINT_ID:
+            problems.append("RUNPOD_ENDPOINT_ID is required")
+    if not settings.cors_allow_origins_list:
+        problems.append("CORS_ALLOW_ORIGINS is empty (no frontend will be able to call the API)")
+    if not settings.source_image_allowed_hosts_list:
+        problems.append("SOURCE_IMAGE_ALLOWED_HOSTS is empty (SSRF allowlist disabled)")
+
+    if problems:
+        raise RuntimeError(
+            "Refusing to start in production with insecure/missing settings:\n  - "
+            + "\n  - ".join(problems)
+        )
 
 
 @asynccontextmanager
@@ -177,6 +226,7 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
     logger.info("Character Image Generation API Starting...")
     logger.info("=" * 50)
+    _validate_production_settings()
     logger.info(f"ComfyUI Server: {settings.COMFYUI_SERVER_ADDRESS}")
     logger.info(f"Storage Dir: {settings.STORAGE_DIR}")
     logger.info(f"Supabase Storage: {'Enabled' if settings.USE_SUPABASE_STORAGE else 'Disabled'}")
@@ -196,7 +246,8 @@ async def lifespan(app: FastAPI):
         settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
         settings.COMFYUI_POSE_WORKFLOW_PATH,
         image_cache_service,
-        supabase_storage_service
+        supabase_storage_service,
+        runpod_client
     )
 
     # Sync BASE_URL to Supabase so external services know our tunnel URL
@@ -274,10 +325,18 @@ Pass token as `Authorization: Bearer <token>` header.
     openapi_url="/openapi.json",
 )
 
-# CORS middleware
+# CORS middleware — restrict to the configured allowlist (admin panel + website).
+# A wildcard origin combined with credentials is invalid/insecure, so when no
+# allowlist is set we fall back to no cross-origin access (deny) rather than "*".
+_cors_origins = settings.cors_allow_origins_list
+if not _cors_origins:
+    logger.warning(
+        "CORS_ALLOW_ORIGINS is empty — cross-origin browser requests will be blocked. "
+        "Set it to the admin panel + website origins in production."
+    )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

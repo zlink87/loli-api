@@ -4,7 +4,7 @@ Chains pose, outfit, and background steps in configurable order,
 passing the output of each step as input to the next.
 """
 import asyncio
-import copy
+import base64
 import json
 import random
 import traceback
@@ -18,6 +18,8 @@ import requests as http_requests
 
 from services.job_manager import JobManager, Job
 from services.comfyui_client import ComfyUIClient
+from services.runpod_client import RunPodServerlessClient
+from services import runpod_runner
 from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
 from services.notification_service import NotificationService
@@ -31,17 +33,8 @@ from api.v1.endpoints.background import build_background_prompt, prepare_backgro
 
 logger = logging.getLogger(__name__)
 
-# OOM retry settings
-MAX_OOM_ATTEMPTS = 3
-OOM_RETRY_DELAY = 2  # seconds
-
 # Default order in which pipeline steps execute
 DEFAULT_PIPELINE_ORDER = ["pose", "outfit", "background"]
-
-# Output node IDs for each step's workflow
-POSE_OUTPUT_NODES = ["164", "8", "6"]
-OUTFIT_OUTPUT_NODES = ["116"]
-BACKGROUND_OUTPUT_NODES = ["116"]
 
 
 def _is_oom_error(error_msg: str) -> bool:
@@ -60,24 +53,11 @@ def _download_image(url: str, timeout: int = 30) -> bytes:
         raise RuntimeError(f"Failed to download source image: {e}")
 
 
-def _extract_output_images(output_images: dict, node_ids: List[str]) -> bytes:
-    """
-    Extract the first output image from workflow results,
-    checking the given node IDs in order.
-
-    Returns:
-        Raw image bytes
-    """
-    images = None
-    for node_id in node_ids:
-        if isinstance(output_images, dict) and node_id in output_images:
-            images = output_images[node_id]
-            break
-    if not images:
-        images = next(iter(output_images.values()), []) if output_images else []
-    if not images:
-        raise RuntimeError("No images returned from workflow")
-    return images[0]
+def _stage_image(image_bytes: bytes, prefix: str) -> tuple:
+    """Encode bytes as a RunPod input.images[] entry. Returns (name, images_list)."""
+    name = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    return name, [{"name": name, "image": f"data:image/png;base64,{b64}"}]
 
 
 class PipelineBackgroundWorker:
@@ -108,9 +88,11 @@ class PipelineBackgroundWorker:
         image_cache_service: Optional[ImageCacheService] = None,
         notification_service: Optional[NotificationService] = None,
         supabase_storage_service: Optional[SupabaseStorageService] = None,
+        runpod_client: Optional[RunPodServerlessClient] = None,
     ):
         self.job_manager = job_manager
         self.comfyui_client = comfyui_client
+        self.runpod_client = runpod_client
         self.storage = storage_service
         self.supabase_storage = supabase_storage_service
         self.pose_workflow_path = pose_workflow_path
@@ -206,108 +188,53 @@ class PipelineBackgroundWorker:
 
         return [step for step in order if step_enabled.get(step, False)]
 
-    async def _upload_image_to_comfyui(
-        self, comfyui: ComfyUIClient, image_bytes: bytes, prefix: str
-    ) -> str:
-        """Upload image bytes to ComfyUI and return the filename."""
-        upload_filename = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
-
-        def _upload():
-            comfyui.connect()
-            result = comfyui.upload_image_bytes(
-                upload_filename, image_bytes, content_type="image/png"
+    def _build_step_workflow(self, step_name: str, request, source_name: str, seed: int, job_id: str) -> dict:
+        """Build the ComfyUI workflow for a pipeline step, with source_name as input."""
+        if step_name == "pose":
+            reference_image = get_pose_reference(request.pose)
+            logger.info(f"[PIPELINE] {job_id} | pose | Reference: {reference_image}")
+            return prepare_pose_workflow(
+                self._pose_template, source_name, reference_image, seed=seed
             )
-            comfyui.disconnect()
-            return result
+        if step_name == "outfit":
+            prompt = build_prompt(request.outfit, request.accessories, request.nudityLevel)
+            logger.info(f"[PIPELINE] {job_id} | outfit | Prompt: {prompt[:80]}...")
+            return prepare_outfit_workflow(
+                self._outfit_template, source_name, prompt, seed=seed
+            )
+        if step_name == "background":
+            prompt = build_background_prompt(request.prompt)
+            logger.info(f"[PIPELINE] {job_id} | background | Prompt: {prompt[:80]}...")
+            return prepare_background_workflow(
+                self._outfit_template, source_name, prompt, seed=seed,
+                negative_prompt=request.negativePrompt,
+            )
+        raise RuntimeError(f"Unknown pipeline step: {step_name}")
 
-        return await asyncio.to_thread(_upload)
-
-    async def _execute_workflow_with_retry(
-        self, comfyui: ComfyUIClient, workflow: dict, job_id: str, step_name: str
-    ) -> dict:
-        """Execute a ComfyUI workflow with OOM retry logic."""
-        output_images = None
-        for attempt in range(1, MAX_OOM_ATTEMPTS + 1):
-            try:
-                def _execute():
-                    comfyui.connect()
-                    result = comfyui.execute_workflow(workflow)
-                    comfyui.disconnect()
-                    return result
-
-                logger.info(
-                    f"[PIPELINE] {job_id} | {step_name} | "
-                    f"Executing workflow (attempt {attempt}/{MAX_OOM_ATTEMPTS})..."
-                )
-                output_images = await asyncio.to_thread(_execute)
-                return output_images
-            except Exception as e:
-                error_msg = str(e)
-                if attempt < MAX_OOM_ATTEMPTS and _is_oom_error(error_msg):
-                    logger.warning(
-                        f"[PIPELINE] {job_id} | {step_name} | OOM on attempt {attempt}, "
-                        f"retrying in {OOM_RETRY_DELAY}s..."
-                    )
-                    await asyncio.sleep(OOM_RETRY_DELAY)
-                    continue
-                raise RuntimeError(f"{step_name} workflow execution failed: {e}")
-
-    async def _run_pose_step(
-        self, comfyui: ComfyUIClient, request, comfyui_filename: str, seed: int, job_id: str
-    ) -> bytes:
-        """Run the pose editing step. Returns output image bytes."""
-        reference_image = get_pose_reference(request.pose)
-        logger.info(f"[PIPELINE] {job_id} | pose | Reference: {reference_image}")
-
-        workflow = prepare_pose_workflow(
-            self._pose_template, comfyui_filename, reference_image, seed=seed
-        )
-
-        output_images = await self._execute_workflow_with_retry(
-            comfyui, workflow, job_id, "pose"
-        )
-        return _extract_output_images(output_images, POSE_OUTPUT_NODES)
-
-    async def _run_outfit_step(
-        self, comfyui: ComfyUIClient, request, comfyui_filename: str, seed: int, job_id: str
-    ) -> bytes:
-        """Run the outfit editing step. Returns output image bytes."""
-        prompt = build_prompt(request.outfit, request.accessories, request.nudityLevel)
-        logger.info(f"[PIPELINE] {job_id} | outfit | Prompt: {prompt[:80]}...")
-
-        workflow = prepare_outfit_workflow(
-            self._outfit_template, comfyui_filename, prompt, seed=seed
-        )
-
-        output_images = await self._execute_workflow_with_retry(
-            comfyui, workflow, job_id, "outfit"
-        )
-        return _extract_output_images(output_images, OUTFIT_OUTPUT_NODES)
-
-    async def _run_background_step(
-        self, comfyui: ComfyUIClient, request, comfyui_filename: str, seed: int, job_id: str,
+    async def _run_step(
+        self, step_name: str, request, source_bytes: bytes, seed: int, job_id: str,
+        progress_start: float, progress_end: float,
     ) -> bytes:
         """
-        Run the background/scene editing step. Returns output image bytes.
-
-        Uses the same workflow template as outfit, but overrides SAM3 text
-        prompts to target background/scene and uses a scene-oriented prompt.
+        Run one pipeline step on RunPod with source_bytes as the input image.
+        Returns the output image bytes (downloading the worker's S3 URL if needed).
         """
-        prompt = build_background_prompt(request.prompt)
-        logger.info(f"[PIPELINE] {job_id} | background | Prompt: {prompt[:80]}...")
+        source_name, images = _stage_image(source_bytes, f"pipe_{step_name}")
+        workflow = self._build_step_workflow(step_name, request, source_name, seed, job_id)
 
-        workflow = prepare_background_workflow(
-            self._outfit_template,
-            comfyui_filename,
-            prompt,
-            seed=seed,
-            negative_prompt=request.negativePrompt,
+        outputs = await runpod_runner.run_workflow(
+            self.runpod_client, self.job_manager, job_id, workflow,
+            images=images, progress_start=progress_start, progress_end=progress_end,
         )
-
-        output_images = await self._execute_workflow_with_retry(
-            comfyui, workflow, job_id, "background"
-        )
-        return _extract_output_images(output_images, BACKGROUND_OUTPUT_NODES)
+        if not outputs:
+            raise RuntimeError(f"No images returned from {step_name} step")
+        first = outputs[0]
+        if first.get("url"):
+            return await asyncio.to_thread(_download_image, first["url"])
+        data = first.get("data")
+        if not data:
+            raise RuntimeError(f"No image data from {step_name} step")
+        return base64.b64decode(data)
 
     async def _process_job(self, job: Job) -> None:
         """
@@ -332,60 +259,14 @@ class PipelineBackgroundWorker:
             )
             logger.info(f"[PIPELINE] {job.job_id} | Status: RUNNING | User: {job.user_id}")
 
-            # Step 2: Download / cache source image
-            comfyui = ComfyUIClient(server_address=self.comfyui_client.server_address)
-            comfyui_filename = None
-            image_bytes = None  # Track source image bytes for dimension extraction
-
-            if self.image_cache:
-                cached = self.image_cache.get(request.source_image)
-                if cached:
-                    comfyui_filename = cached.comfyui_filename
-                    logger.info(f"[PIPELINE] {job.job_id} | Cache hit: {comfyui_filename}")
-
-            await self.job_manager.update_job_status(
-                job.job_id, JobStatus.RUNNING, progress=0.05
+            # Step 2: Download the source image (bytes are chained between steps)
+            logger.info(f"[PIPELINE] {job.job_id} | Downloading source image...")
+            current_bytes = await asyncio.to_thread(
+                _download_image, request.source_image
             )
-
-            if not comfyui_filename:
-                logger.info(f"[PIPELINE] {job.job_id} | Cache miss, downloading...")
-                image_bytes = await asyncio.to_thread(
-                    _download_image, request.source_image
-                )
-                logger.info(
-                    f"[PIPELINE] {job.job_id} | Downloaded {len(image_bytes)} bytes"
-                )
-
-                # Determine content type from URL
-                content_type = "image/png"
-                src_lower = request.source_image.lower()
-                if src_lower.endswith(".jpg") or src_lower.endswith(".jpeg"):
-                    content_type = "image/jpeg"
-                elif src_lower.endswith(".webp"):
-                    content_type = "image/webp"
-
-                ext = content_type.split("/")[-1]
-                if ext == "jpeg":
-                    ext = "jpg"
-                upload_filename = f"pipeline_{uuid.uuid4().hex[:12]}.{ext}"
-
-                def _upload_to_comfyui():
-                    comfyui.connect()
-                    result = comfyui.upload_image_bytes(
-                        upload_filename, image_bytes, content_type=content_type
-                    )
-                    comfyui.disconnect()
-                    return result
-
-                try:
-                    comfyui_filename = await asyncio.to_thread(_upload_to_comfyui)
-                    logger.info(
-                        f"[PIPELINE] {job.job_id} | Uploaded as {comfyui_filename}"
-                    )
-                    if self.image_cache:
-                        self.image_cache.put(request.source_image, comfyui_filename)
-                except Exception as e:
-                    raise RuntimeError(f"Failed to upload image to ComfyUI: {e}")
+            logger.info(
+                f"[PIPELINE] {job.job_id} | Downloaded {len(current_bytes)} bytes"
+            )
 
             await self.job_manager.update_job_status(
                 job.job_id, JobStatus.RUNNING, progress=0.1
@@ -407,49 +288,31 @@ class PipelineBackgroundWorker:
                 job.job_id, JobStatus.RUNNING, progress=0.15, seed_used=seed
             )
 
-            # Step 4: Execute each step, chaining outputs
-            step_runners = {
-                "pose": self._run_pose_step,
-                "outfit": self._run_outfit_step,
-                "background": self._run_background_step,
-            }
-
+            # Step 4: Execute each step on RunPod, chaining output bytes to next input
             num_steps = len(active_steps)
             # Progress range: 0.15 to 0.85 divided among steps
             progress_per_step = 0.70 / num_steps if num_steps > 0 else 0.70
-            current_comfyui_filename = comfyui_filename
             image_start = datetime.utcnow()
 
             for i, step_name in enumerate(active_steps):
                 step_progress_start = 0.15 + (i * progress_per_step)
-
-                await self.job_manager.update_job_status(
-                    job.job_id, JobStatus.RUNNING, progress=step_progress_start
-                )
+                step_progress_end = 0.15 + ((i + 1) * progress_per_step)
 
                 logger.info(
                     f"[PIPELINE] {job.job_id} | Step {i+1}/{num_steps}: {step_name}"
                 )
 
-                runner = step_runners[step_name]
-                output_bytes = await runner(
-                    comfyui, request, current_comfyui_filename, seed, job.job_id
+                current_bytes = await self._run_step(
+                    step_name, request, current_bytes, seed, job.job_id,
+                    progress_start=step_progress_start, progress_end=step_progress_end,
                 )
 
                 logger.info(
                     f"[PIPELINE] {job.job_id} | {step_name} complete, "
-                    f"output: {len(output_bytes)} bytes"
+                    f"output: {len(current_bytes)} bytes"
                 )
 
-                # If there are more steps, re-upload output as input for next step
-                if i < num_steps - 1:
-                    current_comfyui_filename = await self._upload_image_to_comfyui(
-                        comfyui, output_bytes, f"pipe_{step_name}"
-                    )
-                    logger.info(
-                        f"[PIPELINE] {job.job_id} | Re-uploaded as {current_comfyui_filename}"
-                    )
-
+            output_bytes = current_bytes
             image_duration = (datetime.utcnow() - image_start).total_seconds()
             logger.info(
                 f"[PIPELINE] {job.job_id} | All steps done in {image_duration:.2f}s"

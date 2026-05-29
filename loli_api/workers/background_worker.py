@@ -3,6 +3,7 @@ Background worker for processing image generation jobs.
 Based on queue_worker pattern from app.py lines 1915-2075.
 """
 import asyncio
+import base64
 import json
 import random
 import traceback
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from services.job_manager import JobManager, Job
 from services.comfyui_client import ComfyUIClient
+from services.runpod_client import RunPodServerlessClient
+from services import runpod_runner
 from services.prompt_generator import PromptGenerator
 from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
@@ -20,10 +23,6 @@ from services.notification_service import NotificationService
 from models.enums import JobStatus
 
 logger = logging.getLogger(__name__)
-
-# OOM retry settings
-MAX_OOM_ATTEMPTS = 2
-OOM_RETRY_DELAY = 20  # seconds
 
 
 def _is_oom_error(error_msg: str) -> bool:
@@ -54,7 +53,8 @@ class BackgroundWorker:
         storage_service: StorageService,
         workflow_path: str,
         notification_service: Optional[NotificationService] = None,
-        supabase_storage_service: Optional[SupabaseStorageService] = None
+        supabase_storage_service: Optional[SupabaseStorageService] = None,
+        runpod_client: Optional[RunPodServerlessClient] = None
     ):
         """
         Initialize background worker.
@@ -70,6 +70,7 @@ class BackgroundWorker:
         """
         self.job_manager = job_manager
         self.comfyui = comfyui_client
+        self.runpod_client = runpod_client
         self.prompt_gen = prompt_generator
         self.storage = storage_service
         self.supabase_storage = supabase_storage_service
@@ -198,24 +199,24 @@ class BackgroundWorker:
                 progress=0.1
             )
 
-            # Token usage info (will be populated if xAI Grok is used)
+            # Token usage info (will be populated if xAI Grok polishing is used)
             token_usage = None
+            negative_prompt = None
 
-            if is_enhance:
-                # Use xAI Grok to enhance the prompt
-                try:
-                    character_prompt, token_usage = await self.prompt_gen.generate_prompt(
+            # Deterministic assembly from persona enums + admin free-text. When
+            # is_enhance is True, Grok polishes the draft but cannot change the
+            # locked identity attributes; otherwise the deterministic prompt is used.
+            try:
+                character_prompt, negative_prompt, _locked, token_usage = (
+                    await self.prompt_gen.generate_generation_prompt(
                         persona=job.request.persona,
-                        context=context
+                        context=context,
+                        is_enhance=is_enhance,
                     )
-                except Exception as e:
-                    logger.error(f"[PROMPT] {job.job_id} | ERROR: {e}")
-                    raise RuntimeError(f"Prompt generation failed: {e}")
-            else:
-                # Skip enhancement - use context directly
-                if not context:
-                    raise RuntimeError("Context is required when isEnhance=False")
-                character_prompt = context
+                )
+            except Exception as e:
+                logger.error(f"[PROMPT] {job.job_id} | ERROR: {e}")
+                raise RuntimeError(f"Prompt generation failed: {e}")
 
             prompt_end = datetime.utcnow()
             prompt_duration = (prompt_end - prompt_start).total_seconds()
@@ -261,7 +262,8 @@ class BackgroundWorker:
                 filename_prefix=f"CHAR_{job.job_id[:8]}",
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
-                batch_size=batch_size
+                batch_size=batch_size,
+                negative_prompt=negative_prompt
             )
 
             logger.info(f"[WORKFLOW] {job.job_id} | Seed: {seed}")
@@ -278,29 +280,17 @@ class BackgroundWorker:
             logger.info(f"[IMAGE] {job.job_id} | START: {image_start.strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info(f"[IMAGE] {job.job_id} | PROMPT: \"{character_prompt}...\"" if len(character_prompt) > 100 else f"[IMAGE] {job.job_id} | PROMPT: \"{character_prompt}\"")
 
-            images = None
-            for attempt in range(1, MAX_OOM_ATTEMPTS + 1):
-                try:
-                    def _execute_workflow():
-                        self.comfyui.connect()
-                        result = self.comfyui.execute_workflow(workflow)
-                        self.comfyui.disconnect()
-                        return result
-
-                    logger.info(f"[IMAGE] {job.job_id} | Executing workflow (attempt {attempt}/{MAX_OOM_ATTEMPTS})...")
-                    images = await asyncio.to_thread(_execute_workflow)
-                    break  # Success
-                except Exception as e:
-                    error_msg = str(e)
-                    if attempt < MAX_OOM_ATTEMPTS and _is_oom_error(error_msg):
-                        logger.warning(
-                            f"[IMAGE] {job.job_id} | OOM on attempt {attempt}, "
-                            f"retrying in {OOM_RETRY_DELAY}s..."
-                        )
-                        await asyncio.sleep(OOM_RETRY_DELAY)
-                        continue
-                    logger.error(f"[IMAGE] {job.job_id} | ERROR: {e}")
-                    raise RuntimeError(f"Image generation failed: {e}")
+            try:
+                outputs = await runpod_runner.run_workflow(
+                    self.runpod_client,
+                    self.job_manager,
+                    job.job_id,
+                    workflow,
+                    images=None,
+                )
+            except Exception as e:
+                logger.error(f"[IMAGE] {job.job_id} | ERROR: {e}")
+                raise RuntimeError(f"Image generation failed: {e}")
 
             image_end = datetime.utcnow()
             image_duration = (image_end - image_start).total_seconds()
@@ -314,44 +304,45 @@ class BackgroundWorker:
                 image_generated_at=image_generated_at
             )
 
-            # Step 5: Save output image
-            if not images:
+            # Step 5: Resolve output image
+            if not outputs:
                 raise RuntimeError("No images generated from workflow")
-
-            # Get first output image from any node
-            image_data = None
-            for node_id, node_images in images.items():
-                if node_images:
-                    image_data = node_images[0]
-                    break
-
-            if not image_data:
-                raise RuntimeError("No image data in workflow output")
+            first = outputs[0]
 
             # Use request.id from payload as the image identifier
             # Falls back to job_id if request.id is not provided
             image_id = job.request.id if job.request.id else job.job_id
 
-            # Step 6: Upload to storage (Supabase or local)
-            if self.supabase_storage:
-                # Upload to Supabase - returns public URL directly (no expiry)
-                logger.info(f"[STORAGE] {job.job_id} | Using SUPABASE | image_id={image_id}")
-                preview_url, image_hash = await asyncio.to_thread(
-                    self.supabase_storage.upload_image,
-                    image=image_data,
-                    image_id=image_id
-                )
-                expires_at = None  # Supabase public URLs don't expire
-                relative_path = f"character_creation/{image_id}.png"
-                logger.info(f"[STORAGE] {job.job_id} | SUPABASE UPLOAD SUCCESS | URL: {preview_url}")
+            # Step 6: Persist result.
+            if first.get("url"):
+                # Worker uploaded directly to S3/Supabase — just record the URL.
+                preview_url = first["url"]
+                image_hash = None
+                expires_at = None
+                relative_path = first.get("filename") or preview_url
+                logger.info(f"[STORAGE] {job.job_id} | RunPod worker uploaded: {preview_url}")
             else:
-                # Save locally and generate signed URL
-                logger.info(f"[STORAGE] {job.job_id} | Using LOCAL storage")
-                relative_path, image_hash = self.storage.save_image(
-                    image_data,
-                    job.job_id
-                )
-                preview_url, expires_at = self.storage.generate_signed_url(relative_path)
+                data = first.get("data")
+                if not data:
+                    raise RuntimeError("No image data in workflow output")
+                image_data = base64.b64decode(data)
+                if self.supabase_storage:
+                    logger.info(f"[STORAGE] {job.job_id} | Using SUPABASE | image_id={image_id}")
+                    preview_url, image_hash = await asyncio.to_thread(
+                        self.supabase_storage.upload_image,
+                        image=image_data,
+                        image_id=image_id
+                    )
+                    expires_at = None  # Supabase public URLs don't expire
+                    relative_path = f"character_creation/{image_id}.png"
+                    logger.info(f"[STORAGE] {job.job_id} | SUPABASE UPLOAD SUCCESS | URL: {preview_url}")
+                else:
+                    logger.info(f"[STORAGE] {job.job_id} | Using LOCAL storage")
+                    relative_path, image_hash = self.storage.save_image(
+                        image_data,
+                        job.job_id
+                    )
+                    preview_url, expires_at = self.storage.generate_signed_url(relative_path)
                 logger.info(f"[STORAGE] {job.job_id} | LOCAL SAVE SUCCESS | URL: {preview_url}")
 
             await self.job_manager.update_job_status(

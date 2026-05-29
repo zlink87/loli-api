@@ -1,0 +1,31 @@
+# Control-plane (FastAPI) image. No GPU / no ComfyUI / no torch — GPU work runs on
+# RunPod Serverless. Build:  docker build -f Dockerfile.api -t loli-api .
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install only the slim control-plane dependencies.
+COPY requirements-api.txt ./
+RUN pip install -r requirements-api.txt
+
+# App code + workflow templates (the app reads workflows/ relative to its CWD).
+COPY loli_api/ ./loli_api/
+
+WORKDIR /app/loli_api
+EXPOSE 8001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:8001/health || exit 1
+
+# IMPORTANT: single worker. Job state is currently in-memory (per-process), so multiple
+# uvicorn workers would make GET /v1/jobs/{id} miss jobs created in another process.
+# To scale horizontally, add the durable Supabase job store (Step B) first.
+# The service is I/O-bound (just talks to RunPod/Supabase), so 1 worker handles plenty.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]

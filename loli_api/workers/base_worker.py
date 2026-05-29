@@ -4,6 +4,7 @@ Extracts common patterns: init, start/stop lifecycle, workflow loading,
 image download/upload, OOM retry, output saving, error handling.
 """
 import asyncio
+import base64
 import json
 import traceback
 import uuid
@@ -17,6 +18,8 @@ import requests as http_requests
 
 from services.job_manager import JobManager, Job
 from services.comfyui_client import ComfyUIClient
+from services.runpod_client import RunPodServerlessClient
+from services import runpod_runner
 from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
 from services.notification_service import NotificationService
@@ -51,9 +54,11 @@ class BaseEditWorker(ABC):
         image_cache_service: Optional[ImageCacheService] = None,
         notification_service: Optional[NotificationService] = None,
         supabase_storage_service: Optional[SupabaseStorageService] = None,
+        runpod_client: Optional[RunPodServerlessClient] = None,
     ):
         self.job_manager = job_manager
         self.comfyui_client = comfyui_client
+        self.runpod_client = runpod_client
         self.storage = storage_service
         self.supabase_storage = supabase_storage_service
         self.workflow_path = workflow_path
@@ -62,6 +67,8 @@ class BaseEditWorker(ABC):
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._workflow_template: Optional[dict] = None
+        # Source images to send with the next RunPod submission (set by prepare_source_image).
+        self._pending_images: Optional[list] = None
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -195,122 +202,85 @@ class BaseEditWorker(ABC):
         """Log prefix, e.g. '[OUTFIT]'."""
         return f"[{self.worker_name.upper()}]"
 
-    async def download_and_upload_image(
+    async def prepare_source_image(
         self, job: Job, source_url: str, prefix: str
     ) -> str:
         """
-        Download source image (or use cache), upload to ComfyUI,
-        and return the comfyui_filename.
+        Download the source image and stage it for the RunPod submission as a
+        base64 ``input.images[]`` entry. Returns the image NAME that the workflow's
+        LoadImage node should reference (worker-comfyui writes the file under this
+        name in the worker's ComfyUI input dir).
 
-        ``prefix`` is used for the upload filename, e.g. "outfit", "pose", "bg".
+        ``prefix`` is used for the image name, e.g. "outfit", "pose", "bg".
         """
         log_tag = self._log_tag
-        comfyui = ComfyUIClient(server_address=self.comfyui_client.server_address)
-        comfyui_filename = None
-
-        if self.image_cache:
-            cached = self.image_cache.get(source_url)
-            if cached:
-                comfyui_filename = cached.comfyui_filename
-                logger.info(f"{log_tag} {job.job_id} | Cache hit: {comfyui_filename}")
 
         await self.job_manager.update_job_status(
             job.job_id, JobStatus.RUNNING, progress=0.1
         )
 
-        if not comfyui_filename:
-            logger.info(f"{log_tag} {job.job_id} | Cache miss, downloading...")
-            image_bytes = await asyncio.to_thread(self.download_image, source_url)
-            logger.info(f"{log_tag} {job.job_id} | Downloaded {len(image_bytes)} bytes")
+        logger.info(f"{log_tag} {job.job_id} | Downloading source image...")
+        image_bytes = await asyncio.to_thread(self.download_image, source_url)
+        logger.info(f"{log_tag} {job.job_id} | Downloaded {len(image_bytes)} bytes")
 
-            # Determine content type
-            content_type = "image/png"
-            src_lower = source_url.lower()
-            if src_lower.endswith(".jpg") or src_lower.endswith(".jpeg"):
-                content_type = "image/jpeg"
-            elif src_lower.endswith(".webp"):
-                content_type = "image/webp"
+        # Determine content type / extension from the URL.
+        content_type = "image/png"
+        src_lower = source_url.lower()
+        if src_lower.endswith(".jpg") or src_lower.endswith(".jpeg"):
+            content_type = "image/jpeg"
+        elif src_lower.endswith(".webp"):
+            content_type = "image/webp"
 
-            ext = content_type.split("/")[-1]
-            if ext == "jpeg":
-                ext = "jpg"
-            upload_filename = f"{prefix}_{uuid.uuid4().hex[:12]}.{ext}"
+        ext = content_type.split("/")[-1]
+        if ext == "jpeg":
+            ext = "jpg"
+        image_name = f"{prefix}_{uuid.uuid4().hex[:12]}.{ext}"
 
-            def _upload_to_comfyui():
-                comfyui.connect()
-                result = comfyui.upload_image_bytes(
-                    upload_filename, image_bytes, content_type=content_type
-                )
-                comfyui.disconnect()
-                return result
-
-            try:
-                comfyui_filename = await asyncio.to_thread(_upload_to_comfyui)
-                logger.info(f"{log_tag} {job.job_id} | Uploaded as {comfyui_filename}")
-                if self.image_cache:
-                    self.image_cache.put(source_url, comfyui_filename)
-            except Exception as e:
-                raise RuntimeError(f"Failed to upload image to ComfyUI: {e}")
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        self._pending_images = [
+            {"name": image_name, "image": f"data:{content_type};base64,{b64}"}
+        ]
 
         await self.job_manager.update_job_status(
             job.job_id, JobStatus.RUNNING, progress=0.2
         )
+        return image_name
 
-        # Store the comfyui client on self so subclasses can use it for workflow execution
-        self._current_comfyui = comfyui
-        return comfyui_filename
-
-    async def execute_with_oom_retry(
-        self,
-        job: Job,
-        workflow: dict,
-        comfyui: ComfyUIClient,
-        max_attempts: Optional[int] = None,
-        retry_delay: Optional[int] = None,
-    ) -> dict:
+    async def submit_and_save(
+        self, job: Job, workflow: dict, folder: str
+    ) -> tuple:
         """
-        Execute a ComfyUI workflow with OOM retry logic.
+        Submit a prepared workflow to RunPod, wait for completion, and persist the
+        output. Returns (relative_path, preview_url, expires_at, image_hash).
 
-        Returns the output_images dict on success.
-        Raises RuntimeError on final failure.
+        If the worker uploaded the result to S3/Supabase (preferred), the returned
+        URL is recorded directly. Otherwise base64 output is uploaded via
+        ``save_output_image``.
         """
-        if max_attempts is None:
-            max_attempts = self.max_oom_attempts
-        if retry_delay is None:
-            retry_delay = self.oom_retry_delay
+        if self.runpod_client is None:
+            raise RuntimeError("RunPod client not configured")
 
-        log_tag = self._log_tag
-        output_images = None
+        outputs = await runpod_runner.run_workflow(
+            self.runpod_client,
+            self.job_manager,
+            job.job_id,
+            workflow,
+            images=self._pending_images,
+        )
+        self._pending_images = None
 
-        for attempt in range(1, max_attempts + 1):
-            try:
+        if not outputs:
+            raise RuntimeError("No images returned from RunPod workflow")
 
-                def _execute_workflow():
-                    comfyui.connect()
-                    result = comfyui.execute_workflow(workflow)
-                    comfyui.disconnect()
-                    return result
+        first = outputs[0]
+        if first.get("url"):
+            return first.get("filename") or first["url"], first["url"], None, None
 
-                logger.info(
-                    f"{log_tag} {job.job_id} | Executing workflow "
-                    f"(attempt {attempt}/{max_attempts})..."
-                )
-                output_images = await asyncio.to_thread(_execute_workflow)
-                break  # Success
-            except Exception as e:
-                error_msg = str(e)
-                if attempt < max_attempts and self.is_oom_error(error_msg):
-                    logger.warning(
-                        f"{log_tag} {job.job_id} | OOM on attempt {attempt}, "
-                        f"retrying in {retry_delay}s..."
-                    )
-                    await asyncio.sleep(retry_delay)
-                    continue
-                raise RuntimeError(
-                    f"{self.worker_name} workflow execution failed: {e}"
-                )
-
-        return output_images
+        data = first.get("data")
+        if not data:
+            raise RuntimeError("No image data in RunPod output")
+        image_bytes = base64.b64decode(data)
+        return await self.save_output_image(image_bytes, job.job_id, folder)
 
     async def save_output_image(
         self, image_data: bytes, job_id: str, folder: str

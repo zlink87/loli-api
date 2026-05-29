@@ -18,6 +18,7 @@ from models.enums import JobStatus
 from models.requests import BackgroundEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
+from services import prompt_constants as pc
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ def build_background_prompt(prompt: str) -> str:
     """
     prompt_parts = [
         f"Change the environment and background to: {prompt}",
-        "keep the person's face, hair, body, and all physical features exactly the same",
+        pc.identity_clause("the background and surroundings"),
         "adapt lighting and shadows on the person to match the new environment naturally",
         "blend the person seamlessly into the new scene",
     ]
@@ -133,6 +134,11 @@ def prepare_background_workflow(
     if "16" in wf:
         wf["16"]["inputs"]["positive"] = prompt
         logger.debug(f"Set node 16 prompt: {prompt[:50]}...")
+
+    # Node 117: Negative prompt (quality + identity preservation + user override)
+    if "117" in wf:
+        wf["117"]["inputs"]["negative"] = pc.edit_negative(negative_prompt)
+        logger.debug("Set node 117 negative (quality + identity)")
 
     # Node 106: Seed
     if seed is not None and "106" in wf:

@@ -189,10 +189,18 @@ def prepare_pose_workflow(
         wf["114"]["inputs"]["prompt"] = prompt
         logger.debug(f"Set node 114 prompt: {prompt[:80]}...")
 
-    # Node 3: Seed
-    if seed is not None and "3" in wf:
-        wf["3"]["inputs"]["seed"] = seed
-        logger.debug(f"Set node 3 seed: {seed}")
+    # Node 3: Seed + quality bump.
+    if "3" in wf:
+        if seed is not None:
+            wf["3"]["inputs"]["seed"] = seed
+            logger.debug(f"Set node 3 seed: {seed}")
+        # Bump steps for fewer artifacts (was 4; 6 gives cleaner results on Qwen edit).
+        try:
+            if int(wf["3"]["inputs"].get("steps", 0)) < 6:
+                wf["3"]["inputs"]["steps"] = 6
+                logger.debug("Bumped pose KSampler steps to 6")
+        except (TypeError, ValueError):
+            pass
 
     return wf
 

@@ -20,6 +20,7 @@ from models.enums import OutfitType, AccessoryType, JobStatus, NudityLevel
 from models.requests import OutfitEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
+from services import prompt_constants as pc
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,11 @@ def prepare_outfit_workflow(
     if "16" in wf:
         wf["16"]["inputs"]["positive"] = prompt
         logger.debug(f"Set node 16 prompt: {prompt[:50]}...")
+
+    # Node 117: Negative prompt (quality + identity preservation)
+    if "117" in wf:
+        wf["117"]["inputs"]["negative"] = pc.edit_negative()
+        logger.debug("Set node 117 negative (quality + identity)")
 
     # Node 106: Seed
     if seed is not None and "106" in wf:

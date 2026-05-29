@@ -263,7 +263,8 @@ class ComfyUIClient:
         filename_prefix: str = "CHAR",
         resolution: Optional[str] = None,
         aspect_ratio: Optional[str] = None,
-        batch_size: Optional[int] = None
+        batch_size: Optional[int] = None,
+        negative_prompt: Optional[str] = None
     ) -> dict:
         """
         Prepare the character creation workflow with injected parameters.
@@ -317,6 +318,16 @@ class ComfyUIClient:
         if "110" in workflow:
             workflow["110"]["inputs"]["value"] = character_prompt
             logger.debug(f"Set character prompt in node 110 ({len(character_prompt)} chars)")
+
+        # Node 7: Inject negative prompt if the workflow has a negative text node.
+        # The input field name varies by node type, so set whichever string field exists.
+        if negative_prompt and "7" in workflow:
+            node7_inputs = workflow["7"].get("inputs", {})
+            for key in ("text", "value", "prompt", "string"):
+                if key in node7_inputs:
+                    node7_inputs[key] = negative_prompt
+                    logger.debug(f"Set negative prompt in node 7 (field '{key}')")
+                    break
 
         # Node 67: Set seed in SamplerCustom (optional)
         if seed is not None:

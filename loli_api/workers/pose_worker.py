@@ -60,13 +60,13 @@ class PoseBackgroundWorker(BaseEditWorker):
             )
             logger.info(f"[POSE] {job.job_id} | Status: RUNNING | User: {job.user_id}")
 
-            # Step 2: Download / cache source image and upload to ComfyUI
-            comfyui_filename = await self.download_and_upload_image(
+            # Step 2: Download source image and stage it for the RunPod submission
+            source_name = await self.prepare_source_image(
                 job, request.source_image, "pose"
             )
-            comfyui = self._current_comfyui
 
-            # Step 3: Get reference pose image (already in ComfyUI input dir)
+            # Step 3: Get reference pose image (must exist in the worker's ComfyUI
+            # input dir — baked onto the RunPod network volume, see RUNPOD_SETUP.md)
             reference_image = get_pose_reference(request.pose)
             logger.info(f"[POSE] {job.job_id} | Reference image: {reference_image}")
 
@@ -78,44 +78,24 @@ class PoseBackgroundWorker(BaseEditWorker):
 
             await self.job_manager.update_job_status(
                 job.job_id, JobStatus.RUNNING, progress=0.3,
-                seed_used=seed
+                prompt_used=prompt, seed_used=seed
             )
 
-            # Step 5: Prepare and execute workflow (with OOM retry)
+            # Step 5: Prepare workflow and run on RunPod
             workflow = prepare_pose_workflow(
-                self._workflow_template, comfyui_filename, reference_image, prompt=prompt, seed=seed
+                self._workflow_template, source_name, reference_image, prompt=prompt, seed=seed
             )
 
             image_start = datetime.utcnow()
-            output_images = await self.execute_with_oom_retry(job, workflow, comfyui)
+            relative_path, preview_url, expires_at, image_hash = (
+                await self.submit_and_save(job, workflow, "pose_edits")
+            )
             image_duration = (datetime.utcnow() - image_start).total_seconds()
             logger.info(f"[POSE] {job.job_id} | Workflow done in {image_duration:.2f}s")
 
             await self.job_manager.update_job_status(
-                job.job_id, JobStatus.RUNNING, progress=0.8,
+                job.job_id, JobStatus.RUNNING, progress=0.9,
                 image_generated_at=datetime.utcnow()
-            )
-
-            # Step 6: Get output images (node 164 is PreviewImage)
-            images = None
-            for output_node in ["164", "8", "6"]:
-                if isinstance(output_images, dict) and output_node in output_images:
-                    images = output_images[output_node]
-                    break
-            if not images:
-                images = next(iter(output_images.values()), []) if output_images else []
-            if not images:
-                raise RuntimeError("No images returned from pose workflow")
-
-            image_data = images[0]
-
-            # Step 7: Save output
-            relative_path, preview_url, expires_at, image_hash = (
-                await self.save_output_image(image_data, job.job_id, "pose_edits")
-            )
-
-            await self.job_manager.update_job_status(
-                job.job_id, JobStatus.RUNNING, progress=0.9
             )
 
             # Step 8: Mark SUCCEEDED

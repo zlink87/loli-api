@@ -28,7 +28,8 @@ def configure_services(
     outfit_workflow_path: str = "",
     pose_workflow_path: str = "",
     image_cache_service=None,
-    supabase_storage_service=None
+    supabase_storage_service=None,
+    runpod_client=None
 ):
     """
     Configure services for all endpoint modules.
@@ -40,6 +41,8 @@ def configure_services(
     preview.set_storage_service(storage_service)
     if comfyui_client:
         edit.set_comfyui_client(comfyui_client)
+    if runpod_client:
+        edit.set_runpod_client(runpod_client)
     edit.set_storage_service(storage_service)
     if notification_service:
         edit.set_notification_service(notification_service)

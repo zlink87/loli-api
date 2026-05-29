@@ -2,6 +2,7 @@
 Image edit endpoint.
 POST /v1/edit/image - Edit an input image using ComfyUI workflow.
 """
+import base64
 import json
 import logging
 import time
@@ -11,7 +12,9 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 
 from auth.dependencies import get_current_user
+from config import settings
 from services.comfyui_client import ComfyUIClient
+from services.runpod_client import RunPodServerlessClient
 from services.storage_service import StorageService
 from services.notification_service import NotificationService
 from models.responses import EditImageResponse, EditResultItem
@@ -23,6 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Edit"])
 
 _comfyui_client: Optional[ComfyUIClient] = None
+_runpod_client: Optional[RunPodServerlessClient] = None
 _storage_service: Optional[StorageService] = None
 _notification_service: Optional[NotificationService] = None
 _edit_workflow_path: Optional[str] = None
@@ -33,6 +37,19 @@ def set_comfyui_client(comfyui_client: ComfyUIClient) -> None:
     """Set ComfyUI client instance (called from main.py)."""
     global _comfyui_client
     _comfyui_client = comfyui_client
+
+
+def set_runpod_client(runpod_client: RunPodServerlessClient) -> None:
+    """Set RunPod client instance (called from main.py)."""
+    global _runpod_client
+    _runpod_client = runpod_client
+
+
+def get_runpod_client() -> RunPodServerlessClient:
+    """Get RunPod client instance."""
+    if _runpod_client is None:
+        raise RuntimeError("RunPod client not initialized")
+    return _runpod_client
 
 
 def set_storage_service(storage_service: StorageService) -> None:
@@ -162,42 +179,47 @@ async def edit_image(
 
     edit_id = f"edit_{uuid.uuid4().hex[:12]}"
     start_time = time.monotonic()
-    base_client = get_comfyui_client()
-    comfyui = ComfyUIClient(server_address=base_client.server_address)
+    runpod = get_runpod_client()
     storage = get_storage_service()
     notification_service = get_notification_service()
     workflow_template = get_edit_workflow_template()
 
+    content_type = file.content_type or "image/png"
+    if inputUrl:
+        logger.info("[%s] Input image URL: %s", edit_id, inputUrl)
+
+    # Stage the uploaded image as a RunPod input.images[] entry (base64) and
+    # reference it by name in the edit workflow's LoadImage node.
+    image_name = f"{edit_id}_{file.filename or 'input.png'}"
+    images_input = [
+        {
+            "name": image_name,
+            "image": f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
+        }
+    ]
+
+    workflow = ComfyUIClient.prepare_edit_workflow(
+        workflow_template,
+        image_name,
+        seed=seed,
+        prompt=prompt,
+        negative_prompt=negativePrompt,
+        width=width,
+        height=height,
+    )
+    logger.info(f"[{edit_id}] Workflow prepared, submitting to RunPod...")
+
     try:
-        comfyui.connect()
-        content_type = file.content_type or "image/png"
-        logger.info(f"[{edit_id}] Uploading image: {file.filename}, size={len(image_bytes)}, content_type={content_type}, width={width}, height={height}")
-        if inputUrl:
-            logger.info("[%s] Input image URL: %s", edit_id, inputUrl)
-
-        upload_start = time.monotonic()
-        comfyui_filename = comfyui.upload_image_bytes(
-            file.filename,
-            image_bytes,
-            content_type=content_type
+        # Non-blocking: submit + async poll (does not freeze the event loop).
+        job_doc = await runpod.run_and_wait(
+            workflow,
+            images=images_input,
+            execution_timeout_ms=settings.RUNPOD_EXECUTION_TIMEOUT_MS,
+            ttl_ms=settings.RUNPOD_TTL_MS,
+            poll_interval_seconds=settings.RUNPOD_POLL_INTERVAL_SECONDS,
         )
-        upload_duration = time.monotonic() - upload_start
-        logger.info(f"[{edit_id}] Upload duration: {upload_duration:.3f}s")
-        logger.info(f"[{edit_id}] Image uploaded to ComfyUI as: {comfyui_filename}")
-
-        workflow = comfyui.prepare_edit_workflow(
-            workflow_template,
-            comfyui_filename,
-            seed=seed,
-            prompt=prompt,
-            negative_prompt=negativePrompt,
-            width=width,
-            height=height
-        )
-        logger.info(f"[{edit_id}] Workflow prepared, executing...")
-
-        output_images = comfyui.execute_workflow(workflow)
-        logger.info(f"[{edit_id}] Workflow execution complete, output nodes: {list(output_images.keys())}")
+        outputs = RunPodServerlessClient.parse_output(job_doc.get("output"))
+        logger.info(f"[{edit_id}] RunPod complete, {len(outputs)} image(s)")
     except Exception as e:
         logger.error(f"Edit failed for {edit_id}: {e}", exc_info=True)
         if notification_service:
@@ -213,14 +235,8 @@ async def edit_image(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process edit request"
         )
-    finally:
-        comfyui.disconnect()
 
-    images = output_images.get("6") if isinstance(output_images, dict) else None
-    if not images:
-        images = next(iter(output_images.values()), []) if output_images else []
-
-    if not images:
+    if not outputs:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="No images returned from workflow"
@@ -228,10 +244,15 @@ async def edit_image(
 
     results: List[EditResultItem] = []
     expires_at = None
-    for image_data in images:
-        relative_path, image_hash = storage.save_image(image_data, edit_id)
-        preview_url, expires_at = storage.generate_signed_url(relative_path)
-        results.append(EditResultItem(previewUrl=preview_url, sha256=image_hash))
+    for out in outputs:
+        if out.get("url"):
+            # Worker uploaded directly to S3/Supabase.
+            results.append(EditResultItem(previewUrl=out["url"], sha256=None))
+        elif out.get("data"):
+            image_data = base64.b64decode(out["data"])
+            relative_path, image_hash = storage.save_image(image_data, edit_id)
+            preview_url, expires_at = storage.generate_signed_url(relative_path)
+            results.append(EditResultItem(previewUrl=preview_url, sha256=image_hash))
 
     if notification_service and results:
         total_duration = time.monotonic() - start_time

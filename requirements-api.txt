@@ -1,0 +1,33 @@
+# =============================================================================
+# loli-api CONTROL PLANE requirements (the FastAPI service only).
+#
+# After the RunPod Serverless migration, the API no longer runs ComfyUI/PyTorch —
+# GPU work happens on the RunPod worker image. So the API host needs ONLY these
+# light dependencies (no torch, no ComfyUI, ~tens of MB instead of ~GBs).
+#
+# Install on the API host with:   pip install -r requirements-api.txt
+# (The full requirements.txt is only needed inside the RunPod ComfyUI worker image.)
+# Target Python: 3.12 or 3.13.
+# =============================================================================
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart
+
+# HTTP clients (RunPod API, xAI Grok, image downloads)
+httpx>=0.26.0
+requests>=2.31.0
+
+# Data validation / settings
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# Auth
+PyJWT>=2.8.0
+
+# Image handling + Supabase storage
+Pillow>=10.3.0
+numpy>=1.26
+supabase>=2.0.0
