@@ -1,0 +1,25 @@
+# Keep the Docker build context lean for both Dockerfile.api and Dockerfile.worker.
+# Neither image copies the vendored ComfyUI tree (the worker clones custom nodes from
+# upstream; models come from the RunPod network volume), so 210 MB of it should never
+# be shipped to the builder. Patterns with a leading "/" are anchored to the repo root
+# so loli_api/ (which the API image DOES copy, including loli_api/assets/poses) is safe.
+
+/ComfyUI/
+/.git/
+/docs/
+/storage/
+/logs/
+/.claude/
+/*.log
+/download2.sh
+/setup.sh
+/start.sh
+/requirements.txt
+
+# Dev cruft (anywhere)
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.venv/
+venv/

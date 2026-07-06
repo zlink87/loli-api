@@ -1,0 +1,68 @@
+# =============================================================================
+# GPU worker image for loli-api — RunPod Serverless ComfyUI worker.
+#
+# Built on RunPod's official worker-comfyui. Deploy path: RunPod Serverless →
+# "GitHub Repo" build, which builds this image server-side on amd64 (no local
+# Docker needed, and no slow ARM cross-build on a Mac).
+#
+# Models are NOT baked in. They load at runtime from the network volume mounted
+# at /runpod-volume/models (see docs/RUNPOD_SETUP.md). This image only adds the
+# custom nodes the production workflows actually reference.
+#
+# Custom nodes included (upstreams verified against the vendored dev copies in
+# ComfyUI/custom_nodes, and against the class_types used by the 4 live workflows):
+#   rgthree-comfy ......... Any Switch / Display Any / Image Resize   (generation)
+#   ComfyUI-KJNodes ....... GrowMaskWithBlur / DrawMaskOnImage         (outfit, background)
+#   ComfyUI-SAM3 .......... SAM3Grounding / LoadSAM3Model              (outfit, background)
+#   ComfyUI-Easy-Use ...... easy positive / easy negative             (outfit, background)
+#   ComfyUI_JPS-Nodes ..... Latent Switch (JPS)                        (outfit, background)
+#   ComfyUI_FaceAnalysis .. FaceBoundingBox / FaceAnalysisModels       (pose)
+#   ComfyUI-Rect .......... RectFill / RectSelect                      (pose)
+#
+# Deliberately EXCLUDED — no production workflow references them, so leaving them
+# out keeps the image small and the build fast:
+#   ComfyUI-GGUF ......... workflows use core UNETLoader/CLIPLoader/VAELoader; the
+#                          z_image_turbo nvfp4 .safetensors loads via core, not GGUF.
+#   ComfyUI-QwenVL ....... TextEncodeQwenImageEditPlus is a CORE node; excluding this
+#                          avoids the heavy llama-cpp-python / bitsandbytes build.
+#   comfyui_controlnet_aux no ControlNet preprocessor nodes are used anywhere.
+#   ComfyUI-Manager ...... not needed for a headless serverless worker.
+# =============================================================================
+FROM runpod/worker-comfyui:5.8.6-base
+
+USER root
+
+# Toolchain for custom nodes that compile native wheels:
+#   ComfyUI_FaceAnalysis -> dlib + insightface  (need cmake + a C/C++ compiler)
+#   ComfyUI-SAM3         -> pycocotools          (needs a compiler)
+# plus the OpenCV shared libs that SAM3 / FaceAnalysis import at load time.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git build-essential cmake ninja-build \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ComfyUI lives at /comfyui in the base image; custom nodes go under custom_nodes/.
+WORKDIR /comfyui/custom_nodes
+
+# Shallow-clone the required nodes. To pin against a breaking upstream change,
+# append e.g.  && git -C rgthree-comfy checkout <sha>
+RUN git clone --depth 1 https://github.com/rgthree/rgthree-comfy.git && \
+    git clone --depth 1 https://github.com/kijai/ComfyUI-KJNodes.git && \
+    git clone --depth 1 https://github.com/PozzettiAndrea/ComfyUI-SAM3.git && \
+    git clone --depth 1 https://github.com/yolain/ComfyUI-Easy-Use.git && \
+    git clone --depth 1 https://github.com/JPS-GER/ComfyUI_JPS-Nodes.git && \
+    git clone --depth 1 https://github.com/cubiq/ComfyUI_FaceAnalysis.git && \
+    git clone --depth 1 https://github.com/jtrue/ComfyUI-Rect.git
+
+# Install each node's Python requirements (nodes without a requirements.txt are
+# pure-Python and need nothing). None of these pin torch, so the base image's
+# CUDA build of torch is left untouched.
+RUN for d in */ ; do \
+        if [ -f "${d}requirements.txt" ]; then \
+            echo "=== pip install for ${d} ===" && \
+            pip install --no-cache-dir -r "${d}requirements.txt" ; \
+        fi ; \
+    done
+
+# Inherit the base image's entrypoint (/start.sh) and RunPod handler — do not override.
+WORKDIR /
