@@ -64,5 +64,14 @@ RUN for d in */ ; do \
         fi ; \
     done
 
+# worker-comfyui's bundled /comfyui/extra_model_paths.yaml maps the network-volume
+# model folders under ComfyUI's LEGACY names (clip, unet) and omits the newer names
+# the Z-Image workflow uses: text_encoders (CLIPLoader) and diffusion_models
+# (UNETLoader). Without these, z_image_turbo_nvfp4 + qwen_3_4b_fp4_mixed on the volume
+# at /runpod-volume/models/{diffusion_models,text_encoders} are invisible to ComfyUI
+# and the job fails "Model ... not found". Append the two missing mappings to the
+# existing block (ComfyUI auto-loads this file; no --extra-model-paths-config flag).
+RUN printf '\n  text_encoders: models/text_encoders/\n  diffusion_models: models/diffusion_models/\n' >> /comfyui/extra_model_paths.yaml
+
 # Inherit the base image's entrypoint (/start.sh) and RunPod handler — do not override.
 WORKDIR /
