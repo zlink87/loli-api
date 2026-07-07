@@ -1,7 +1,7 @@
 # =============================================================================
-# GPU worker image for loli-api — RunPod Serverless ComfyUI worker.
+# GPU worker image for loli-api - RunPod Serverless ComfyUI worker.
 #
-# Built on RunPod's official worker-comfyui. Deploy path: RunPod Serverless →
+# Built on RunPod's official worker-comfyui. Deploy path: RunPod Serverless ->
 # "GitHub Repo" build, which builds this image server-side on amd64 (no local
 # Docker needed, and no slow ARM cross-build on a Mac).
 #
@@ -9,12 +9,12 @@
 # at /runpod-volume/models (see docs/RUNPOD_SETUP.md). This image only adds the
 # custom nodes the production workflows actually reference.
 #
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # EVERY custom node is PINNED to a specific commit SHA. Unpinned `git clone`s
 # were the root cause of repeated production breakage (SAM3 refactors, node API
 # drift). Do NOT switch any clone back to a floating branch. To bump a node,
 # change its SHA here deliberately and smoke-test before relying on it.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # Custom nodes included (verified against the class_types used by the live
 # workflows):
@@ -25,19 +25,19 @@
 #   ComfyUI_JPS-Nodes ........ Latent Switch (JPS)                        (outfit, background)
 #   comfyui_segment_anything . SAMModelLoader / GroundingDinoModelLoader /
 #                              GroundingDinoSAMSegment / InvertMask       (outfit, background)
-#                              → text-prompted mask; feeds the identity-locked
-#                                InpaintModelConditioning chain.
+#                              text-prompted mask; feeds the identity-locked
+#                              InpaintModelConditioning chain.
 #   comfyui-reactor-node ..... ReActorFaceSwap (uncensored Codeberg build) (pose)
-#                              → locks the hero's face onto the reposed body.
+#                              locks the hero's face onto the reposed body.
 #   ComfyUI-VideoHelperSuite . VHS_VideoCombine (mp4/webm encode)         (video / wan_i2v)
 #
-# Removed (no live workflow references them anymore — dropping them shrinks the
+# Removed (no live workflow references them anymore - dropping them shrinks the
 # image and removes churn/compile surface):
 #   ComfyUI-SAM3 ......... replaced by comfyui_segment_anything (GroundingDINO+SAM).
 #   ComfyUI_FaceAnalysis  pose no longer uses dlib FaceBoundingBox (ReActor now).
 #   ComfyUI-Rect ......... only used by the old pose FaceAnalysis chain.
 #
-# Deliberately EXCLUDED — no production workflow references them:
+# Deliberately EXCLUDED - no production workflow references them:
 #   ComfyUI-GGUF, ComfyUI-QwenVL (TextEncodeQwenImageEditPlus is CORE),
 #   comfyui_controlnet_aux, ComfyUI-Manager.
 # =============================================================================
@@ -57,7 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /comfyui/custom_nodes
 
 # Clone each node, then hard-pin to a commit SHA (fetched 2026-07-07). Every node
-# is pinned — see the banner above; do not revert to floating branches.
+# is pinned - see the banner above; do not revert to floating branches.
 RUN git clone https://github.com/rgthree/rgthree-comfy.git && \
         git -C rgthree-comfy checkout 27b4f4cdcf3b127c29d5d8135ac1536ecbd4c383 && \
     git clone https://github.com/kijai/ComfyUI-KJNodes.git && \
@@ -76,7 +76,7 @@ RUN git clone https://github.com/rgthree/rgthree-comfy.git && \
 # Install each node's Python requirements (pure-Python nodes need nothing). None
 # of these pin torch, so the base image's CUDA torch build is left untouched.
 # segment_anything: segment_anything/timm/addict/yapf (all pure-Python; GroundingDINO
-#   is vendored, so there is NO groundingdino pip build and NO CUDA compile step).
+# is vendored, so there is NO groundingdino pip build and NO CUDA compile step).
 RUN pip install --no-cache-dir cython
 RUN for d in */ ; do \
         if [ -f "${d}requirements.txt" ]; then \
@@ -113,5 +113,5 @@ RUN for d in sams grounding-dino bert-base-uncased insightface facerestore_model
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
-# Inherit the base image's entrypoint (/start.sh) and RunPod handler — do not override.
+# Inherit the base image's entrypoint (/start.sh) and RunPod handler - do not override.
 WORKDIR /
