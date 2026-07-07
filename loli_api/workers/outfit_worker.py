@@ -3,11 +3,14 @@ Background worker for processing outfit edit jobs.
 Mirrors BackgroundWorker pattern but processes OutfitEditRequest jobs.
 """
 import asyncio
+import base64
 import random
 import logging
+import uuid
 from datetime import datetime
 
 from services.job_manager import Job
+from services import head_mask
 from models.enums import JobStatus
 
 # Import helpers from outfit endpoint module
@@ -76,6 +79,28 @@ class OutfitBackgroundWorker(BaseEditWorker):
                 job, request.source_image, "outfit"
             )
 
+            # Step 2b: server-computed head-protect mask (YuNet — reliable on the
+            # stylized hero renders that break on-worker face detection). Shipped
+            # as a second input image; the workflow subtracts it from the person
+            # mask so the head is never in the edit region.
+            head_mask_name = None
+            try:
+                mask_bytes, face_found = await asyncio.to_thread(
+                    head_mask.build_head_mask, self._last_source_bytes
+                )
+                head_mask_name = f"headmask_{uuid.uuid4().hex[:12]}.png"
+                self._pending_images.append({
+                    "name": head_mask_name,
+                    "image": "data:image/png;base64,"
+                             + base64.b64encode(mask_bytes).decode("ascii"),
+                })
+                logger.info(
+                    f"[OUTFIT] {job.job_id} | Head mask staged "
+                    f"({'face found' if face_found else 'no face — black mask'})"
+                )
+            except Exception as e:  # noqa: BLE001 — mask is protective, not critical
+                logger.warning(f"[OUTFIT] {job.job_id} | Head mask failed: {e}")
+
             # Step 3: Build prompt
             prompt = build_prompt(request.outfit, request.accessories, request.nudityLevel)
             seed = request.seed if request.seed is not None else random.randint(1, 999_999_999)
@@ -91,6 +116,7 @@ class OutfitBackgroundWorker(BaseEditWorker):
                 self._workflow_template, source_name, prompt, seed=seed,
                 nudity_level=request.nudityLevel, outfit=request.outfit,
                 negative_prompt=request.negativePrompt,
+                head_mask_name=head_mask_name,
             )
 
             image_start = datetime.utcnow()

@@ -106,6 +106,14 @@ RUN for d in sams grounding-dino bert-base-uncased insightface facerestore_model
         ln -sfn "/runpod-volume/models/${d}" "/comfyui/models/${d}" ; \
     done
 
+# VideoImagesBridge (in-repo custom node): encodes WAN i2v frames to mp4 and
+# reports it under the "images" output key so worker-comfyui 5.8.6 collects +
+# S3-uploads it (VHS_VideoCombine reports under "gifs", which the worker drops ->
+# "success_no_images"). Needs imageio + imageio-ffmpeg (VHS also pulls these; pin
+# explicitly so the node works even if VHS install order changes).
+RUN pip install --no-cache-dir imageio imageio-ffmpeg
+COPY worker_custom_nodes/video_bridge /comfyui/custom_nodes/video_bridge
+
 # Force offline model resolution. All weights (incl. GroundingDINO's bert-base-uncased
 # text backbone) are pre-staged on the volume; without this, the segment-anything
 # node tries to fetch BERT from HuggingFace at runtime and hangs/fails on a headless

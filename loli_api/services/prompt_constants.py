@@ -101,6 +101,67 @@ PHOTO_STYLE_TEMPLATES = {
 }
 
 
+# Time-of-day lighting sentences for the POLISHED wrapper. The default polished
+# wrapper hardcodes a warm daylight grade, which fights (and usually beats) a
+# "night"/"dark" request in the prompt — the model splits the difference into a
+# muddy dusk. When shot.timeOfDay is set, the wrapper's lighting sentence is
+# swapped for a matching one so the finish stays POLISHED at any hour.
+# Times absent from this map (morning/daytime/...) keep the default sentence.
+_POLISHED_DAY_LINE = (
+    "Your photographs have a soft flattering key light, a warm color grade, gentle "
+    "background bokeh, flawless yet natural skin, and a clean composition focused "
+    "on the subject.\n"
+)
+_POLISHED_TIME_LINES = {
+    "night": (
+        "Your photographs are taken at night: a dark low-key nighttime environment "
+        "lit by warm practical light sources, a moody cinematic color grade, gentle "
+        "background bokeh, flawless yet natural skin, and a clean composition "
+        "focused on the subject.\n"
+    ),
+    "evening": (
+        "Your photographs are taken in the evening after dark: soft ambient dusk "
+        "light with warm artificial accents, a cinematic evening color grade, gentle "
+        "background bokeh, flawless yet natural skin, and a clean composition "
+        "focused on the subject.\n"
+    ),
+    "sunset": (
+        "Your photographs are taken at sunset: warm golden backlight, a rich sunset "
+        "color grade, gentle background bokeh, flawless yet natural skin, and a "
+        "clean composition focused on the subject.\n"
+    ),
+    "golden_hour": (
+        "Your photographs are taken during golden hour: warm low-angle golden light, "
+        "a rich warm color grade, gentle background bokeh, flawless yet natural skin, "
+        "and a clean composition focused on the subject.\n"
+    ),
+    "early_morning": (
+        "Your photographs are taken in the dim early morning: soft cool dawn light, "
+        "a gentle muted color grade, gentle background bokeh, flawless yet natural "
+        "skin, and a clean composition focused on the subject.\n"
+    ),
+}
+
+
+def photo_style_template(style, time_of_day=None) -> str:
+    """
+    Resolve the node-125 wrapper text for a photo style + optional time of day.
+
+    * Unknown/None style -> "" (caller keeps the workflow's baked-in text).
+    * polished + a mapped time -> the polished template with its lighting
+      sentence swapped for the time-matched one (same structure, same {$@}).
+    * studio/candid_phone ignore time (controlled studio light / legacy raw).
+    """
+    style_val = getattr(style, "value", style)
+    base = PHOTO_STYLE_TEMPLATES.get(style_val, "")
+    if not base:
+        return ""
+    time_val = getattr(time_of_day, "value", time_of_day)
+    if style_val == "polished" and time_val in _POLISHED_TIME_LINES:
+        return base.replace(_POLISHED_DAY_LINE, _POLISHED_TIME_LINES[time_val])
+    return base
+
+
 # ---------------------------------------------------------------------------
 # Edit-pipeline photo-style clauses.
 #
@@ -189,6 +250,32 @@ def generation_negative(extra: Optional[str] = None, nudity_level=None) -> str:
     suppression = NUDITY_SUPPRESSION.get(key, NUDITY_SUPPRESSION["low"])
     if suppression:
         parts.append(suppression)
+    if extra and extra.strip():
+        parts.append(extra.strip())
+    return ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Image-to-video (reel) prompt fragments. Prompting is the only in-graph identity
+# lever for WAN i2v (the SAM/inpaint/face-swap image machinery does not apply to
+# the diffusion motion); a per-frame ReActor pass is the stronger post-fix.
+# ---------------------------------------------------------------------------
+VIDEO_CONSISTENCY_CLAUSE = (
+    "keep the subject's face, hair, and outfit consistent throughout the clip; "
+    "smooth natural motion, no morphing, no warping, no identity change"
+)
+
+# Motion/temporal quality negative for video generation.
+VIDEO_MOTION_NEGATIVE = (
+    "static, frozen, blurry, distorted, deformed, morphing, flickering, warping, "
+    "jitter, stutter, duplicate face, changing face, face distortion, extra limbs, "
+    "bad anatomy, low quality, jpeg artifacts, watermark, text"
+)
+
+
+def video_negative(extra: Optional[str] = None) -> str:
+    """Full negative prompt for video generation (motion + quality + adult + optional extra)."""
+    parts = [VIDEO_MOTION_NEGATIVE, QUALITY_NEGATIVE, ADULT_APPEARANCE_NEGATIVE]
     if extra and extra.strip():
         parts.append(extra.strip())
     return ", ".join(parts)

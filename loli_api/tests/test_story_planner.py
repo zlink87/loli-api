@@ -192,6 +192,52 @@ def test_manual_provider_uses_supplied_scenes():
     assert scenes[0].location == LocationType.CAFE
 
 
+# --- AI gate: identity scrub on planner free-text ---
+def test_scrub_identity_strips_appearance_from_background_text():
+    """
+    A planner (Venice/Claude) must not be able to smuggle person-appearance
+    descriptors into the background prompt: the person is described ONLY by the
+    hero photo; free text describes the SCENE. The masks are the hard guarantee;
+    this gate is defense-in-depth.
+    """
+    import models.requests as _mr
+    from services.scene_mapper import scene_to_pipeline_request
+
+    _mr.validate_source_image = lambda u: u  # bypass SSRF allowlist (offline test)
+    char = _character()
+    char.hero_photo_url = "https://example.com/hero.png"
+    malicious = SceneSpec(
+        arc_id="a", arc_title="A", beat_index=0, global_index=0,
+        beat_description="a stunning young redhead with green eyes relaxes",
+        location=LocationType.CAFE,
+        background_text=(
+            "a cozy cafe where a stunning young redhead woman with silky auburn hair, "
+            "piercing green eyes and sun-tanned skin sips coffee"
+        ),
+    )
+    out = validate_and_repair([malicious], char, 1, BatchControls(base_seed=1))
+    banned = (
+        "hair", "eyes", "skin", "redhead", "blonde", "brunette",
+        "woman", "girl", "young", "auburn", "tanned",
+    )
+    for field in (out[0].background_text or "", out[0].beat_description or ""):
+        low = field.lower()
+        for b in banned:
+            assert b not in low, f"appearance token {b!r} survived scrub: {field!r}"
+
+    # And the final pipeline prompt built from the scene carries none of it either.
+    req = scene_to_pipeline_request(char, out[0], BatchControls(base_seed=1))
+    low = (req.prompt or "").lower()
+    for b in banned:
+        assert b not in low, f"appearance token {b!r} reached pipeline prompt: {req.prompt!r}"
+
+
+def test_scrub_identity_preserves_scene_language():
+    from services.story_planner import _scrub_identity
+    clean = "a sunlit cafe terrace with wicker chairs, warm golden hour light, soft bokeh"
+    assert _scrub_identity(clean) == clean
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

@@ -40,6 +40,7 @@ from workers.pose_worker import PoseBackgroundWorker
 from workers.background_edit_worker import BackgroundEditWorker
 from workers.pipeline_worker import PipelineBackgroundWorker
 from workers.batch_pipeline_worker import BatchPipelineWorker
+from workers.video_worker import VideoBackgroundWorker
 from services import supabase_db
 from services.character_store import CharacterStore
 from services.character_image_store import CharacterImageStore
@@ -238,6 +239,21 @@ if supabase_db.is_configured():
 else:
     logger.info("Character Batches disabled (Supabase DB not configured)")
 
+# Reels (image-to-video) worker. Instantiated after the Supabase block so it can
+# take character_image_store for persistence (None when the DB is unconfigured —
+# the admin endpoints 503 in that case, so no video jobs are ever enqueued).
+video_worker = VideoBackgroundWorker(
+    job_manager=job_manager,
+    comfyui_client=comfyui_client,
+    storage_service=storage_service,
+    workflow_path=settings.COMFYUI_VIDEO_WORKFLOW_PATH,
+    image_cache_service=image_cache_service,
+    notification_service=notification_service,
+    supabase_storage_service=supabase_storage_service,
+    runpod_client=runpod_client,
+    character_image_store=character_image_store,
+)
+
 
 def _validate_production_settings() -> None:
     """
@@ -320,6 +336,7 @@ async def lifespan(app: FastAPI):
         supabase_storage_service,
         runpod_client,
         character_store=character_store,
+        character_image_store=character_image_store,
         batch_store=batch_store,
         batch_orchestrator=batch_orchestrator,
     )
@@ -334,6 +351,7 @@ async def lifespan(app: FastAPI):
         await pose_worker.start()
         await background_edit_worker.start()
         await pipeline_worker.start()
+        await video_worker.start()
         # await cleanup_worker.start()
         await image_cache_service.start_cleanup_worker()
         for w in batch_workers:
@@ -354,6 +372,7 @@ async def lifespan(app: FastAPI):
     await pose_worker.stop()
     await background_edit_worker.stop()
     await pipeline_worker.stop()
+    await video_worker.stop()
     for w in batch_workers:
         await w.stop()
     if batch_reconciler:

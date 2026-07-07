@@ -88,6 +88,39 @@ class StorageService:
 
         return relative_path, sha256_hash
 
+    def save_video(
+        self,
+        video_data: bytes,
+        job_id: str,
+        ext: str = "mp4"
+    ) -> Tuple[str, str]:
+        """
+        Save video bytes to filesystem — raw write, NEVER through PIL.
+
+        Mirrors ``save_image``'s date-dir + unique-filename layout so
+        ``generate_signed_url`` / ``get_image_path`` work unchanged.
+
+        Returns:
+            Tuple of (relative_path, sha256_hash)
+        """
+        date_dir = datetime.now().strftime("%Y/%m/%d")
+        full_dir = os.path.join(self.storage_dir, date_dir)
+        os.makedirs(full_dir, exist_ok=True)
+
+        ext = (ext or "mp4").lstrip(".").lower()
+        filename = f"{job_id}_{uuid.uuid4().hex[:8]}.{ext}"
+        filepath = os.path.join(full_dir, filename)
+
+        sha256_hash = hashlib.sha256(video_data).hexdigest()
+
+        with open(filepath, "wb") as f:
+            f.write(video_data)
+
+        relative_path = os.path.join(date_dir, filename)
+        logger.info(f"Saved video: {relative_path} ({len(video_data)} bytes)")
+
+        return relative_path, sha256_hash
+
     def get_image_path(self, relative_path: str) -> str:
         """
         Get absolute path for a relative image path.

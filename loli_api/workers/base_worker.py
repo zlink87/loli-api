@@ -76,6 +76,9 @@ class BaseEditWorker(ABC):
         self._workflow_template: Optional[dict] = None
         # Source images to send with the next RunPod submission (set by prepare_source_image).
         self._pending_images: Optional[list] = None
+        # Raw bytes of the last downloaded source (for derived per-request
+        # artifacts, e.g. the outfit worker's server-computed head-protect mask).
+        self._last_source_bytes: Optional[bytes] = None
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -247,6 +250,7 @@ class BaseEditWorker(ABC):
         self._pending_images = [
             {"name": image_name, "image": f"data:{content_type};base64,{b64}"}
         ]
+        self._last_source_bytes = image_bytes
 
         await self.job_manager.update_job_status(
             job.job_id, JobStatus.RUNNING, progress=0.2
@@ -280,9 +284,34 @@ class BaseEditWorker(ABC):
         Submit a prepared workflow to RunPod, wait for completion, and persist the
         output. Returns (relative_path, preview_url, expires_at, image_hash).
 
-        If the worker uploaded the result to S3/Supabase (preferred), the returned
-        URL is recorded directly. Otherwise base64 output is uploaded via
-        ``save_output_image``.
+        Backward-compatible 4-tuple wrapper used by the image workers
+        (outfit/pose/background). Video-capable callers use
+        ``_submit_and_save_media`` directly to also receive the media_type.
+        """
+        path, preview_url, expires_at, content_hash, _media = (
+            await self._submit_and_save_media(job, workflow, folder)
+        )
+        return path, preview_url, expires_at, content_hash
+
+    async def _submit_and_save_media(
+        self,
+        job: Job,
+        workflow: dict,
+        folder: str,
+        execution_timeout_ms: Optional[int] = None,
+        ttl_ms: Optional[int] = None,
+    ) -> tuple:
+        """
+        Media-aware core: submit to RunPod, persist the first output, and return
+        ``(relative_path, preview_url, expires_at, content_hash, media_type)``.
+
+        ``media_type`` is "image" or "video" (from ``parse_output`` classification).
+        The worker-uploaded-URL path is media-agnostic (passes the S3 URL through);
+        the base64 fallback routes video to ``save_output_video`` (raw bytes, no PIL)
+        and images to ``save_output_image`` (PIL, unchanged).
+
+        ``execution_timeout_ms``/``ttl_ms`` override RunPod's per-job caps (video
+        is far slower than an image) — default to the standard settings.
         """
         if self.runpod_client is None:
             raise RuntimeError("RunPod client not configured")
@@ -308,21 +337,42 @@ class BaseEditWorker(ABC):
             job.job_id,
             workflow,
             images=self._pending_images,
+            execution_timeout_ms=execution_timeout_ms,
+            ttl_ms=ttl_ms,
         )
         self._pending_images = None
 
         if not outputs:
-            raise RuntimeError("No images returned from RunPod workflow")
+            raise RuntimeError("No output returned from RunPod workflow")
 
         first = outputs[0]
+        media_type = "video" if first.get("kind") == "video" else "image"
+
+        # Worker uploaded to S3/Supabase (production path) — media-agnostic.
         if first.get("url"):
-            return first.get("filename") or first["url"], first["url"], None, None
+            return (
+                first.get("filename") or first["url"],
+                first["url"],
+                None,
+                None,
+                media_type,
+            )
 
         data = first.get("data")
         if not data:
-            raise RuntimeError("No image data in RunPod output")
-        image_bytes = base64.b64decode(data)
-        return await self.save_output_image(image_bytes, job.job_id, folder)
+            raise RuntimeError("No output data in RunPod output")
+        raw_bytes = base64.b64decode(data)
+
+        if media_type == "video":
+            path, url, exp, h = await self.save_output_video(
+                raw_bytes, job.job_id, folder,
+                content_type=first.get("content_type"),
+                filename=first.get("filename"),
+            )
+            return path, url, exp, h, "video"
+
+        path, url, exp, h = await self.save_output_image(raw_bytes, job.job_id, folder)
+        return path, url, exp, h, "image"
 
     async def save_output_image(
         self, image_data: bytes, job_id: str, folder: str
@@ -350,6 +400,52 @@ class BaseEditWorker(ABC):
             preview_url, expires_at = self.storage.generate_signed_url(relative_path)
 
         return relative_path, preview_url, expires_at, image_hash
+
+    async def save_output_video(
+        self,
+        video_data: bytes,
+        job_id: str,
+        folder: str,
+        content_type: Optional[str] = None,
+        filename: Optional[str] = None,
+    ) -> tuple:
+        """
+        Save output video to Supabase or local storage — raw bytes, NEVER PIL.
+
+        Only reached on the base64 dev-fallback path; in production the worker
+        uploads the mp4 to S3 and the URL passes through ``_submit_and_save_media``
+        before this is called. Returns (relative_path, preview_url, expires_at, hash).
+        """
+        log_tag = self._log_tag
+
+        # Resolve extension from the filename, else the content-type, else mp4.
+        ext = "mp4"
+        if filename and "." in filename:
+            ext = filename.rsplit(".", 1)[-1].lower()
+        elif content_type and "/" in content_type:
+            ext = content_type.split("/")[-1]
+        ctype = content_type or "video/mp4"
+
+        if self.supabase_storage:
+            logger.info(f"{log_tag} {job_id} | Uploading video to Supabase")
+            preview_url, video_hash = await asyncio.to_thread(
+                self.supabase_storage.upload_video,
+                video=video_data,
+                video_id=job_id,
+                folder=folder,
+                ext=ext,
+                content_type=ctype,
+            )
+            expires_at = None
+            relative_path = f"{folder}/{job_id}.{ext}"
+        else:
+            logger.info(f"{log_tag} {job_id} | Saving video to local storage")
+            relative_path, video_hash = self.storage.save_video(
+                video_data, job_id, ext=ext
+            )
+            preview_url, expires_at = self.storage.generate_signed_url(relative_path)
+
+        return relative_path, preview_url, expires_at, video_hash
 
     async def handle_job_failure(
         self,

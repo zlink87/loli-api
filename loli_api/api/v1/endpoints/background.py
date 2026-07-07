@@ -151,10 +151,19 @@ def prepare_background_workflow(
         wf["106"]["inputs"]["seed"] = seed
         logger.debug(f"Set node 106 seed: {seed}")
 
-    # Segment the PERSON (node 202) instead of the clothing.
+    # Segment the PERSON (node 202) instead of the clothing. Single robust term —
+    # GroundingDINO expects period-separated phrases and "person" alone boxes the
+    # full subject; node 204 inverts it so the inpaint region is the background
+    # and the person (incl. face/hair) is composited back untouched.
     if "202" in wf:
-        wf["202"]["inputs"]["prompt"] = "person, human, body, face, hair"
+        wf["202"]["inputs"]["prompt"] = "person"
         logger.debug("Set node 202: person detection (for inverted background mask)")
+
+    # Node 211 (head-protect mask) is unused on the background path (the whole
+    # person is protected), but LoadImage validates file existence — point it at
+    # the source file so validation passes without staging a mask.
+    if "211" in wf:
+        wf["211"]["inputs"]["image"] = image_name
 
     # Repoint the grow/blur mask to the INVERTED person mask (node 204) so the
     # inpaint region is the background, not the subject. Falls back silently if

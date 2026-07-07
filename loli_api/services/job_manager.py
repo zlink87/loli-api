@@ -9,7 +9,7 @@ from typing import Dict, Optional, Any, Union
 from dataclasses import dataclass, field
 
 from models.enums import JobStatus
-from models.requests import GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest
+from models.requests import GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest
 
 
 @dataclass
@@ -18,7 +18,7 @@ class Job:
     job_id: str
     job_type: str  # "text_to_image", "outfit_edit", "pose_edit", "background_edit", or "pipeline_edit"
     status: JobStatus
-    request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest]
+    request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest]
     user_id: str
     created_at: datetime
     updated_at: datetime
@@ -31,6 +31,7 @@ class Job:
     preview_url: Optional[str] = None
     preview_expires_at: Optional[datetime] = None
     image_hash: Optional[str] = None
+    media_type: str = "image"  # "image" or "video" — set on the result item by jobs.py
     # RunPod serverless tracking
     runpod_id: Optional[str] = None
     runpod_status: Optional[str] = None
@@ -63,6 +64,8 @@ class JobManager:
         self.pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         # Dedicated queue for Story Batch items, isolated from interactive /v1/edit.
         self.batch_pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        # Dedicated queue for admin image-to-video (reel) jobs.
+        self.video_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self.jobs: Dict[str, Job] = {}
         # Maps RunPod job id -> local job id, so a webhook/reconciler can map back.
         self.runpod_index: Dict[str, str] = {}
@@ -92,7 +95,7 @@ class JobManager:
 
     async def create_job(
         self,
-        request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest],
+        request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest],
         user_id: str,
         job_type: str = "text_to_image"
     ) -> Job:
@@ -110,7 +113,7 @@ class JobManager:
         Raises:
             asyncio.QueueFull: If queue is at capacity
         """
-        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob", "batch_pipeline_edit": "batjob"}
+        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob", "batch_pipeline_edit": "batjob", "video_gen": "vidjob"}
         prefix = prefix_map.get(job_type, "job")
         job_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow()
@@ -147,6 +150,8 @@ class JobManager:
             await self.pipeline_queue.put(job_id)
         elif job_type == "batch_pipeline_edit":
             await self.batch_pipeline_queue.put(job_id)
+        elif job_type == "video_gen":
+            await self.video_queue.put(job_id)
         else:
             await self.queue.put(job_id)
         return job
@@ -197,6 +202,7 @@ class JobManager:
         preview_url: Optional[str] = None,
         preview_expires_at: Optional[datetime] = None,
         image_hash: Optional[str] = None,
+        media_type: Optional[str] = None,
         prompt_generated_at: Optional[datetime] = None,
         image_generated_at: Optional[datetime] = None,
         completed_at: Optional[datetime] = None
@@ -249,6 +255,8 @@ class JobManager:
                 job.preview_expires_at = preview_expires_at
             if image_hash is not None:
                 job.image_hash = image_hash
+            if media_type is not None:
+                job.media_type = media_type
             if prompt_generated_at is not None:
                 job.prompt_generated_at = prompt_generated_at
             if image_generated_at is not None:
@@ -331,6 +339,14 @@ class JobManager:
         """Mark current batch pipeline queue task as done."""
         self.batch_pipeline_queue.task_done()
 
+    async def get_next_video_job(self) -> Optional[str]:
+        """Get the next job ID from the video (reel) queue (blocking)."""
+        return await self.video_queue.get()
+
+    def mark_video_done(self) -> None:
+        """Mark current video queue task as done."""
+        self.video_queue.task_done()
+
     def queue_size(self, job_type: str = "text_to_image") -> int:
         """Get current queue size for the specified job type."""
         if job_type == "outfit_edit":
@@ -343,6 +359,8 @@ class JobManager:
             return self.pipeline_queue.qsize()
         elif job_type == "batch_pipeline_edit":
             return self.batch_pipeline_queue.qsize()
+        elif job_type == "video_gen":
+            return self.video_queue.qsize()
         return self.queue.qsize()
 
     def is_queue_full(self, job_type: str = "text_to_image") -> bool:
@@ -357,6 +375,8 @@ class JobManager:
             return self.pipeline_queue.qsize() >= self._max_queue_size
         elif job_type == "batch_pipeline_edit":
             return self.batch_pipeline_queue.qsize() >= self._max_queue_size
+        elif job_type == "video_gen":
+            return self.video_queue.qsize() >= self._max_queue_size
         return self.queue.qsize() >= self._max_queue_size
 
     async def list_jobs(

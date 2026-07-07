@@ -101,6 +101,12 @@ async def get_preview(
         media_type = "image/jpeg"
     elif decoded_path.lower().endswith(".webp"):
         media_type = "image/webp"
+    elif decoded_path.lower().endswith(".mp4"):
+        media_type = "video/mp4"
+    elif decoded_path.lower().endswith(".webm"):
+        media_type = "video/webm"
+    elif decoded_path.lower().endswith(".gif"):
+        media_type = "image/gif"
 
     # Generate filename for download
     filename = decoded_path.split("/")[-1]

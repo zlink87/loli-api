@@ -16,6 +16,7 @@ on:
       - Dockerfile.worker
       - .dockerignore
       - .github/workflows/build-worker.yml
+      - worker_custom_nodes/**
   workflow_dispatch: {}
 
 concurrency:

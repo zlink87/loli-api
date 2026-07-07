@@ -114,6 +114,59 @@ class SupabaseStorageService:
 
         return public_url, sha256_hash
 
+    def upload_video(
+        self,
+        video: bytes,
+        video_id: str,
+        folder: str = "character_videos",
+        ext: str = "mp4",
+        content_type: str = "video/mp4",
+    ) -> Tuple[str, str]:
+        """
+        Upload video bytes to Supabase storage and return the public URL.
+
+        Raw-bytes upload — NEVER through PIL (that would corrupt the video). The
+        bucket must allow the video MIME type (Supabase Storage → bucket settings).
+
+        Args:
+            video: Raw video bytes (mp4/webm)
+            video_id: ID used as the filename (typically the job id)
+            folder: Folder path within the bucket
+            ext: File extension (mp4, webm)
+            content_type: MIME type to store/serve
+
+        Returns:
+            Tuple of (public_url, sha256_hash)
+        """
+        if not isinstance(video, (bytes, bytearray)):
+            raise ValueError(f"upload_video expects bytes, got {type(video)}")
+        video_bytes = bytes(video)
+
+        sha256_hash = hashlib.sha256(video_bytes).hexdigest()
+
+        ext = (ext or "mp4").lstrip(".").lower()
+        file_path = f"{folder}/{video_id}.{ext}"
+
+        logger.info(f"Uploading video to Supabase: {file_path} ({len(video_bytes)} bytes)")
+
+        try:
+            self.client.storage.from_(self.bucket_name).upload(
+                path=file_path,
+                file=video_bytes,
+                file_options={
+                    "content-type": content_type or "video/mp4",
+                    "upsert": "true",
+                },
+            )
+        except Exception as e:
+            logger.error(f"Supabase video upload failed: {e}")
+            raise
+
+        public_url = self.client.storage.from_(self.bucket_name).get_public_url(file_path)
+        logger.info(f"Video uploaded successfully: {public_url}")
+
+        return public_url, sha256_hash
+
     def delete_image(self, file_path: str) -> bool:
         """
         Delete an image from Supabase storage.

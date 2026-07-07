@@ -44,15 +44,43 @@ EXPRESSION_PHRASES = {
     "laughing": "a bright genuine laugh",
 }
 
+# Scene-time phrases for the generation prompt. Deliberately assertive ("scene
+# set ...") because the base model has a strong daylight bias — these are
+# VERIFIED tokens (part of framing_tokens) so the polisher can never drop them,
+# and the photo-style wrapper switches to a matching grade (prompt_constants).
+TIME_OF_DAY_PHRASES = {
+    "early_morning": "scene set in the dim quiet of early morning",
+    "morning": "scene set in fresh morning light",
+    "daytime": "scene set in bright daytime",
+    "golden_hour": "scene set during golden hour",
+    "sunset": "scene set at sunset",
+    "evening": "scene set in the evening after dark",
+    "night": "scene set at night, dark nighttime environment",
+}
+
+LIGHTING_PHRASES = {
+    "natural_soft": "soft natural light",
+    "bright_daylight": "bright daylight",
+    "golden_warm": "warm golden light",
+    "moody_dim": "moody dim lighting",
+    "neon": "vivid neon lighting",
+    "candlelit": "warm candlelight",
+    "studio_softbox": "studio softbox lighting",
+    "backlit_rim": "backlit with a soft rim light",
+    "overcast": "soft overcast light",
+}
+
 
 def framing_tokens(shot) -> List[str]:
     """
-    The deterministic shot phrases (framing + angle) that are always present.
-    Deliberately excludes expression — that is mood, which the scene may embellish.
+    The deterministic shot phrases that MUST survive prompt polish: framing +
+    angle + (when requested) time of day. Deliberately excludes expression —
+    that is mood, which the scene may embellish.
     """
     tokens = [
         phrase(FRAMING_PHRASES, getattr(shot, "framing", None)),
         phrase(CAMERA_ANGLE_PHRASES, getattr(shot, "angle", None)),
+        phrase(TIME_OF_DAY_PHRASES, getattr(shot, "timeOfDay", None)),
     ]
     return [t for t in tokens if t]
 
@@ -74,8 +102,11 @@ def resolve_expression(shot, personality=None) -> Optional[str]:
 
 
 def compose_shot_block(shot, personality=None) -> str:
-    """Framing + angle + resolved expression, comma-joined (the 'shot block')."""
+    """Framing + angle + time + lighting + resolved expression, comma-joined."""
     parts = list(framing_tokens(shot))
+    lighting = phrase(LIGHTING_PHRASES, getattr(shot, "lighting", None))
+    if lighting:
+        parts.append(lighting)
     expr = resolve_expression(shot, personality)
     if expr:
         parts.append(expr)

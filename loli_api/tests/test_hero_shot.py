@@ -203,6 +203,71 @@ def test_output_options_defaults():
     assert o.resolution is None
 
 
+
+
+# --- time-of-day / lighting option ---
+def test_time_vocab_coverage():
+    from models.enums import TimeOfDayType, LightingType
+    for t in TimeOfDayType:
+        assert cv.TIME_OF_DAY_PHRASES.get(t.value), f"missing time phrase: {t.value}"
+    for li in LightingType:
+        assert cv.LIGHTING_PHRASES.get(li.value), f"missing lighting phrase: {li.value}"
+
+
+def test_time_of_day_is_a_verified_token():
+    """timeOfDay joins framing_tokens -> the polish gate enforces its survival."""
+    from models.enums import TimeOfDayType
+    shot = ShotOptions(timeOfDay=TimeOfDayType.NIGHT)
+    tokens = cv.framing_tokens(shot)
+    assert any("night" in t for t in tokens)
+    # And it lands in the assembled prompt.
+    persona = _persona()
+    positive, _, _ = assemble_generation_prompt(persona, shot=shot)
+    assert "night" in positive.lower()
+    # Unset -> no time language injected by the shot block.
+    assert not any("scene set" in t for t in cv.framing_tokens(ShotOptions()))
+
+
+def test_lighting_joins_shot_block():
+    from models.enums import LightingType
+    shot = ShotOptions(lighting=LightingType.NEON)
+    assert "neon" in cv.compose_shot_block(shot).lower()
+
+
+def test_polished_wrapper_adapts_to_night():
+    """polished@night swaps the daylight grade for a low-key night grade."""
+    day = pc.photo_style_template("polished")
+    night = pc.photo_style_template("polished", "night")
+    assert day == pc.PHOTO_STYLE_TEMPLATES["polished"]      # default byte-identical
+    assert night != day
+    assert "{$@}" in night                                   # substitution token intact
+    assert "night" in night.lower()
+    assert "warm color grade" not in night                   # daylight line replaced
+    # studio/candid ignore time; unknown style -> "".
+    assert pc.photo_style_template("studio", "night") == pc.PHOTO_STYLE_TEMPLATES["studio"]
+    assert pc.photo_style_template("candid_phone", "night") == pc.PHOTO_STYLE_TEMPLATES["candid_phone"]
+    assert pc.photo_style_template(None, "night") == ""
+
+
+def test_night_wrapper_reaches_node_125():
+    from models.enums import TimeOfDayType
+    wf = json.loads(WORKFLOW_PATH.read_text())
+    out = ComfyUIClient.prepare_character_workflow(
+        wf, "prompt", photo_style="polished", time_of_day="night"
+    )
+    assert "night" in out["125"]["inputs"]["value"].lower()
+
+
+def test_kink_moods_capped_at_two():
+    """3-4 stacked mood clauses muddy the aesthetic -> cap at 2 (order kept)."""
+    from services import attribute_phrases as ap
+    from models.enums import KinkType
+    kinks = list(KinkType)[:4]
+    joined = ap.kinks_phrase(kinks)
+    expected = [ap.phrase(ap.KINK_PHRASES, k) for k in kinks[:2]]
+    assert joined == ", ".join(e for e in expected if e)
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

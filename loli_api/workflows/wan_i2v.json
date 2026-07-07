@@ -129,17 +129,10 @@
   "60": {
     "inputs": {
       "frame_rate": 16,
-      "loop_count": 0,
       "filename_prefix": "video/wan_i2v",
-      "format": "video/h264-mp4",
-      "pix_fmt": "yuv420p",
-      "crf": 19,
-      "save_metadata": true,
-      "pingpong": false,
-      "save_output": true,
       "images": ["8", 0]
     },
-    "class_type": "VHS_VideoCombine",
-    "_meta": { "title": "Video Combine [ANCHOR: fps / filename_prefix]" }
+    "class_type": "VideoImagesBridge",
+    "_meta": { "title": "Video -> Images Bridge (mp4) [ANCHOR: fps / filename_prefix]" }
   }
 }

@@ -147,28 +147,33 @@ def prepare_outfit_workflow(
     nudity_level: Optional[NudityLevel] = None,
     outfit: Optional[OutfitType] = None,
     negative_prompt: Optional[str] = None,
+    head_mask_name: Optional[str] = None,
 ) -> dict:
     """
     Prepare the outfit workflow with injected parameters.
 
-    Identity is preserved by construction: the GroundingDINO+SAM node (202)
-    produces a *clothing-only* mask, which feeds GrowMaskWithBlur (119) ->
-    InpaintModelConditioning (121). The KSampler only denoises inside that mask;
-    the face, hair, skin and body pixels are composited back from the original
-    encode, so they cannot drift. We only steer the mask *region* here (which is
-    what the old SAM3 text prompts did); the inpaint chain is untouched.
+    Identity is preserved in layers (all evidence-verified on the worker):
+      1. Node 202 segments the PERSON — the edit-guidance region (green overlay).
+         The person mask (not garment terms) is deliberate: it is the only config
+         that works BOTH for undressing and for dressing a nude source.
+      2. The SERVER-COMPUTED head-protect mask (``head_mask_name`` -> node 211,
+         see services/head_mask.py) is subtracted (205) so the head is never in
+         the edit region. Computed with YuNet server-side because on-worker face
+         detection (GroundingDINO grounding, insightface) fails on stylized hero
+         renders — the failure that repainted whole identities in production.
+      3. InpaintModelConditioning (121) runs with noise_mask=false: the mask is
+         GUIDANCE via the green overlay, not a hard latent wall — the wall
+         produced visible halo seams; identity outside the green region is held
+         by Qwen-Image-Edit's reference-following (the original proven behavior).
+      4. ReActorFaceSwap (210) re-stamps the ORIGINAL face for photoreal sources
+         (no-ops silently on stylized faces it cannot detect).
 
     Key nodes in test_final_API.json:
         108    LoadImage             -> inputs.image   (source image filename)
+        211    LoadImage             -> inputs.image   (head-protect mask filename)
         16     easy positive         -> inputs.positive (clothing change prompt)
         106    KSampler              -> inputs.seed
-        202    GroundingDinoSAMSegment -> inputs.prompt (what region to mask)
         119    GrowMaskWithBlur      -> inputs.expand/blur_radius (mask feathering)
-
-    The mask direction mirrors the previous SAM3 behaviour:
-      - undressing (HIGH / NAKED): mask the existing clothing to remove/replace it
-      - dressing (LOW): mask the bare torso/body region to cover it
-      - MEDIUM / unspecified: keep the template default ("clothing, dress, ...")
 
     Args:
         template: Base workflow template
@@ -205,28 +210,32 @@ def prepare_outfit_workflow(
         wf["106"]["inputs"]["seed"] = seed
         logger.debug(f"Set node 106 seed: {seed}")
 
-    # Adaptive mask target (GroundingDINO+SAM text prompt) based on nudity direction.
-    if nudity_level == NudityLevel.HIGH or outfit == OutfitType.NAKED:
-        # Going toward nudity: mask the existing clothing so it is removed/replaced.
-        if "202" in wf:
-            wf["202"]["inputs"]["prompt"] = (
-                "clothing, dress, shirt, top, bra, underwear, pants, skirt, shorts"
-            )
-            logger.debug("Segment 202: targeting clothing for removal")
-    elif nudity_level == NudityLevel.LOW:
-        # Dressing up (possibly from bare skin): mask the torso/body region to cover.
-        if "202" in wf:
-            wf["202"]["inputs"]["prompt"] = (
-                "torso, chest, waist, hips, stomach, upper body"
-            )
-            logger.debug("Segment 202: targeting body region for dressing")
-        # Widen + feather the mask for smoother dressing transitions.
+    # Node 211: server-computed head-protect mask (white = never edit). The
+    # caller stages the PNG alongside the source image. Defensive fallback when
+    # no mask was staged: skip the subtraction entirely (119 <- raw person mask)
+    # and point 211 at the source file so graph validation still passes.
+    if "211" in wf:
+        if head_mask_name:
+            wf["211"]["inputs"]["image"] = head_mask_name
+            logger.debug(f"Set node 211 head mask: {head_mask_name}")
+        else:
+            wf["211"]["inputs"]["image"] = image_name
+            if "119" in wf and "202" in wf:
+                wf["119"]["inputs"]["mask"] = ["202", 1]
+            logger.debug("No head mask staged; using raw person mask")
+
+    # Mask target: the template's node 202 segments "person" for EVERY direction —
+    # evidence-verified as the only config that handles both undressing (garments
+    # are on the body) and dressing a nude source (garment-term masks find nothing
+    # and produce patchy garbage). The head is protected by the subtracted
+    # server-computed mask (node 211/212/205), and ReActorFaceSwap (210) re-stamps
+    # the original face on photoreal sources.
+    if nudity_level == NudityLevel.LOW:
+        # Dressing transitions blend smoother with a wider, softer mask edge.
         if "119" in wf:
             wf["119"]["inputs"]["expand"] = 10
             wf["119"]["inputs"]["blur_radius"] = 8
             logger.debug("Increased mask grow for dressing transition")
-
-    # Default (MEDIUM or unspecified): keep the template's clothing prompt on node 202.
 
     return wf
 

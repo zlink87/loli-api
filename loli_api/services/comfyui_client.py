@@ -269,7 +269,8 @@ class ComfyUIClient:
         batch_size: Optional[int] = None,
         negative_prompt: Optional[str] = None,
         photo_style: Optional[str] = None,
-        hires: bool = False
+        hires: bool = False,
+        time_of_day: Optional[str] = None,
     ) -> dict:
         """
         Prepare the character creation workflow with injected parameters.
@@ -293,6 +294,9 @@ class ComfyUIClient:
                 None/unknown = keep the workflow's baked-in template.
             hires: When True, route the output through the detail-refine branch
                 (upscale-model round trip + refine steps; same output resolution).
+            time_of_day: TimeOfDayType value; swaps the polished wrapper's
+                lighting sentence for a time-matched grade (night stays polished
+                low-key instead of fighting the daylight grade). None = default.
 
         Returns:
             Modified workflow dictionary ready for execution
@@ -309,10 +313,13 @@ class ComfyUIClient:
         # into this template AFTER Grok polish (inside ComfyUI), so the finish
         # here is immune to the polisher. Unknown/None -> baked-in text stands.
         if photo_style and "125" in workflow:
-            template_text = pc.PHOTO_STYLE_TEMPLATES.get(photo_style)
+            template_text = pc.photo_style_template(photo_style, time_of_day)
             if template_text:
                 workflow["125"]["inputs"]["value"] = template_text
-                logger.debug(f"Set photo style wrapper in node 125: {photo_style}")
+                logger.debug(
+                    f"Set photo style wrapper in node 125: {photo_style}"
+                    + (f" @ {time_of_day}" if time_of_day else "")
+                )
 
         # Node 207: output switch. Default input is node 284 (single-pass decode).
         # hires re-points it at node 300 (VAEDecode of the refine sampler 181),

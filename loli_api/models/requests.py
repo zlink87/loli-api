@@ -25,10 +25,13 @@ from .enums import (
     AccessoryType,
     NudityLevel,
     PoseType,
+    MotionType,
     ShotFramingType,
     CameraAngleType,
     ExpressionType,
     PhotoStyleType,
+    TimeOfDayType,
+    LightingType,
 )
 
 
@@ -210,6 +213,23 @@ class ShotOptions(BaseModel):
     photoStyle: PhotoStyleType = Field(
         default=PhotoStyleType.POLISHED,
         description="Photographic finish: polished (retouched editorial), studio, or candid_phone (legacy raw look)"
+    )
+    timeOfDay: Optional[TimeOfDayType] = Field(
+        default=None,
+        description=(
+            "Time of day for the scene (early_morning/morning/daytime/golden_hour/"
+            "sunset/evening/night). Enforced: the phrase becomes a verified prompt "
+            "token AND the photo-style wrapper adapts its lighting/grade to match "
+            "(night stays polished low-key instead of fighting the daylight grade). "
+            "None = the default bright editorial look."
+        ),
+    )
+    lighting: Optional[LightingType] = Field(
+        default=None,
+        description=(
+            "Optional lighting flavor (e.g. neon, candlelit, moody_dim, "
+            "studio_softbox); appended to the shot block"
+        ),
     )
 
 
@@ -409,6 +429,83 @@ class PoseEditRequest(BaseModel):
                 "source_image": "https://xxx.supabase.co/storage/v1/object/public/images/test.png",
                 "pose": "sitting_casual",
                 "seed": 12345
+            }
+        }
+
+
+# Whitelisted frame counts for WAN i2v (must be 4n+1). 81 ≈ 5s @ 16fps.
+VIDEO_ALLOWED_LENGTHS = {49, 81}
+# Vertical reel defaults (portrait 9:16-ish); WAN is trained at 16fps.
+VIDEO_DEFAULT_WIDTH = 480
+VIDEO_DEFAULT_HEIGHT = 832
+VIDEO_DEFAULT_LENGTH = 81
+VIDEO_DEFAULT_FPS = 16
+
+
+class VideoGenerateRequest(BaseModel):
+    """
+    Request body for POST /v1/characters/{character_id}/videos (admin).
+
+    The client sends ``source_image_id`` (a character_images.id) + a motion
+    preset. The endpoint resolves the still to a URL and fills ``character_id``
+    (from the path) and ``source_image`` (the resolved URL) server-side before
+    the job is enqueued; those two are not part of the client contract.
+    """
+
+    source_image_id: str = Field(
+        ...,
+        description="character_images.id of the still to animate (must belong to the character)",
+    )
+    motion: MotionType = Field(
+        ...,
+        description="Motion preset for the clip",
+    )
+    motionPrompt: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Optional free-text motion description prepended to the preset",
+    )
+    negativePrompt: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Extra negative prompt terms",
+    )
+    seed: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=1000000000,
+        description="Random seed for reproducibility",
+    )
+    length: Optional[int] = Field(
+        default=None,
+        description=f"Frame count. Allowed: {sorted(VIDEO_ALLOWED_LENGTHS)}. None = server default (81).",
+    )
+    fps: Optional[int] = Field(
+        default=None,
+        ge=8,
+        le=30,
+        description="Frames per second. None = server default (16).",
+    )
+
+    # Filled server-side (from the path + source resolution); not client-supplied.
+    character_id: Optional[str] = Field(default=None, description="Set server-side from the URL path")
+    source_image: Optional[str] = Field(default=None, description="Resolved still URL, set server-side")
+
+    @field_validator("length")
+    @classmethod
+    def validate_length(cls, v):
+        if v is not None and v not in VIDEO_ALLOWED_LENGTHS:
+            raise ValueError(
+                f"Unsupported length '{v}'. Allowed: {sorted(VIDEO_ALLOWED_LENGTHS)}"
+            )
+        return v
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "source_image_id": "9c1e2a4f-0000-0000-0000-000000000000",
+                "motion": "hair_in_wind",
+                "seed": 12345,
             }
         }
 

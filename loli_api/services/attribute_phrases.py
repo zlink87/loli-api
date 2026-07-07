@@ -216,8 +216,15 @@ def hair_phrase(hair_style, hair_color) -> str:
 
 
 def kinks_phrase(kinks) -> str:
-    """Join up to 3 kink mood phrases."""
+    """
+    Join at most 2 kink mood phrases (in the order given).
+
+    Capped deliberately: stacking 3-4 mood clauses ("stern disciplinary mood,
+    vulnerable blushing mood, sultry confident mood, ...") muddies the hero-shot
+    aesthetic — conflicting moods pull expression and color grading in different
+    directions and the cards stop looking like one consistent set.
+    """
     if not kinks:
         return ""
-    parts = [phrase(KINK_PHRASES, k) for k in kinks]
-    return ", ".join(p for p in parts if p)
+    parts = [p for p in (phrase(KINK_PHRASES, k) for k in kinks) if p]
+    return ", ".join(parts[:2])

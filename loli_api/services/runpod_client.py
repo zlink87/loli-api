@@ -193,37 +193,77 @@ class RunPodServerlessClient:
         """GET /health. Endpoint worker/queue status."""
         return await self._request("GET", "/health")
 
+    # Filename extensions we treat on the raw-bytes (non-PIL) path.
+    _VIDEO_EXT_CONTENT_TYPE = {
+        "mp4": "video/mp4",
+        "webm": "video/webm",
+        "mov": "video/quicktime",
+        "gif": "image/gif",  # animated; stored/served raw, not re-encoded
+    }
+
     @staticmethod
     def parse_output(output: Optional[dict]) -> List[Dict[str, Optional[str]]]:
         """
-        Normalize worker-comfyui output into a list of image descriptors:
-            [{"filename", "type", "url"|None, "data"|None}, ...]
+        Normalize worker-comfyui output into a list of media descriptors:
+            [{"filename", "type", "url"|None, "data"|None, "kind", "content_type"}, ...]
 
         ``url`` is set when the worker uploaded to S3/Supabase (preferred).
         ``data`` holds base64 when no S3 upload was configured (dev fallback).
+
+        ``kind`` is "image" or "video", classified by the output filename
+        EXTENSION first (so a VHS mp4 is detected regardless of which output key
+        the worker uses), falling back to the source key. Video output can arrive
+        under ``images`` (some worker-comfyui builds flatten everything there),
+        ``gifs`` (VHS_VideoCombine's legacy key), or ``videos`` — scan all three.
+        ``filename/type/url/data`` are preserved unchanged so existing
+        image-only consumers keep working.
         """
         if not output:
             return []
-        images = output.get("images") or []
         normalized: List[Dict[str, Optional[str]]] = []
-        for img in images:
-            if not isinstance(img, dict):
+        for key in ("images", "gifs", "videos"):
+            items = output.get(key) or []
+            if not isinstance(items, list):
                 continue
-            img_type = img.get("type")
-            data = img.get("data")
-            url = img.get("url")
-            # worker-comfyui puts the S3 URL in `data` when type == "s3_url"
-            if img_type in ("s3_url", "url") and data and not url:
-                url = data
-                data = None
-            normalized.append(
-                {
-                    "filename": img.get("filename"),
-                    "type": img_type,
-                    "url": url,
-                    "data": data if img_type in ("base64", None) else None,
-                }
-            )
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                img_type = item.get("type")
+                data = item.get("data")
+                url = item.get("url")
+                filename = item.get("filename")
+                # worker-comfyui puts the S3 URL in `data` when type == "s3_url"
+                if img_type in ("s3_url", "url") and data and not url:
+                    url = data
+                    data = None
+
+                # Classify by extension first, then by which key it came under.
+                ext = ""
+                if filename and "." in filename:
+                    ext = filename.rsplit(".", 1)[-1].lower()
+                content_type = RunPodServerlessClient._VIDEO_EXT_CONTENT_TYPE.get(ext)
+                if content_type is not None:
+                    # A .gif is an animated image but stays on the raw-bytes path;
+                    # everything else in the map is real video.
+                    kind = "image" if ext == "gif" else "video"
+                elif key in ("gifs", "videos"):
+                    # Unknown extension but under a video key -> treat as video.
+                    kind = "video"
+                    content_type = "video/mp4"
+                else:
+                    kind = "image"
+                    content_type = "image/png"
+
+                normalized.append(
+                    {
+                        "filename": filename,
+                        "type": img_type,
+                        "url": url,
+                        "data": data if img_type in ("base64", None) else None,
+                        "kind": kind,
+                        "content_type": content_type,
+                    }
+                )
         return normalized
 
     @staticmethod

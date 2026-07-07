@@ -600,3 +600,64 @@ CREATE TABLE public.character_batch_items (
   CONSTRAINT character_batch_items_character_image_id_fkey FOREIGN KEY (character_image_id) REFERENCES public.character_images(id)
 );
 ```
+
+---
+
+## Addendum (2026-07-07): photo management + time-of-day
+
+### Photo management (admin gallery)
+
+All admin-gated (same JWT as the other character routes):
+
+```
+POST   /v1/characters/{id}/images        body: { "imageUrl": "<preview/storage URL>",
+                                                 "prompt"?: str, "seed"?: int, "outfit"?: str,
+                                                 "label"?: str, "setAsAvatar"?: bool }
+  -> 201 CharacterImageRead. THE SAVE BUTTON: generation/edit jobs only upload to
+     storage and return a preview URL — nothing is attached to the character until
+     the admin saves it with this call. "label" also creates a chat quick action;
+     "setAsAvatar" additionally makes it the avatar. (Batches are the deliberate
+     exception: they persist every succeeded item automatically.)
+
+GET    /v1/characters/{id}/images
+  -> [ { "id", "imageUrl", "imageType", "isAvatar", "outfit", "prompt", "createdAt" }, ... ]
+     Newest first. imageType: "gallery" | "video" (avatar rows keep their type).
+
+DELETE /v1/characters/{id}/images/{imageId}
+  -> 204. Removes the character_images row AND its chat quick action
+     (chat_persona_actions). Derived video rows are detached (source_image_id
+     nulled), not deleted. Storage object kept. Deleting the current avatar does
+     NOT clear the character's avatar URLs — set a new avatar first/after.
+
+PUT    /v1/characters/{id}/avatar        body: { "imageId": "<character_images.id>" }
+  -> CharacterRead. Points profile_image_url / avatar_image_url / chat_avatar_url
+     at that photo and maintains the is_avatar flag on character_images.
+```
+
+### Time-of-day / lighting for hero generation
+
+`POST /v1/generate/image` — `shot` gains two optional fields:
+
+```jsonc
+"shot": {
+  "framing": "waist_up",          // unchanged defaults
+  "angle": "eye_level",
+  "photoStyle": "polished",
+  "timeOfDay": "night",           // early_morning|morning|daytime|golden_hour|sunset|evening|night
+  "lighting": "neon"              // optional flavor: natural_soft|bright_daylight|golden_warm|
+                                  //   moody_dim|neon|candlelit|studio_softbox|backlit_rim|overcast
+}
+```
+
+`timeOfDay` is ENFORCED, not advisory: the phrase becomes a verified prompt token
+(survives prompt polish) and the polished photo-style wrapper swaps its lighting
+sentence to a matching grade — so "night" produces a polished low-key night look
+instead of the daylight grade fighting the request. Omit it for the default
+bright editorial look. Free-text "at night" in `prompt` is no longer the way to
+ask for night — use `shot.timeOfDay`.
+
+Consistency note for card sets: hero cards look most uniform when generated with
+the same `shot` values (defaults) and at most ~2 kinks per persona (the prompt
+layer now caps kink mood phrases at 2). Outfit texts that emphasize skirts/legs
+will pull the crop wider than waist_up — pick `framing: "three_quarter"` for
+those instead of fighting it.

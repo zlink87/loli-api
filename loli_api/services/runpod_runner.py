@@ -33,6 +33,8 @@ async def run_workflow(
     webhook_url: Optional[str] = None,
     progress_start: float = 0.3,
     progress_end: float = 0.9,
+    execution_timeout_ms: Optional[int] = None,
+    ttl_ms: Optional[int] = None,
 ) -> List[Dict[str, Optional[str]]]:
     """
     Submit a workflow to RunPod and wait for completion.
@@ -40,13 +42,19 @@ async def run_workflow(
     Returns the normalized output list from ``RunPodServerlessClient.parse_output``.
     Raises RunPodError on submission failure and RuntimeError on terminal job failure
     (FAILED / CANCELLED / TIMED_OUT) or local timeout.
+
+    ``execution_timeout_ms``/``ttl_ms`` override the default per-job caps (used by
+    the video worker, whose jobs run for minutes) — default to the standard settings.
     """
+    exec_timeout_ms = execution_timeout_ms or settings.RUNPOD_EXECUTION_TIMEOUT_MS
+    job_ttl_ms = ttl_ms or settings.RUNPOD_TTL_MS
+
     runpod_id = await runpod_client.submit(
         workflow,
         images=images,
         webhook_url=webhook_url,
-        execution_timeout_ms=settings.RUNPOD_EXECUTION_TIMEOUT_MS,
-        ttl_ms=settings.RUNPOD_TTL_MS,
+        execution_timeout_ms=exec_timeout_ms,
+        ttl_ms=job_ttl_ms,
     )
 
     # Record the RunPod id so a webhook/reconciler can map it back to this job.
@@ -58,7 +66,7 @@ async def run_workflow(
 
     poll_interval = max(1, settings.RUNPOD_POLL_INTERVAL_SECONDS)
     # Local safety deadline slightly beyond RunPod's own executionTimeout.
-    deadline = time.monotonic() + (settings.RUNPOD_EXECUTION_TIMEOUT_MS / 1000.0) + 60
+    deadline = time.monotonic() + (exec_timeout_ms / 1000.0) + 60
 
     while True:
         if time.monotonic() > deadline:

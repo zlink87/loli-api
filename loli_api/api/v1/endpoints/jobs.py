@@ -112,7 +112,7 @@ async def get_job_status(
     if job.status == JobStatus.SUCCEEDED and job.preview_url:
         response.results = [
             JobResultItem(
-                type="image",
+                type=job.media_type or "image",
                 previewUrl=job.preview_url,
                 sha256=job.image_hash
             )

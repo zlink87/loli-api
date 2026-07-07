@@ -262,6 +262,18 @@ class PoseType(str, Enum):
     COOKING = "cooking"
 
 
+class MotionType(str, Enum):
+    """Available motion presets for image-to-video (reel) generation."""
+    SUBTLE_IDLE = "subtle_idle"
+    SLOW_TURN = "slow_turn"
+    HAIR_IN_WIND = "hair_in_wind"
+    HAIR_FLIP = "hair_flip"
+    BLOW_KISS = "blow_kiss"
+    WAVE = "wave"
+    WALK_TOWARD = "walk_toward"
+    LOOK_OVER_SHOULDER = "look_over_shoulder"
+
+
 class AccessoryType(str, Enum):
     """Available accessory types for outfit editing."""
     NECKLACE = "necklace"

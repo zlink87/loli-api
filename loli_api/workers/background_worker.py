@@ -274,11 +274,13 @@ class BackgroundWorker:
                 negative_prompt=negative_prompt,
                 photo_style=shot.photoStyle.value,
                 hires=hires,
+                time_of_day=shot.timeOfDay.value if shot.timeOfDay else None,
             )
 
             logger.info(
                 f"[WORKFLOW] {job.job_id} | Seed: {seed} | Shot: {shot.framing.value}/"
-                f"{shot.angle.value} | Style: {shot.photoStyle.value} | Hires: {hires}"
+                f"{shot.angle.value} | Style: {shot.photoStyle.value}"
+                f"{'@' + shot.timeOfDay.value if shot.timeOfDay else ''} | Hires: {hires}"
             )
 
             await self.job_manager.update_job_status(

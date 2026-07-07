@@ -580,6 +580,26 @@ def validate_and_repair(
     return repaired
 
 
+# Generic appearance patterns a planner might emit OUTSIDE the vocab keys above
+# ("silky auburn hair", "piercing green eyes", "sun-tanned skin", "a stunning
+# young redhead"). Free text must describe the SCENE only, never the person —
+# the person is pixel-protected by the edit masks; this scrub is defense-in-depth.
+_APPEARANCE_PATTERNS = [
+    re.compile(r"\b(?:\w+[- ]){0,2}\w*\s*hair(?:ed)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:\w+[- ]){0,2}\w*\s*eyes?\b", re.IGNORECASE),
+    re.compile(r"\b(?:\w+[- ]){0,2}\w*\s*skin(?:ned)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:\w+[- ]){0,2}\w*\s*(?:complexion|freckles?|curves|physique|figure)\b", re.IGNORECASE),
+    # person nouns with optional descriptor stack: "a stunning young redhead/woman/girl..."
+    re.compile(
+        r"\b(?:an?\s+)?(?:\w+\s+){0,3}"
+        r"(?:woman|girl|lady|man|guy|redhead|blonde|brunette|beauty|babe)\b",
+        re.IGNORECASE,
+    ),
+    # age descriptors
+    re.compile(r"\b(?:young|youthful|teen(?:age[dr]?)?|mature|middle[- ]aged|elderly)\b", re.IGNORECASE),
+]
+
+
 def _scrub_identity(text: str) -> str:
     if not text:
         return text
@@ -589,7 +609,13 @@ def _scrub_identity(text: str) -> str:
         if tok and tok in low:
             out = re.sub(re.escape(tok), "", out, flags=re.IGNORECASE)
             low = out.lower()
-    return re.sub(r"\s{2,}", " ", out).strip(" ,")
+    # Generic appearance phrases (anything the vocab keys didn't catch).
+    for pat in _APPEARANCE_PATTERNS:
+        out = pat.sub("", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.;])", r"\1", out)
+    out = re.sub(r"([,.;])\1+", r"\1", out)
+    return out.strip(" ,.;")
 
 
 # ---------------------------------------------------------------------------

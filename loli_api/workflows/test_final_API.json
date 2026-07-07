@@ -21,7 +21,7 @@
     "inputs": {
       "model_name": "sam_vit_h (2.56GB)"
     },
-    "class_type": "SAMModelLoader",
+    "class_type": "SAMModelLoader (segment anything)",
     "_meta": {
       "title": "SAM Model Loader"
     }
@@ -30,7 +30,7 @@
     "inputs": {
       "model_name": "GroundingDINO_SwinT_OGC (694MB)"
     },
-    "class_type": "GroundingDinoModelLoader",
+    "class_type": "GroundingDinoModelLoader (segment anything)",
     "_meta": {
       "title": "GroundingDINO Model Loader"
     }
@@ -49,10 +49,10 @@
         "108",
         0
       ],
-      "prompt": "clothing, dress, shirt, top, pants, skirt, outfit",
+      "prompt": "person",
       "threshold": 0.3
     },
-    "class_type": "GroundingDinoSAMSegment",
+    "class_type": "GroundingDinoSAMSegment (segment anything)",
     "_meta": {
       "title": "Segment (text -> mask)"
     }
@@ -64,7 +64,7 @@
         1
       ]
     },
-    "class_type": "InvertMask",
+    "class_type": "InvertMask (segment anything)",
     "_meta": {
       "title": "Invert Mask (background use)"
     }
@@ -78,10 +78,10 @@
       "blur_radius": 5,
       "lerp_alpha": 1,
       "decay_factor": 1,
-      "fill_holes": true,
+      "fill_holes": false,
       "mask": [
-        "202",
-        1
+        "205",
+        0
       ]
     },
     "class_type": "GrowMaskWithBlur",
@@ -299,7 +299,7 @@
   "116": {
     "inputs": {
       "images": [
-        "118",
+        "210",
         0
       ],
       "filename_prefix": "edit_out"
@@ -307,6 +307,74 @@
     "class_type": "SaveImage",
     "_meta": {
       "title": "Save Image"
+    }
+  },
+  "205": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "operation": "subtract",
+      "destination": [
+        "202",
+        1
+      ],
+      "source": [
+        "212",
+        0
+      ]
+    },
+    "class_type": "MaskComposite",
+    "_meta": {
+      "title": "Clothing minus face/hair"
+    }
+  },
+  "210": {
+    "inputs": {
+      "enabled": true,
+      "input_image": [
+        "118",
+        0
+      ],
+      "swap_model": "inswapper_128.onnx",
+      "facedetection": "retinaface_resnet50",
+      "face_restore_model": "codeformer-v0.1.0.pth",
+      "face_restore_visibility": 1,
+      "codeformer_weight": 0.5,
+      "detect_gender_input": "no",
+      "detect_gender_source": "no",
+      "input_faces_index": "0",
+      "source_faces_index": "0",
+      "console_log_level": 1,
+      "source_image": [
+        "108",
+        0
+      ]
+    },
+    "class_type": "ReActorFaceSwap",
+    "_meta": {
+      "title": "ReActor face stamp (lock original face)"
+    }
+  },
+  "211": {
+    "inputs": {
+      "image": "head_mask.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Head-protect mask (server-computed)"
+    }
+  },
+  "212": {
+    "inputs": {
+      "image": [
+        "211",
+        0
+      ],
+      "channel": "red"
+    },
+    "class_type": "ImageToMask",
+    "_meta": {
+      "title": "Head mask -> MASK"
     }
   }
 }

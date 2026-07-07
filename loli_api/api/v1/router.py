@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from .endpoints import (
     generate, jobs, preview, edit, outfit, pose, background, pipeline,
-    characters, batches,
+    characters, batches, video,
 )
 
 # Create main API router
@@ -22,6 +22,7 @@ api_router.include_router(background.router)
 api_router.include_router(pipeline.router)
 api_router.include_router(characters.router)
 api_router.include_router(batches.router)
+api_router.include_router(video.router)
 
 
 def configure_services(
@@ -36,6 +37,7 @@ def configure_services(
     supabase_storage_service=None,
     runpod_client=None,
     character_store=None,
+    character_image_store=None,
     batch_store=None,
     batch_orchestrator=None,
 ):
@@ -76,7 +78,15 @@ def configure_services(
     # Story Batches (optional — only wired when the Supabase DB is configured)
     if character_store is not None:
         characters.set_character_store(character_store)
+    if character_image_store is not None:
+        characters.set_character_image_store(character_image_store)
     if batch_store is not None:
         batches.set_batch_store(batch_store)
     if batch_orchestrator is not None:
         batches.set_orchestrator(batch_orchestrator)
+    # Reels (image-to-video) — admin, Supabase-gated
+    video.set_job_manager(job_manager)
+    if notification_service:
+        video.set_notification_service(notification_service)
+    if character_image_store is not None:
+        video.set_character_image_store(character_image_store)

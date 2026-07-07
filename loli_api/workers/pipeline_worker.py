@@ -31,13 +31,18 @@ from api.v1.endpoints.outfit import build_prompt, prepare_outfit_workflow
 from api.v1.endpoints.pose import build_pose_prompt, prepare_pose_workflow
 from api.v1.endpoints.background import build_background_prompt, prepare_background_workflow
 
+from services import head_mask as head_mask_service
 from services import pose_assets
 from services.prompt_constants import apply_edit_photo_style
 
 logger = logging.getLogger(__name__)
 
-# Default order in which pipeline steps execute
-DEFAULT_PIPELINE_ORDER = ["pose", "outfit", "background"]
+# Default order in which pipeline steps execute.
+# Pose runs LAST deliberately: the pose workflow ends with a ReActor face-swap
+# that stamps the hero's face onto the reposed body — if outfit/background ran
+# after it, their re-diffusion could repaint that face. Outfit and background
+# are masked (face pixel-protected), so they are safe to run first.
+DEFAULT_PIPELINE_ORDER = ["outfit", "background", "pose"]
 
 
 def _is_oom_error(error_msg: str) -> bool:
@@ -194,13 +199,16 @@ class PipelineBackgroundWorker:
     def _build_step_workflow(
         self, step_name: str, request, source_name: str, seed: int, job_id: str,
         pose_ref_name: Optional[str] = None,
+        head_mask_name: Optional[str] = None,
     ) -> dict:
         """
         Build the ComfyUI workflow for a pipeline step, with source_name as input.
 
         For the pose step, ``pose_ref_name`` is the flat filename of the staged
-        pose reference (node 170); it is computed once in ``_run_step`` so the same
-        name feeds both node 170 and the base64 ``input.images[]`` entry.
+        pose reference (node 170); for the outfit step, ``head_mask_name`` is the
+        flat filename of the staged server-computed head-protect mask (node 211).
+        Both are computed once in ``_run_step`` so the same names feed the nodes
+        and the base64 ``input.images[]`` entries.
         """
         # Optional photographic-finish clause appended to every step's prompt so
         # the look stays consistent through the chained re-renders. None (the
@@ -220,7 +228,9 @@ class PipelineBackgroundWorker:
             )
             logger.info(f"[PIPELINE] {job_id} | outfit | Prompt: {prompt[:80]}...")
             return prepare_outfit_workflow(
-                self._outfit_template, source_name, prompt, seed=seed
+                self._outfit_template, source_name, prompt, seed=seed,
+                nudity_level=request.nudityLevel, outfit=request.outfit,
+                head_mask_name=head_mask_name,
             )
         if step_name == "background":
             prompt = apply_edit_photo_style(build_background_prompt(request.prompt), photo_style)
@@ -251,8 +261,31 @@ class PipelineBackgroundWorker:
             )
             images.append({"name": pose_ref_name, "image": pose_ref_uri})
 
+        # Outfit steps ship the server-computed head-protect mask (YuNet —
+        # reliable on stylized hero renders where on-worker face detection is
+        # not). Subtracted from the person mask so the head is never editable.
+        head_mask_name: Optional[str] = None
+        if step_name == "outfit":
+            try:
+                mask_bytes, face_found = await asyncio.to_thread(
+                    head_mask_service.build_head_mask, source_bytes
+                )
+                head_mask_name = f"headmask_{uuid.uuid4().hex[:12]}.png"
+                images.append({
+                    "name": head_mask_name,
+                    "image": "data:image/png;base64,"
+                             + base64.b64encode(mask_bytes).decode("ascii"),
+                })
+                logger.info(
+                    f"[PIPELINE] {job_id} | outfit | Head mask staged "
+                    f"({'face found' if face_found else 'no face — black mask'})"
+                )
+            except Exception as e:  # noqa: BLE001 — protective, not critical
+                logger.warning(f"[PIPELINE] {job_id} | Head mask failed: {e}")
+
         workflow = self._build_step_workflow(
-            step_name, request, source_name, seed, job_id, pose_ref_name=pose_ref_name
+            step_name, request, source_name, seed, job_id,
+            pose_ref_name=pose_ref_name, head_mask_name=head_mask_name,
         )
 
         outputs = await runpod_runner.run_workflow(

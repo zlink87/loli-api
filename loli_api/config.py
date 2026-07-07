@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     COMFYUI_EDIT_WORKFLOW_PATH: str = "workflows/edit.json"
     COMFYUI_OUTFIT_WORKFLOW_PATH: str = "workflows/test_final_API.json"
     COMFYUI_POSE_WORKFLOW_PATH: str = "workflows/edit_pose_action.json"
+    COMFYUI_VIDEO_WORKFLOW_PATH: str = "workflows/wan_i2v.json"
     COMFYUI_INPUT_DIR: str = "../ComfyUI/input"
 
     # GPU execution backend: "runpod" (serverless) or "local" (legacy WebSocket)
@@ -39,6 +40,10 @@ class Settings(BaseSettings):
     RUNPOD_EXECUTION_TIMEOUT_MS: int = 600_000   # policy.executionTimeout (per-job cap)
     RUNPOD_TTL_MS: int = 3_600_000               # policy.ttl (total job lifespan)
     RUNPOD_POLL_INTERVAL_SECONDS: int = 5        # reconciler poll cadence
+    # Video (reel) jobs run for minutes and cold-load ~33 GB of WAN models, so
+    # they need much longer caps than image jobs.
+    RUNPOD_VIDEO_EXECUTION_TIMEOUT_MS: int = 1_800_000   # 30 min per-job cap
+    RUNPOD_VIDEO_TTL_MS: int = 5_400_000                 # 90 min total lifespan
 
     # Image Cache (for outfit edit)
     IMAGE_CACHE_TTL_SECONDS: int = 1800  # 30 minutes
