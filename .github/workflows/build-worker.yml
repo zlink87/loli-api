@@ -1,0 +1,73 @@
+name: Build worker image
+
+# Builds Dockerfile.worker on a native amd64 runner and publishes it to GHCR, so
+# RunPod deploys a PREBUILT image instead of using its (flaky) GitHub build. Point
+# the RunPod Serverless endpoint at:
+#   ghcr.io/<owner>/loli-worker:latest
+#
+# Only runs when the worker image definition changes (not on every code push) -
+# the worker image is base + custom nodes; app code is served by the API/server,
+# not baked in. Use "Run workflow" (workflow_dispatch) to rebuild on demand.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.worker
+      - .dockerignore
+      - .github/workflows/build-worker.yml
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # The base image is ~11 GB; free the runner's disk before pulling/building.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercase the owner for a valid GHCR image name.
+      - name: Compute image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/loli-worker" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.worker
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:${{ github.sha }}
+
+      - name: Summary
+        run: |
+          echo "Pushed: ${{ steps.img.outputs.name }}:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed: ${{ steps.img.outputs.name }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
