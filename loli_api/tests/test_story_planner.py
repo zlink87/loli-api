@@ -1,6 +1,6 @@
 """
 Tests for the story planner: deterministic reproducibility, count guarantee,
-controls enforcement, Grok-output repair, provider selection, and vocab coverage.
+controls enforcement, LLM-output repair, provider selection, and vocab coverage.
 
 Runs under pytest or directly: python loli_api/tests/test_story_planner.py
 """
@@ -30,9 +30,10 @@ def _character(occupation="nurse", likes=None, dislikes=None):
     return Character(persona=persona, likes=likes or [], dislikes=dislikes or [])
 
 
-def _fake_settings(xai="", anthropic="", provider=""):
+def _fake_settings(venice="", anthropic="", provider=""):
     return SimpleNamespace(
-        XAI_API_KEY=xai, XAI_BASE_URL="https://api.x.ai/v1", XAI_MODEL="grok-4",
+        VENICE_API_KEY=venice, VENICE_BASE_URL="https://api.venice.ai/api/v1",
+        VENICE_MODEL="venice-uncensored",
         ANTHROPIC_API_KEY=anthropic, ANTHROPIC_MODEL="claude-sonnet-4-5",
         STORY_PLANNER_PROVIDER=provider,
     )
@@ -120,7 +121,7 @@ def test_validate_and_repair_clamps_nudity():
     assert out[0].nudityLevel == NudityLevel.MEDIUM
 
 
-# --- Grok output repair (offline) ---
+# --- LLM output repair (offline) ---
 def test_coerce_enum_repairs_near_miss():
     # The stale "sitting_casual" example (see requests.py) repairs to a real pose.
     assert _coerce_enum(PoseType, "sitting_casual") == PoseType.SITTING
@@ -157,7 +158,7 @@ def test_parse_arcs_json_malformed_returns_empty():
 # --- provider selection ---
 def test_nsfw_never_selects_claude():
     char = _character()
-    settings = _fake_settings(xai="", anthropic="claude-key")  # claude available, but batch is nsfw
+    settings = _fake_settings(venice="", anthropic="claude-key")  # claude available, but batch is nsfw
     controls = BatchControls(content_rating="nsfw", base_seed=1)
     scenes, provider = asyncio.run(plan_scenes(char, 10, controls, settings=settings))
     assert provider == "deterministic"

@@ -1,4 +1,94 @@
 {
+  "108": {
+    "inputs": {
+      "image": "outfit_source.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Image1 (source)"
+    }
+  },
+  "101": {
+    "inputs": {
+      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "200": {
+    "inputs": {
+      "model_name": "sam_vit_h (2.56GB)"
+    },
+    "class_type": "SAMModelLoader",
+    "_meta": {
+      "title": "SAM Model Loader"
+    }
+  },
+  "201": {
+    "inputs": {
+      "model_name": "GroundingDINO_SwinT_OGC (694MB)"
+    },
+    "class_type": "GroundingDinoModelLoader",
+    "_meta": {
+      "title": "GroundingDINO Model Loader"
+    }
+  },
+  "202": {
+    "inputs": {
+      "sam_model": [
+        "200",
+        0
+      ],
+      "grounding_dino_model": [
+        "201",
+        0
+      ],
+      "image": [
+        "108",
+        0
+      ],
+      "prompt": "clothing, dress, shirt, top, pants, skirt, outfit",
+      "threshold": 0.3
+    },
+    "class_type": "GroundingDinoSAMSegment",
+    "_meta": {
+      "title": "Segment (text -> mask)"
+    }
+  },
+  "204": {
+    "inputs": {
+      "mask": [
+        "202",
+        1
+      ]
+    },
+    "class_type": "InvertMask",
+    "_meta": {
+      "title": "Invert Mask (background use)"
+    }
+  },
+  "119": {
+    "inputs": {
+      "expand": 5,
+      "incremental_expandrate": 0,
+      "tapered_corners": true,
+      "flip_input": false,
+      "blur_radius": 5,
+      "lerp_alpha": 1,
+      "decay_factor": 1,
+      "fill_holes": true,
+      "mask": [
+        "202",
+        1
+      ]
+    },
+    "class_type": "GrowMaskWithBlur",
+    "_meta": {
+      "title": "Grow Mask With Blur"
+    }
+  },
   "1": {
     "inputs": {
       "color": "0, 255, 60",
@@ -14,19 +104,7 @@
     },
     "class_type": "DrawMaskOnImage",
     "_meta": {
-      "title": "Draw Mask (ımg1)"
-    }
-  },
-  "10": {
-    "inputs": {
-      "model_path": "models/sam3/sam3.pt",
-      "precision": "fp16",
-      "attention": "flash_attn",
-      "compile": true
-    },
-    "class_type": "LoadSAM3Model",
-    "_meta": {
-      "title": "SAM3 Model"
+      "title": "Draw Mask (img1)"
     }
   },
   "16": {
@@ -38,23 +116,13 @@
       "title": "easy positive"
     }
   },
-  "24": {
+  "117": {
     "inputs": {
-      "x": 0,
-      "y": 0,
-      "operation": "add",
-      "destination": [
-        "29:28",
-        0
-      ],
-      "source": [
-        "30:19",
-        0
-      ]
+      "negative": "blurry, low resolution, deformed hands, deformed fingers, fused fingers, extra fingers, missing fingers, malformed nails, ugly toenails, deformed toes, extra toes, fused toes, poorly drawn lips, asymmetrical eyes, blurry eyes, deformed hairline, bad anatomy, imperfect body proportions, unnatural curves, cartoonish, artifacts, watermark, text, logos, mutated hands, mutated feet, extra limbs, poorly detailed skin, plastic skin, shiny skin, low detail nails, distorted pose, unnatural flexibility artifacts, flat lighting, low contrast, elderly or childish"
     },
-    "class_type": "MaskComposite",
+    "class_type": "easy negative",
     "_meta": {
-      "title": "MaskComposite"
+      "title": "easy negative"
     }
   },
   "40": {
@@ -121,15 +189,6 @@
       "title": "Img1 Vae Encode"
     }
   },
-  "101": {
-    "inputs": {
-      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
-    },
-    "class_type": "CheckpointLoaderSimple",
-    "_meta": {
-      "title": "Load Checkpoint"
-    }
-  },
   "103": {
     "inputs": {
       "width": 1088,
@@ -139,6 +198,35 @@
     "class_type": "EmptyLatentImage",
     "_meta": {
       "title": "Empty Latent/ Latent Switcher"
+    }
+  },
+  "121": {
+    "inputs": {
+      "noise_mask": false,
+      "positive": [
+        "41",
+        0
+      ],
+      "negative": [
+        "40",
+        0
+      ],
+      "vae": [
+        "101",
+        2
+      ],
+      "pixels": [
+        "108",
+        0
+      ],
+      "mask": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "InpaintModelConditioning",
+    "_meta": {
+      "title": "InpaintModelConditioning"
     }
   },
   "105": {
@@ -192,36 +280,6 @@
       "title": "KSampler"
     }
   },
-  "108": {
-    "inputs": {
-      "image": "outfit_7a2901eb1151.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Image1"
-    }
-  },
-  "116": {
-    "inputs": {
-      "images": [
-        "118",
-        0
-      ]
-    },
-    "class_type": "PreviewImage",
-    "_meta": {
-      "title": "Preview Image"
-    }
-  },
-  "117": {
-    "inputs": {
-      "negative": "blurry, low resolution, deformed hands, deformed fingers, fused fingers, extra fingers, missing fingers, malformed nails, ugly toenails, deformed toes, extra toes, fused toes, poorly drawn lips, asymmetrical eyes, blurry eyes, deformed hairline, bad anatomy, imperfect body proportions, unnatural curves, cartoonish, artifacts, watermark, text, logos, mutated hands, mutated feet, extra limbs, poorly detailed skin, plastic skin, shiny skin, low detail nails, distorted pose, unnatural flexibility artifacts, flat lighting, low contrast, elderly or childish"
-    },
-    "class_type": "easy negative",
-    "_meta": {
-      "title": "easy negative"
-    }
-  },
   "118": {
     "inputs": {
       "samples": [
@@ -238,105 +296,17 @@
       "title": "VAE Decode"
     }
   },
-  "119": {
-    "inputs": {
-      "expand": 5,
-      "incremental_expandrate": 0,
-      "tapered_corners": true,
-      "flip_input": false,
-      "blur_radius": 5,
-      "lerp_alpha": 1,
-      "decay_factor": 1,
-      "fill_holes": true,
-      "mask": [
-        "24",
-        0
-      ]
-    },
-    "class_type": "GrowMaskWithBlur",
-    "_meta": {
-      "title": "Grow Mask With Blur"
-    }
-  },
-  "120": {
+  "116": {
     "inputs": {
       "images": [
-        "1",
+        "118",
         0
-      ]
+      ],
+      "filename_prefix": "edit_out"
     },
-    "class_type": "PreviewImage",
+    "class_type": "SaveImage",
     "_meta": {
-      "title": "Preview Image"
-    }
-  },
-  "121": {
-    "inputs": {
-      "noise_mask": false,
-      "positive": [
-        "41",
-        0
-      ],
-      "negative": [
-        "40",
-        0
-      ],
-      "vae": [
-        "101",
-        2
-      ],
-      "pixels": [
-        "108",
-        0
-      ],
-      "mask": [
-        "119",
-        0
-      ]
-    },
-    "class_type": "InpaintModelConditioning",
-    "_meta": {
-      "title": "InpaintModelConditioning"
-    }
-  },
-  "30:19": {
-    "inputs": {
-      "confidence_threshold": 0.2,
-      "text_prompt": "torso and curves",
-      "max_detections": 1,
-      "offload_model": false,
-      "sam3_model": [
-        "10",
-        0
-      ],
-      "image": [
-        "108",
-        0
-      ]
-    },
-    "class_type": "SAM3Grounding",
-    "_meta": {
-      "title": "SAM3 Text"
-    }
-  },
-  "29:28": {
-    "inputs": {
-      "confidence_threshold": 0.2,
-      "text_prompt": "outfit/clothes",
-      "max_detections": 1,
-      "offload_model": false,
-      "sam3_model": [
-        "10",
-        0
-      ],
-      "image": [
-        "108",
-        0
-      ]
-    },
-    "class_type": "SAM3Grounding",
-    "_meta": {
-      "title": "SAM3 Text"
+      "title": "Save Image"
     }
   }
 }

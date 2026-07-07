@@ -15,7 +15,7 @@ Covers:
   c6  the dead edit-prompt assembler was deleted (not hasattr on the module).
   c7  has_contradiction: true case (hairColor=black persona vs "blonde" text),
       false case (lighting-only text), shared-"black" non-flag case.
-  c8  MAX_POLISHED_WORDS rejection predicate (word-count logic).
+  c8  MAX_SCENE_WORDS rejection predicate (word-count logic).
   c9  KINK_PHRASES covers all 23 KinkType and RELATIONSHIP_PHRASES all 19
       RelationshipType with non-empty phrases; "dominant" removed from kinks;
       no phrase in either map contains "youthful".
@@ -199,13 +199,13 @@ def test_has_contradiction_true_false_and_shared_black():
 
 
 # ---------------------------------------------------------------------------
-# c8 — MAX_POLISHED_WORDS rejection predicate
+# c8 — MAX_SCENE_WORDS rejection predicate
 # ---------------------------------------------------------------------------
-def test_max_polished_words_predicate():
-    cap = pg.MAX_POLISHED_WORDS
-    assert cap == 110
+def test_max_scene_words_predicate():
+    cap = pg.MAX_SCENE_WORDS
+    assert cap == 90
 
-    # The rejection predicate used in _polish_with_grok is: len(content.split()) > cap.
+    # The rejection predicate used in _write_scene is: len(content.split()) > cap.
     over = " ".join(["word"] * (cap + 5))
     under = " ".join(["word"] * (cap - 5))
     at = " ".join(["word"] * cap)
@@ -213,7 +213,7 @@ def test_max_polished_words_predicate():
     assert len(over.split()) > cap  # rejected
     assert not (len(under.split()) > cap)  # accepted
     assert not (len(at.split()) > cap)  # exactly at cap is accepted
-    print(f"c8 OK: MAX_POLISHED_WORDS={cap} rejection predicate correct")
+    print(f"c8 OK: MAX_SCENE_WORDS={cap} rejection predicate correct")
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +292,7 @@ def _run_all():
         test_background_prompt_identity_regression,
         test_dead_edit_assembler_removed,
         test_has_contradiction_true_false_and_shared_black,
-        test_max_polished_words_predicate,
+        test_max_scene_words_predicate,
         test_kink_and_relationship_phrase_coverage,
         test_prepare_outfit_workflow_negative_prompt_reaches_node_117,
         test_requests_accept_negative_prompt,

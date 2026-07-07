@@ -88,7 +88,8 @@ async def create_generate_job(
     Create a new image generation job.
 
     The job is queued immediately and processed asynchronously by the background worker.
-    The generated prompt is created using xAI Grok-4 based on the persona parameters.
+    The identity/framing prompt is assembled deterministically from the persona; when
+    isEnhance is True, Venice (LLM) writes the scene from the context hint.
 
     **Request Body:**
     - `persona` (required): Character persona configuration

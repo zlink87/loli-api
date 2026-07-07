@@ -247,11 +247,30 @@ class GenerateImageRequest(BaseModel):
     context: Optional[str] = Field(
         default=None,
         max_length=2000,
-        description="Optional context for the scene (e.g., 'After a long shift, relaxing at home')"
+        description="Optional scene hint (e.g., 'After a long shift, relaxing at home'). "
+                    "When isEnhance is True, Venice writes a full scene from this hint + "
+                    "the persona; when False it is used verbatim."
+    )
+    outfit: Optional[OutfitType] = Field(
+        default=None,
+        description="Outfit to generate the character in. None -> a neutral outfit "
+                    "at the chosen nudityLevel (clothed by default)."
+    )
+    nudityLevel: NudityLevel = Field(
+        default=NudityLevel.LOW,
+        description="Nudity level for generation: low (fully clothed), medium "
+                    "(partial exposure), high (nude). Drives both the clothing "
+                    "clause and the nudity-suppression negative."
+    )
+    accessories: Optional[List[AccessoryType]] = Field(
+        default=None,
+        max_length=5,
+        description="List of accessories to add (max 5)"
     )
     isEnhance: bool = Field(
         default=True,
-        description="If True, use xAI Grok to enhance the prompt. If False, send context directly to ComfyUI."
+        description="If True, Venice writes the scene from the context hint + persona. "
+                    "If False, the context hint is sent verbatim (deterministic assembly)."
     )
     output: Optional[OutputOptions] = Field(
         default=None,

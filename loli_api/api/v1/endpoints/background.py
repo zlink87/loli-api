@@ -102,16 +102,22 @@ def prepare_background_workflow(
 ) -> dict:
     """
     Prepare the environment/scene workflow with injected parameters.
-    Uses softer scene masking with better edge feathering for natural blending.
 
-    Uses the same workflow template as outfit (test_final_API.json) but
-    overrides the SAM3 text prompts to target background/scene:
-        30:19  SAM3Grounding    -> inputs.text_prompt (scene detection)
-        29:28  SAM3Grounding    -> inputs.text_prompt (surroundings detection)
-        108    LoadImage         -> inputs.image       (source image filename)
-        16     easy positive     -> inputs.positive    (scene change prompt)
-        106    KSampler          -> inputs.seed
-        119    GrowMaskWithBlur  -> expand/blur_radius (mask feathering)
+    Uses the same template as outfit (test_final_API.json), but masks the
+    *person* and inverts it so the inpaint region is the BACKGROUND. The person
+    (face, hair, body, outfit) is composited back untouched from the original
+    encode, so identity cannot drift while the scene changes.
+
+    Rewiring vs. the outfit default:
+        202  GroundingDinoSAMSegment -> prompt = the PERSON (segment the subject)
+        204  InvertMask              -> already inverts node 202's person mask
+        119  GrowMaskWithBlur.mask   -> repointed to node 204 (inverted = background)
+
+    Injected nodes:
+        108  LoadImage         -> inputs.image    (source image filename)
+        16   easy positive     -> inputs.positive (scene change prompt)
+        106  KSampler          -> inputs.seed
+        119  GrowMaskWithBlur  -> expand/blur_radius (mask feathering)
 
     Args:
         template: Base workflow template (same as outfit)
@@ -145,17 +151,19 @@ def prepare_background_workflow(
         wf["106"]["inputs"]["seed"] = seed
         logger.debug(f"Set node 106 seed: {seed}")
 
-    # Override SAM3 text prompts for environment/scene detection
-    if "30:19" in wf:
-        wf["30:19"]["inputs"]["text_prompt"] = "background, environment, scenery, setting"
-        wf["30:19"]["inputs"]["confidence_threshold"] = 0.3
-        logger.debug("Set node 30:19 SAM3: environment detection")
+    # Segment the PERSON (node 202) instead of the clothing.
+    if "202" in wf:
+        wf["202"]["inputs"]["prompt"] = "person, human, body, face, hair"
+        logger.debug("Set node 202: person detection (for inverted background mask)")
 
-    if "29:28" in wf:
-        wf["29:28"]["inputs"]["text_prompt"] = "scene, surroundings, room, landscape"
-        logger.debug("Set node 29:28 SAM3: surroundings detection")
+    # Repoint the grow/blur mask to the INVERTED person mask (node 204) so the
+    # inpaint region is the background, not the subject. Falls back silently if
+    # the node is absent (e.g. an older template without node 204).
+    if "119" in wf and "204" in wf:
+        wf["119"]["inputs"]["mask"] = ["204", 0]
+        logger.debug("Repointed node 119 mask -> inverted person mask (background)")
 
-    # Increase mask feathering for smoother person-to-scene blending
+    # Increase mask feathering for smoother person-to-scene blending.
     if "119" in wf:
         wf["119"]["inputs"]["expand"] = 10
         wf["119"]["inputs"]["blur_radius"] = 10

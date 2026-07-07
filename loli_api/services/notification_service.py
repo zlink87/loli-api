@@ -85,7 +85,7 @@ class NotificationService:
             request_payload: The original user request payload (optional)
             response_data: ResponseData dict with id and url for callback (optional)
             timestamps: JobTimestamps dict with job lifecycle timestamps (optional)
-            token_usage: Token usage and cost info from Grok API (optional)
+            token_usage: Token usage and cost info from the Venice LLM API (optional)
             seed_used: The seed used for image generation (optional)
 
         Returns:
@@ -195,12 +195,12 @@ class NotificationService:
                     }
                 })
 
-        # Add Grok API Usage to Job Details
+        # Add Venice (LLM) API Usage to Job Details
         if token_usage:
             job_details_widgets.append({"divider": {}})
             job_details_widgets.append({
                 "decoratedText": {
-                    "topLabel": "Grok Model",
+                    "topLabel": "Venice Model",
                     "text": token_usage.get("model", "N/A")
                 }
             })

@@ -64,8 +64,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
-XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+VENICE_API_KEY = os.getenv("VENICE_API_KEY", "")
+VENICE_BASE_URL = os.getenv("VENICE_BASE_URL", "https://api.venice.ai/api/v1").rstrip("/")
 COMFYUI_SERVER = os.getenv("COMFYUI_SERVER_ADDRESS", "127.0.0.1:8188")
 WEBHOOK_URL = (
     os.getenv("CHAT_WEBHOOK_URL")
@@ -83,8 +83,9 @@ WORKFLOW_PATH = os.path.join(
 GROK_VISION_MODEL = 'grok-2-vision-1212'
 #os.getenv("XAI_MODEL", "grok-4-fast-reasoning")
 
-# Reuse GROK_PRICING from prompt_generator.py so pricing stays in one place
-from services.prompt_generator import GROK_PRICING
+# Local pricing table for this dev-only vision harness. Venice bills in VCU, so
+# cost is best-effort ($0 when the model isn't listed); token counts still log.
+GROK_PRICING: dict = {}
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -166,9 +167,9 @@ def call_grok_vision(image_path: str, user_prompt: str) -> dict:
     t0 = time.monotonic()
 
     resp = requests.post(
-        f"{XAI_BASE_URL}/chat/completions",
+        f"{VENICE_BASE_URL}/chat/completions",
         headers={
-            "Authorization": f"Bearer {XAI_API_KEY}",
+            "Authorization": f"Bearer {VENICE_API_KEY}",
             "Content-Type": "application/json",
         },
         json=payload,
@@ -984,8 +985,8 @@ def main():
         parser.error(f"Input directory not found: {args.input_dir}")
 
     # Validate API key
-    if not XAI_API_KEY:
-        parser.error("XAI_API_KEY not set in .env")
+    if not VENICE_API_KEY:
+        parser.error("VENICE_API_KEY not set in .env")
 
     server = args.comfyui_server or COMFYUI_SERVER
     notify = not args.no_notify

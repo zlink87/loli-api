@@ -7,9 +7,9 @@ its own module (mirroring scene_vocab.py) so the camera vocabulary is
 self-contained.
 
 These phrases describe ONLY camera/framing/expression — never identity.
-Framing + angle phrases are hard-verified after Grok polish (they must survive
-verbatim, exactly like the locked identity tokens); expression is mood and
-remains freely polishable.
+Framing + angle phrases are assembled deterministically (they are never produced
+by the LLM, exactly like the locked identity tokens); the LLM-written scene must
+not introduce any camera/framing language of its own.
 """
 from typing import List, Optional
 
@@ -47,8 +47,8 @@ EXPRESSION_PHRASES = {
 
 def framing_tokens(shot) -> List[str]:
     """
-    The shot phrases that MUST survive Grok polish verbatim (framing + angle).
-    Deliberately excludes expression — that is mood, which Grok may embellish.
+    The deterministic shot phrases (framing + angle) that are always present.
+    Deliberately excludes expression — that is mood, which the scene may embellish.
     """
     tokens = [
         phrase(FRAMING_PHRASES, getattr(shot, "framing", None)),

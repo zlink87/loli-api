@@ -4,7 +4,7 @@ that read like an organic story flow (a few narrative arcs) driven by the
 character's occupation, personality, likes and dislikes.
 
 Providers (pluggable), selected in preference order:
-  * GrokScenePlanner       — primary. xAI Grok tolerates NSFW; emits structured JSON.
+  * VeniceScenePlanner     — primary. Venice (uncensored) tolerates NSFW; emits structured JSON.
   * ClaudeScenePlanner     — SFW-ONLY stub. Anthropic refuses explicit content, so it
                              is never routed NSFW batches; currently defers to
                              deterministic (full wiring can be added when an SFW use
@@ -28,8 +28,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-import httpx
-
 from models.requests import PersonaOptions
 from models.enums import (
     PoseType,
@@ -47,6 +45,7 @@ from models.scene import SceneSpec
 from services import attribute_phrases as ap
 from services import scene_vocab as sv
 from services import story_templates as st
+from services.venice_client import VeniceClient
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +303,7 @@ class ManualScenePlanner(StoryPlanner):
 
 
 # ---------------------------------------------------------------------------
-# Grok planner (primary)
+# Venice planner (primary)
 # ---------------------------------------------------------------------------
 PLANNER_SYSTEM_PROMPT = """You are a story director for a photorealistic NSFW image series of ONE fixed character.
 You plan a sequence of image "beats" grouped into a few narrative ARCS (e.g. a day in the life, or an escalation).
@@ -328,16 +327,14 @@ HARD RULES:
 """
 
 
-class GrokScenePlanner(StoryPlanner):
-    name = "grok"
+class VeniceScenePlanner(StoryPlanner):
+    name = "venice"
     supports_nsfw = True
 
-    def __init__(self, api_key: str, base_url: str = "https://api.x.ai/v1",
-                 model: str = "grok-4", timeout: float = 100.0):
+    def __init__(self, api_key: str, base_url: str = "https://api.venice.ai/api/v1",
+                 model: str = "venice-uncensored", timeout: float = 100.0):
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.timeout = timeout
+        self._client = VeniceClient(api_key, base_url=base_url, model=model, timeout=timeout)
 
     async def plan_scenes(
         self, character: Character, count: int, controls: BatchControls
@@ -345,7 +342,7 @@ class GrokScenePlanner(StoryPlanner):
         if not self.api_key:
             return []
         user_prompt = self._build_user_prompt(character, count, controls)
-        raw = await self._call_grok(user_prompt)
+        raw = await self._call_venice(user_prompt)
         if raw is None:
             return []
         return _parse_arcs_json(raw)
@@ -387,35 +384,16 @@ class GrokScenePlanner(StoryPlanner):
             + "\n".join(f"{k}: {', '.join(v)}" for k, v in allowed.items())
         )
 
-    async def _call_grok(self, user_prompt: str) -> Optional[str]:
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "temperature": 0.7,
-                        "max_tokens": 4000,
-                    },
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                result = response.json()
-                return result["choices"][0]["message"]["content"].strip()
-        except (httpx.HTTPError, KeyError, IndexError) as e:
-            logger.error(f"Grok planner call failed: {e}")
-            return None
-        except Exception as e:  # noqa: BLE001 - never let planning crash the request
-            logger.error(f"Grok planner unexpected error: {e}")
-            return None
+    async def _call_venice(self, user_prompt: str) -> Optional[str]:
+        content, _usage = await self._client.chat(
+            [
+                {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+            max_tokens=4000,
+        )
+        return content
 
 
 class ClaudeScenePlanner(StoryPlanner):
@@ -449,7 +427,7 @@ def _allowed_values(enum_cls, *, allowed=None, blocked=None) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Grok/manual JSON -> SceneSpec parsing
+# Venice/manual JSON -> SceneSpec parsing
 # ---------------------------------------------------------------------------
 def _parse_arcs_json(raw: str) -> List[SceneSpec]:
     """Parse the planner JSON into SceneSpecs. Returns [] on total structural failure."""
@@ -618,11 +596,11 @@ def _scrub_identity(text: str) -> str:
 # Provider selection + top-level entry point
 # ---------------------------------------------------------------------------
 def build_planner(name: str, *, settings) -> StoryPlanner:
-    if name == "grok":
-        return GrokScenePlanner(
-            api_key=settings.XAI_API_KEY,
-            base_url=settings.XAI_BASE_URL,
-            model=settings.XAI_MODEL,
+    if name == "venice":
+        return VeniceScenePlanner(
+            api_key=settings.VENICE_API_KEY,
+            base_url=settings.VENICE_BASE_URL,
+            model=settings.VENICE_MODEL,
         )
     if name == "claude":
         return ClaudeScenePlanner(api_key=settings.ANTHROPIC_API_KEY, model=settings.ANTHROPIC_MODEL)
@@ -656,8 +634,8 @@ async def plan_scenes(
         order = [configured]
     else:
         order = []
-        if settings.XAI_API_KEY:
-            order.append("grok")
+        if settings.VENICE_API_KEY:
+            order.append("venice")
         if not is_nsfw and settings.ANTHROPIC_API_KEY:
             order.append("claude")
         order.append("deterministic")

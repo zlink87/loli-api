@@ -155,9 +155,40 @@ def edit_negative(extra: Optional[str] = None) -> str:
     return ", ".join(parts)
 
 
-def generation_negative(extra: Optional[str] = None) -> str:
-    """Full negative prompt for character generation (quality + adult)."""
+# Nudity-suppression negatives for the character-GENERATION path, keyed by
+# NudityLevel value. The generation base model is NSFW-tuned, so without these
+# it renders nude by default even when the prompt describes an outfit. LOW hard-
+# suppresses all nudity so a clothed character stays clothed; MEDIUM allows
+# partial exposure but blocks explicit full-frontal; HIGH suppresses nothing.
+NUDITY_SUPPRESSION = {
+    # Focused on actual body exposure, NOT clothing styles — so legitimately
+    # skimpy LOW outfits (bikini, lace bodysuit, sheer summer dress) still render.
+    "low": (
+        "nude, naked, fully nude, topless, bottomless, exposed breasts, "
+        "exposed nipples, bare breasts, exposed genitals, exposed vulva, "
+        "exposed buttocks, bare ass, full frontal nudity"
+    ),
+    "medium": (
+        "full frontal nudity, fully nude, completely naked, exposed genitals, "
+        "exposed vulva, spread legs, explicit"
+    ),
+    "high": "",
+}
+
+
+def generation_negative(extra: Optional[str] = None, nudity_level=None) -> str:
+    """
+    Full negative prompt for character generation (quality + adult + nudity
+    suppression for the requested level + optional extra).
+
+    ``nudity_level`` accepts a NudityLevel, its string value, or None (treated as
+    'low' so generation is clothed-by-default and never silently renders nude).
+    """
     parts = [QUALITY_NEGATIVE, ADULT_APPEARANCE_NEGATIVE]
+    key = getattr(nudity_level, "value", nudity_level) or "low"
+    suppression = NUDITY_SUPPRESSION.get(key, NUDITY_SUPPRESSION["low"])
+    if suppression:
+        parts.append(suppression)
     if extra and extra.strip():
         parts.append(extra.strip())
     return ", ".join(parts)

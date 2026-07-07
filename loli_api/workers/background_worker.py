@@ -21,7 +21,7 @@ from services.prompt_generator import PromptGenerator
 from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
 from services.notification_service import NotificationService
-from models.enums import JobStatus
+from models.enums import JobStatus, NudityLevel
 from models.requests import OutputOptions, ShotOptions
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class BackgroundWorker:
 
     Workflow:
     1. Get job from queue
-    2. Generate prompt using xAI Grok-4
+    2. Generate prompt (deterministic identity + Venice-written scene)
     3. Prepare ComfyUI workflow with parameters
     4. Execute workflow and wait for completion
     5. Save output image and generate signed URL
@@ -64,7 +64,7 @@ class BackgroundWorker:
         Args:
             job_manager: Job queue and state manager
             comfyui_client: ComfyUI WebSocket client
-            prompt_generator: xAI prompt generation service
+            prompt_generator: Venice-backed prompt generation service
             storage_service: Local storage service
             workflow_path: Path to ComfyUI workflow JSON
             notification_service: Google Chat notification service (optional)
@@ -156,7 +156,7 @@ class BackgroundWorker:
 
         Steps:
         1. Update status to RUNNING
-        2. Generate prompt using xAI Grok-4
+        2. Generate prompt (deterministic identity + Venice-written scene)
         3. Prepare workflow with parameters
         4. Execute workflow in ComfyUI
         5. Save output image
@@ -201,7 +201,7 @@ class BackgroundWorker:
                 progress=0.1
             )
 
-            # Token usage info (will be populated if xAI Grok polishing is used)
+            # Token usage info (will be populated if Venice scene writing is used)
             token_usage = None
             negative_prompt = None
 
@@ -209,10 +209,10 @@ class BackgroundWorker:
             # polished) when the client sends no shot block.
             shot = getattr(job.request, "shot", None) or ShotOptions()
 
-            # Deterministic assembly from persona enums + admin free-text. When
-            # is_enhance is True, Grok polishes the draft but cannot change the
-            # locked identity attributes or the framing/angle block; otherwise
-            # the deterministic prompt is used.
+            # Deterministic assembly from persona enums (identity + framing +
+            # clothing always present). When is_enhance is True, Venice writes the
+            # scene clause from the user hint + persona vibe; otherwise the raw
+            # hint is used verbatim.
             try:
                 character_prompt, negative_prompt, _locked, token_usage = (
                     await self.prompt_gen.generate_generation_prompt(
@@ -220,6 +220,9 @@ class BackgroundWorker:
                         context=context,
                         is_enhance=is_enhance,
                         shot=shot,
+                        outfit=getattr(job.request, "outfit", None),
+                        nudity_level=getattr(job.request, "nudityLevel", NudityLevel.LOW),
+                        accessories=getattr(job.request, "accessories", None),
                     )
                 )
             except Exception as e:

@@ -9,33 +9,45 @@
 # at /runpod-volume/models (see docs/RUNPOD_SETUP.md). This image only adds the
 # custom nodes the production workflows actually reference.
 #
-# Custom nodes included (upstreams verified against the vendored dev copies in
-# ComfyUI/custom_nodes, and against the class_types used by the 4 live workflows):
-#   rgthree-comfy ......... Any Switch / Display Any / Image Resize   (generation)
-#   ComfyUI-KJNodes ....... GrowMaskWithBlur / DrawMaskOnImage         (outfit, background)
-#   ComfyUI-SAM3 .......... SAM3Grounding / LoadSAM3Model              (outfit, background)
-#   ComfyUI-Easy-Use ...... easy positive / easy negative             (outfit, background)
-#   ComfyUI_JPS-Nodes ..... Latent Switch (JPS)                        (outfit, background)
-#   ComfyUI_FaceAnalysis .. FaceBoundingBox / FaceAnalysisModels       (pose)
-#   ComfyUI-Rect .......... RectFill / RectSelect                      (pose)
+# ─────────────────────────────────────────────────────────────────────────────
+# EVERY custom node is PINNED to a specific commit SHA. Unpinned `git clone`s
+# were the root cause of repeated production breakage (SAM3 refactors, node API
+# drift). Do NOT switch any clone back to a floating branch. To bump a node,
+# change its SHA here deliberately and smoke-test before relying on it.
+# ─────────────────────────────────────────────────────────────────────────────
 #
-# Deliberately EXCLUDED — no production workflow references them, so leaving them
-# out keeps the image small and the build fast:
-#   ComfyUI-GGUF ......... workflows use core UNETLoader/CLIPLoader/VAELoader; the
-#                          z_image_turbo nvfp4 .safetensors loads via core, not GGUF.
-#   ComfyUI-QwenVL ....... TextEncodeQwenImageEditPlus is a CORE node; excluding this
-#                          avoids the heavy llama-cpp-python / bitsandbytes build.
-#   comfyui_controlnet_aux no ControlNet preprocessor nodes are used anywhere.
-#   ComfyUI-Manager ...... not needed for a headless serverless worker.
+# Custom nodes included (verified against the class_types used by the live
+# workflows):
+#   rgthree-comfy ............ Any Switch / Display Any / Image Resize   (generation)
+#   ComfyUI-KJNodes .......... GrowMaskWithBlur / DrawMaskOnImage /
+#                              ImageScaleToTotalPixels                    (outfit, background, pose)
+#   ComfyUI-Easy-Use ......... easy positive / easy negative             (outfit, background)
+#   ComfyUI_JPS-Nodes ........ Latent Switch (JPS)                        (outfit, background)
+#   comfyui_segment_anything . SAMModelLoader / GroundingDinoModelLoader /
+#                              GroundingDinoSAMSegment / InvertMask       (outfit, background)
+#                              → text-prompted mask; feeds the identity-locked
+#                                InpaintModelConditioning chain.
+#   comfyui-reactor-node ..... ReActorFaceSwap (uncensored Codeberg build) (pose)
+#                              → locks the hero's face onto the reposed body.
+#   ComfyUI-VideoHelperSuite . VHS_VideoCombine (mp4/webm encode)         (video / wan_i2v)
+#
+# Removed (no live workflow references them anymore — dropping them shrinks the
+# image and removes churn/compile surface):
+#   ComfyUI-SAM3 ......... replaced by comfyui_segment_anything (GroundingDINO+SAM).
+#   ComfyUI_FaceAnalysis  pose no longer uses dlib FaceBoundingBox (ReActor now).
+#   ComfyUI-Rect ......... only used by the old pose FaceAnalysis chain.
+#
+# Deliberately EXCLUDED — no production workflow references them:
+#   ComfyUI-GGUF, ComfyUI-QwenVL (TextEncodeQwenImageEditPlus is CORE),
+#   comfyui_controlnet_aux, ComfyUI-Manager.
 # =============================================================================
 FROM runpod/worker-comfyui:5.8.6-base
 
 USER root
 
 # Toolchain for custom nodes that compile native wheels:
-#   ComfyUI_FaceAnalysis -> dlib + insightface  (need cmake + a C/C++ compiler)
-#   ComfyUI-SAM3         -> pycocotools          (needs a compiler)
-# plus the OpenCV shared libs that SAM3 / FaceAnalysis import at load time.
+#   comfyui-reactor-node -> insightface (Cython/C++ build)
+# plus the OpenCV shared libs that segment-anything / reactor import at load time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git build-essential cmake ninja-build \
         libgl1 libglib2.0-0 \
@@ -44,34 +56,62 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ComfyUI lives at /comfyui in the base image; custom nodes go under custom_nodes/.
 WORKDIR /comfyui/custom_nodes
 
-# Shallow-clone the required nodes. To pin against a breaking upstream change,
-# append e.g.  && git -C rgthree-comfy checkout <sha>
-RUN git clone --depth 1 https://github.com/rgthree/rgthree-comfy.git && \
-    git clone --depth 1 https://github.com/kijai/ComfyUI-KJNodes.git && \
-    git clone --depth 1 https://github.com/PozzettiAndrea/ComfyUI-SAM3.git && \
-    git clone --depth 1 https://github.com/yolain/ComfyUI-Easy-Use.git && \
-    git clone --depth 1 https://github.com/JPS-GER/ComfyUI_JPS-Nodes.git && \
-    git clone --depth 1 https://github.com/cubiq/ComfyUI_FaceAnalysis.git && \
-    git clone --depth 1 https://github.com/jtrue/ComfyUI-Rect.git
+# Clone each node, then hard-pin to a commit SHA (fetched 2026-07-07). Every node
+# is pinned — see the banner above; do not revert to floating branches.
+RUN git clone https://github.com/rgthree/rgthree-comfy.git && \
+        git -C rgthree-comfy checkout 27b4f4cdcf3b127c29d5d8135ac1536ecbd4c383 && \
+    git clone https://github.com/kijai/ComfyUI-KJNodes.git && \
+        git -C ComfyUI-KJNodes checkout e27a505b3ba6ce42687fe00500deda103d9d6071 && \
+    git clone https://github.com/yolain/ComfyUI-Easy-Use.git && \
+        git -C ComfyUI-Easy-Use checkout 54d080bf6a4f52da287e984f305243c10db097f5 && \
+    git clone https://github.com/JPS-GER/ComfyUI_JPS-Nodes.git && \
+        git -C ComfyUI_JPS-Nodes checkout 0e2a9aca02b17dde91577bfe4b65861df622dcaf && \
+    git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
+        git -C ComfyUI-VideoHelperSuite checkout 4ee72c065db22c9d96c2427954dc69e7b908444b && \
+    git clone https://github.com/storyicon/comfyui_segment_anything.git && \
+        git -C comfyui_segment_anything checkout ab6395596399d5048639cdab7e44ec9fae857a93 && \
+    git clone https://codeberg.org/Gourieff/comfyui-reactor-node.git && \
+        git -C comfyui-reactor-node checkout 2add1139d491fefff2d3a60e52b6b2b6d5d09e5d
 
-# Install each node's Python requirements (nodes without a requirements.txt are
-# pure-Python and need nothing). None of these pin torch, so the base image's
-# CUDA build of torch is left untouched.
+# Install each node's Python requirements (pure-Python nodes need nothing). None
+# of these pin torch, so the base image's CUDA torch build is left untouched.
+# segment_anything: segment_anything/timm/addict/yapf (all pure-Python; GroundingDINO
+#   is vendored, so there is NO groundingdino pip build and NO CUDA compile step).
+RUN pip install --no-cache-dir cython
 RUN for d in */ ; do \
         if [ -f "${d}requirements.txt" ]; then \
             echo "=== pip install for ${d} ===" && \
-            pip install --no-cache-dir -r "${d}requirements.txt" ; \
+            pip install --no-cache-dir -r "${d}requirements.txt" || true ; \
         fi ; \
     done
 
-# worker-comfyui's bundled /comfyui/extra_model_paths.yaml maps the network-volume
-# model folders under ComfyUI's LEGACY names (clip, unet) and omits the newer names
-# the Z-Image workflow uses: text_encoders (CLIPLoader) and diffusion_models
-# (UNETLoader). Without these, z_image_turbo_nvfp4 + qwen_3_4b_fp4_mixed on the volume
-# at /runpod-volume/models/{diffusion_models,text_encoders} are invisible to ComfyUI
-# and the job fails "Model ... not found". Append the two missing mappings to the
-# existing block (ComfyUI auto-loads this file; no --extra-model-paths-config flag).
+# ReActor face-swap runtime: the classic inswapper path needs insightface +
+# onnxruntime-GPU (not the CPU build a node requirements file may have pulled in).
+# spandrel loads the CodeFormer restore model. Pin insightface to the known-good
+# 0.7.3 (compiles against the toolchain above).
+RUN pip install --no-cache-dir insightface==0.7.3 spandrel && \
+    pip uninstall -y onnxruntime 2>/dev/null || true ; \
+    pip install --no-cache-dir onnxruntime-gpu
+
+# worker-comfyui's bundled extra_model_paths.yaml maps the volume's model folders
+# under ComfyUI's standard names, but omits the newer names the Z-Image workflow
+# uses (text_encoders/diffusion_models). Append the two missing mappings.
 RUN printf '\n  text_encoders: models/text_encoders/\n  diffusion_models: models/diffusion_models/\n' >> /comfyui/extra_model_paths.yaml
+
+# Custom-node model folders are NOT in extra_model_paths and the nodes look for
+# them under /comfyui/models/<folder> (folder_paths.models_dir) or CWD-relative.
+# Symlink each to the network volume so the pre-staged weights are found. The
+# targets are created at runtime by the volume mount; dangling-at-build is fine.
+RUN for d in sams grounding-dino bert-base-uncased insightface facerestore_models facexlib ; do \
+        ln -sfn "/runpod-volume/models/${d}" "/comfyui/models/${d}" ; \
+    done
+
+# Force offline model resolution. All weights (incl. GroundingDINO's bert-base-uncased
+# text backbone) are pre-staged on the volume; without this, the segment-anything
+# node tries to fetch BERT from HuggingFace at runtime and hangs/fails on a headless
+# worker. Everything the workflows load is local, so offline is safe.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 # Inherit the base image's entrypoint (/start.sh) and RunPod handler — do not override.
 WORKDIR /

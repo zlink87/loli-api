@@ -44,10 +44,12 @@ class Settings(BaseSettings):
     IMAGE_CACHE_TTL_SECONDS: int = 1800  # 30 minutes
     IMAGE_CACHE_CLEANUP_INTERVAL_SECONDS: int = 60  # 1 minute
 
-    # xAI Grok
-    XAI_API_KEY: str = ""
-    XAI_BASE_URL: str = "https://api.x.ai/v1"
-    XAI_MODEL: str = "grok-4"
+    # Venice (LLM provider — OpenAI-compatible, uncensored). Used for both the
+    # single-image scene writer and the batch story planner. Left unset by default
+    # (deterministic assembler + deterministic planner work without it).
+    VENICE_API_KEY: str = ""
+    VENICE_BASE_URL: str = "https://api.venice.ai/api/v1"
+    VENICE_MODEL: str = "venice-uncensored"
 
     # Character generation: run the second detail-refine pass by default
     # (upscale-model round trip + refine steps; same output resolution,
@@ -63,8 +65,8 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-sonnet-4-5"
 
     # Story Batches (persona-driven batch generation).
-    # Preferred planner provider: "grok" | "deterministic" | "claude" | "manual".
-    # Empty -> auto-select (grok primary, deterministic fallback, claude SFW-only).
+    # Preferred planner provider: "venice" | "deterministic" | "claude" | "manual".
+    # Empty -> auto-select (venice primary, deterministic fallback, claude SFW-only).
     STORY_PLANNER_PROVIDER: str = ""
     # Number of dedicated batch pipeline workers (real parallelism for batches,
     # isolated from interactive /v1/edit traffic). Keep RunPod max_workers >= this.

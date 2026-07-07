@@ -2,7 +2,7 @@
 Character Image Generation API - Main Application Entry Point
 
 A FastAPI service for generating character images using:
-- xAI Grok-4 for prompt generation
+- Venice (LLM) for scene writing in prompt generation
 - ComfyUI for image generation
 - JWT authentication
 - Local storage with signed URLs
@@ -88,9 +88,9 @@ runpod_client = RunPodServerlessClient(
 job_manager.attach_runpod_client(runpod_client)
 
 prompt_generator = PromptGenerator(
-    api_key=settings.XAI_API_KEY,
-    base_url=settings.XAI_BASE_URL,
-    model=settings.XAI_MODEL
+    api_key=settings.VENICE_API_KEY,
+    base_url=settings.VENICE_BASE_URL,
+    model=settings.VENICE_MODEL
 )
 
 storage_service = StorageService(
