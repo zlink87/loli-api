@@ -20,6 +20,7 @@ from services.job_manager import JobManager, Job
 from services.comfyui_client import ComfyUIClient
 from services.runpod_client import RunPodServerlessClient
 from services import runpod_runner
+from services import pose_assets
 from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
 from services.notification_service import NotificationService
@@ -27,6 +28,12 @@ from services.image_cache_service import ImageCacheService
 from models.enums import JobStatus
 
 logger = logging.getLogger(__name__)
+
+# RunPod's /run endpoint caps the request body around 10 MiB. Source images plus
+# a base64 pose reference must stay comfortably under that; enforce a defensive
+# ceiling before submitting so we fail with a clear message instead of a
+# provider-side rejection. base64 inflates bytes by ~33%.
+MAX_PENDING_IMAGES_BYTES = int(9.5 * 1024 * 1024)  # 9.5 MiB
 
 
 class BaseEditWorker(ABC):
@@ -246,6 +253,26 @@ class BaseEditWorker(ABC):
         )
         return image_name
 
+    async def stage_pose_reference(self, pose) -> str:
+        """
+        Load the pose reference PNG for ``pose`` and stage it for the RunPod
+        submission as an additional base64 ``input.images[]`` entry. Returns the
+        flat filename that the pose workflow's LoadImage node (170) must
+        reference (worker-comfyui writes the file under this name in the worker's
+        ComfyUI input dir).
+
+        The disk read is offloaded to a thread (repo style for IO). Must be called
+        after ``prepare_source_image`` so the source entry is already staged.
+        """
+        filename, data_uri = await asyncio.to_thread(
+            pose_assets.load_pose_reference_b64, pose
+        )
+        if self._pending_images is None:
+            self._pending_images = []
+        self._pending_images.append({"name": filename, "image": data_uri})
+        logger.info(f"{self._log_tag} Staged pose reference: {filename}")
+        return filename
+
     async def submit_and_save(
         self, job: Job, workflow: dict, folder: str
     ) -> tuple:
@@ -259,6 +286,21 @@ class BaseEditWorker(ABC):
         """
         if self.runpod_client is None:
             raise RuntimeError("RunPod client not configured")
+
+        # Defensive payload bound: the sum of all pending base64 image strings
+        # must stay under RunPod's /run size cap. Fail early with a clear message
+        # (classified via handle_job_failure's error-code heuristics).
+        if self._pending_images:
+            total_bytes = sum(
+                len(entry.get("image", "")) for entry in self._pending_images
+            )
+            if total_bytes > MAX_PENDING_IMAGES_BYTES:
+                raise RuntimeError(
+                    f"RunPod submission payload too large: "
+                    f"{total_bytes} bytes of base64 image data exceeds the "
+                    f"{MAX_PENDING_IMAGES_BYTES}-byte limit. Reduce the source "
+                    f"image size before submitting."
+                )
 
         outputs = await runpod_runner.run_workflow(
             self.runpod_client,

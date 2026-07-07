@@ -333,6 +333,20 @@ def get_notification_service() -> Optional[NotificationService]:
 # ---------------------------------------------------------------------------
 # Helper functions (used by OutfitBackgroundWorker via import)
 # ---------------------------------------------------------------------------
+def _outfit_change_lead(outfit: OutfitType, outfit_desc: str) -> str:
+    """
+    Lead sentence for a (dressed) outfit change.
+
+    Uses the neutral verb "Change the person's outfit to:" rather than
+    "Dress the person in ...". At MEDIUM/HIGH nudity the OUTFIT_DESCRIPTIONS
+    text describes open, absent, or barely-present clothing, which directly
+    contradicts an instruction to "dress" the person; the neutral verb stays
+    accurate at every nudity level. ``outfit`` is accepted for signature
+    stability / future per-outfit tuning.
+    """
+    return f"Change the person's outfit to: {outfit_desc}"
+
+
 def build_prompt(outfit: OutfitType, accessories: Optional[List[AccessoryType]], nudity_level: NudityLevel = NudityLevel.LOW) -> str:
     """
     Build the positive prompt from outfit and accessories.
@@ -355,14 +369,14 @@ def build_prompt(outfit: OutfitType, accessories: Optional[List[AccessoryType]],
     if outfit == OutfitType.NAKED:
         prompt_parts = [
             f"Remove all clothing, the person should be {outfit_desc}",
-            "keep the exact same face, hair, skin tone, and all physical features completely unchanged",
+            pc.identity_clause("the clothing and covering"),
             "only change the clothing and covering, nothing else",
         ]
     else:
         prompt_parts = [
-            f"Dress the person in {outfit_desc}",
-            "keep the exact same face, hair, skin tone, and all physical features completely unchanged",
-            "only change the outfit, nothing else",
+            _outfit_change_lead(outfit, outfit_desc),
+            pc.identity_clause("the outfit and clothing"),
+            "only change the clothing, nothing else",
         ]
 
     if accessories:
@@ -382,6 +396,7 @@ def prepare_outfit_workflow(
     seed: Optional[int] = None,
     nudity_level: Optional[NudityLevel] = None,
     outfit: Optional[OutfitType] = None,
+    negative_prompt: Optional[str] = None,
 ) -> dict:
     """
     Prepare the outfit workflow with injected parameters.
@@ -402,6 +417,8 @@ def prepare_outfit_workflow(
         seed: Optional seed value
         nudity_level: Optional nudity level for adaptive masking
         outfit: Optional outfit type for direction detection
+        negative_prompt: Optional extra negative prompt terms (appended to
+            quality + adult + identity negatives on node 117)
 
     Returns:
         Prepared workflow dict
@@ -418,10 +435,10 @@ def prepare_outfit_workflow(
         wf["16"]["inputs"]["positive"] = prompt
         logger.debug(f"Set node 16 prompt: {prompt[:50]}...")
 
-    # Node 117: Negative prompt (quality + identity preservation)
+    # Node 117: Negative prompt (quality + adult + identity preservation + user override)
     if "117" in wf:
-        wf["117"]["inputs"]["negative"] = pc.edit_negative()
-        logger.debug("Set node 117 negative (quality + identity)")
+        wf["117"]["inputs"]["negative"] = pc.edit_negative(negative_prompt)
+        logger.debug("Set node 117 negative (quality + adult + identity)")
 
     # Node 106: Seed
     if seed is not None and "106" in wf:

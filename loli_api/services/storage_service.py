@@ -6,7 +6,7 @@ import uuid
 import hmac
 import hashlib
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from PIL import Image
 import io
@@ -145,7 +145,11 @@ class StorageService:
             Tuple of (signed_url, expiration_datetime)
         """
         expiry_minutes = expiry_minutes or self.default_expiry_minutes
-        expires_at = datetime.utcnow() + timedelta(minutes=expiry_minutes)
+        # Use a timezone-aware UTC datetime: datetime.utcnow() is naive, and
+        # naive.timestamp() assumes LOCAL time, so on a non-UTC host the expiry
+        # lands hours in the past and every token is born expired (validation
+        # compares against time.time(), which is true UTC). Aware -> correct.
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes)
         expires_timestamp = int(expires_at.timestamp())
 
         # Create token: HMAC(secret, path + expires)

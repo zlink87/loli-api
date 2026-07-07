@@ -28,8 +28,11 @@ from models.enums import JobStatus
 
 # Import helpers from existing endpoint modules
 from api.v1.endpoints.outfit import build_prompt, prepare_outfit_workflow
-from api.v1.endpoints.pose import get_pose_reference, prepare_pose_workflow
+from api.v1.endpoints.pose import build_pose_prompt, prepare_pose_workflow
 from api.v1.endpoints.background import build_background_prompt, prepare_background_workflow
+
+from services import pose_assets
+from services.prompt_constants import apply_edit_photo_style
 
 logger = logging.getLogger(__name__)
 
@@ -188,22 +191,39 @@ class PipelineBackgroundWorker:
 
         return [step for step in order if step_enabled.get(step, False)]
 
-    def _build_step_workflow(self, step_name: str, request, source_name: str, seed: int, job_id: str) -> dict:
-        """Build the ComfyUI workflow for a pipeline step, with source_name as input."""
+    def _build_step_workflow(
+        self, step_name: str, request, source_name: str, seed: int, job_id: str,
+        pose_ref_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Build the ComfyUI workflow for a pipeline step, with source_name as input.
+
+        For the pose step, ``pose_ref_name`` is the flat filename of the staged
+        pose reference (node 170); it is computed once in ``_run_step`` so the same
+        name feeds both node 170 and the base64 ``input.images[]`` entry.
+        """
+        # Optional photographic-finish clause appended to every step's prompt so
+        # the look stays consistent through the chained re-renders. None (the
+        # interactive default) leaves prompts byte-identical to legacy behavior.
+        photo_style = getattr(request, "photoStyle", None)
+
         if step_name == "pose":
-            reference_image = get_pose_reference(request.pose)
-            logger.info(f"[PIPELINE] {job_id} | pose | Reference: {reference_image}")
+            logger.info(f"[PIPELINE] {job_id} | pose | Reference: {pose_ref_name}")
+            prompt = apply_edit_photo_style(build_pose_prompt(request.pose), photo_style)
             return prepare_pose_workflow(
-                self._pose_template, source_name, reference_image, seed=seed
+                self._pose_template, source_name, pose_ref_name, prompt=prompt, seed=seed
             )
         if step_name == "outfit":
-            prompt = build_prompt(request.outfit, request.accessories, request.nudityLevel)
+            prompt = apply_edit_photo_style(
+                build_prompt(request.outfit, request.accessories, request.nudityLevel),
+                photo_style,
+            )
             logger.info(f"[PIPELINE] {job_id} | outfit | Prompt: {prompt[:80]}...")
             return prepare_outfit_workflow(
                 self._outfit_template, source_name, prompt, seed=seed
             )
         if step_name == "background":
-            prompt = build_background_prompt(request.prompt)
+            prompt = apply_edit_photo_style(build_background_prompt(request.prompt), photo_style)
             logger.info(f"[PIPELINE] {job_id} | background | Prompt: {prompt[:80]}...")
             return prepare_background_workflow(
                 self._outfit_template, source_name, prompt, seed=seed,
@@ -220,7 +240,20 @@ class PipelineBackgroundWorker:
         Returns the output image bytes (downloading the worker's S3 URL if needed).
         """
         source_name, images = _stage_image(source_bytes, f"pipe_{step_name}")
-        workflow = self._build_step_workflow(step_name, request, source_name, seed, job_id)
+
+        # Pose steps need the reference PNG shipped alongside the source image as a
+        # second base64 input.images[] entry. Resolve the (name, data_uri) pair
+        # once so the SAME flat name feeds both node 170 and the images entry.
+        pose_ref_name: Optional[str] = None
+        if step_name == "pose":
+            pose_ref_name, pose_ref_uri = await asyncio.to_thread(
+                pose_assets.load_pose_reference_b64, request.pose
+            )
+            images.append({"name": pose_ref_name, "image": pose_ref_uri})
+
+        workflow = self._build_step_workflow(
+            step_name, request, source_name, seed, job_id, pose_ref_name=pose_ref_name
+        )
 
         outputs = await runpod_runner.run_workflow(
             self.runpod_client, self.job_manager, job_id, workflow,

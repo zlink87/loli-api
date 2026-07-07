@@ -12,6 +12,7 @@ from auth.dependencies import get_current_user
 from models.enums import JobStatus
 from models.requests import PipelineEditRequest
 from models.responses import JobCreateResponse
+from services import pose_assets
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,18 @@ async def pipeline_edit(
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Pipeline edit queue is full. Please try again later.",
+            )
+
+        # If a pose step is requested, its reference asset must be installed.
+        # Fail fast with a clear 422 before any step runs (references ship
+        # per-request as base64; a missing PNG means the generator has not run).
+        if request.pose is not None and not pose_assets.asset_path(request.pose).exists():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Pose reference not installed for pose '{request.pose.value}'. "
+                    f"Run scripts/generate_pose_refs.py."
+                ),
             )
 
         # Log payload

@@ -301,7 +301,7 @@
   },
   "175": {
     "inputs": {
-      "model_name": "4x_Nickelback_70000G.safetensors"
+      "model_name": "4x_Nickelback_70000G.pth"
     },
     "class_type": "UpscaleModelLoader",
     "_meta": {
@@ -432,7 +432,7 @@
   },
   "211": {
     "inputs": {
-      "model_name": "4x_foolhardy_Remacri.safetensors"
+      "model_name": "4x_foolhardy_Remacri.pth"
     },
     "class_type": "UpscaleModelLoader",
     "_meta": {
@@ -688,7 +688,7 @@
   },
   "288": {
     "inputs": {
-      "clip_name": "qwen_3_4b_fp4_mixed.safetensors",
+      "clip_name": "qwen_3_4b.safetensors",
       "type": "lumina2",
       "device": "default"
     },
@@ -699,12 +699,28 @@
   },
   "291": {
     "inputs": {
-      "unet_name": "z_image_turbo_nvfp4.safetensors",
+      "unet_name": "z_image_turbo_bf16.safetensors",
       "weight_dtype": "default"
     },
     "class_type": "UNETLoader",
     "_meta": {
       "title": "Load Diffusion Model"
+    }
+  },
+  "300": {
+    "inputs": {
+      "samples": [
+        "181",
+        0
+      ],
+      "vae": [
+        "287",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode (refined)"
     }
   }
 }

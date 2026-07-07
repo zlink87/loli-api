@@ -89,7 +89,8 @@ class OutfitBackgroundWorker(BaseEditWorker):
             # Step 4: Prepare workflow and run on RunPod
             workflow = prepare_outfit_workflow(
                 self._workflow_template, source_name, prompt, seed=seed,
-                nudity_level=request.nudityLevel, outfit=request.outfit
+                nudity_level=request.nudityLevel, outfit=request.outfit,
+                negative_prompt=request.negativePrompt,
             )
 
             image_start = datetime.utcnow()

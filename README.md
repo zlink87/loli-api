@@ -35,7 +35,7 @@ REST API that generates and edits AI character images using:
 bash setup.sh
 
 # 2. Configure environment
-cp loli_api/.env.example loli_api/.env
+cp .env.example loli_api/.env
 # Edit .env with your API keys
 
 # 3. Start (ComfyUI + API in tmux)
@@ -47,10 +47,10 @@ bash start.sh
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
 | POST | `/v1/generate/image` | Generate character from persona |
-| POST | `/v1/edit/outfit` | Change outfit (44 types, 3 nudity levels) |
+| POST | `/v1/edit/outfit` | Change outfit (47 types, 3 nudity levels) |
 | POST | `/v1/edit/pose` | Change pose (16 types with dynamic prompts) |
 | POST | `/v1/edit/background` | Change environment/scene |
-| POST | `/v1/pipeline` | Chain: pose → outfit → background |
+| POST | `/v1/edit` | Chain: pose → outfit → background |
 | GET | `/v1/jobs/{jobId}` | Poll job status |
 | DELETE | `/v1/jobs/{jobId}` | Cancel queued job |
 | GET | `/v1/preview/{token}` | Access generated image |
@@ -86,7 +86,7 @@ loli-api/
 
 ## Environment Variables
 
-Key variables (see `loli_api/.env.example` for full list):
+Key variables (see `.env.example` for full list):
 
 | Variable | Description |
 |----------|-------------|

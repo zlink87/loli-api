@@ -61,6 +61,8 @@ class JobManager:
         self.pose_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self.background_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self.pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        # Dedicated queue for Story Batch items, isolated from interactive /v1/edit.
+        self.batch_pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self.jobs: Dict[str, Job] = {}
         # Maps RunPod job id -> local job id, so a webhook/reconciler can map back.
         self.runpod_index: Dict[str, str] = {}
@@ -108,7 +110,7 @@ class JobManager:
         Raises:
             asyncio.QueueFull: If queue is at capacity
         """
-        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob"}
+        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob", "batch_pipeline_edit": "batjob"}
         prefix = prefix_map.get(job_type, "job")
         job_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow()
@@ -143,6 +145,8 @@ class JobManager:
             await self.background_queue.put(job_id)
         elif job_type == "pipeline_edit":
             await self.pipeline_queue.put(job_id)
+        elif job_type == "batch_pipeline_edit":
+            await self.batch_pipeline_queue.put(job_id)
         else:
             await self.queue.put(job_id)
         return job
@@ -319,6 +323,14 @@ class JobManager:
         """Mark current pipeline queue task as done."""
         self.pipeline_queue.task_done()
 
+    async def get_next_batch_pipeline_job(self) -> Optional[str]:
+        """Get the next job ID from the dedicated batch pipeline queue (blocking)."""
+        return await self.batch_pipeline_queue.get()
+
+    def mark_batch_pipeline_done(self) -> None:
+        """Mark current batch pipeline queue task as done."""
+        self.batch_pipeline_queue.task_done()
+
     def queue_size(self, job_type: str = "text_to_image") -> int:
         """Get current queue size for the specified job type."""
         if job_type == "outfit_edit":
@@ -329,6 +341,8 @@ class JobManager:
             return self.background_queue.qsize()
         elif job_type == "pipeline_edit":
             return self.pipeline_queue.qsize()
+        elif job_type == "batch_pipeline_edit":
+            return self.batch_pipeline_queue.qsize()
         return self.queue.qsize()
 
     def is_queue_full(self, job_type: str = "text_to_image") -> bool:
@@ -341,6 +355,8 @@ class JobManager:
             return self.background_queue.qsize() >= self._max_queue_size
         elif job_type == "pipeline_edit":
             return self.pipeline_queue.qsize() >= self._max_queue_size
+        elif job_type == "batch_pipeline_edit":
+            return self.batch_pipeline_queue.qsize() >= self._max_queue_size
         return self.queue.qsize() >= self._max_queue_size
 
     async def list_jobs(

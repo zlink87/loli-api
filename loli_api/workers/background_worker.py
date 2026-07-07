@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional
 from pathlib import Path
 
+from config import settings
 from services.job_manager import JobManager, Job
 from services.comfyui_client import ComfyUIClient
 from services.runpod_client import RunPodServerlessClient
@@ -21,6 +22,7 @@ from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
 from services.notification_service import NotificationService
 from models.enums import JobStatus
+from models.requests import OutputOptions, ShotOptions
 
 logger = logging.getLogger(__name__)
 
@@ -203,15 +205,21 @@ class BackgroundWorker:
             token_usage = None
             negative_prompt = None
 
+            # Camera/framing options: hero defaults (waist-up, eye level,
+            # polished) when the client sends no shot block.
+            shot = getattr(job.request, "shot", None) or ShotOptions()
+
             # Deterministic assembly from persona enums + admin free-text. When
             # is_enhance is True, Grok polishes the draft but cannot change the
-            # locked identity attributes; otherwise the deterministic prompt is used.
+            # locked identity attributes or the framing/angle block; otherwise
+            # the deterministic prompt is used.
             try:
                 character_prompt, negative_prompt, _locked, token_usage = (
                     await self.prompt_gen.generate_generation_prompt(
                         persona=job.request.persona,
                         context=context,
                         is_enhance=is_enhance,
+                        shot=shot,
                     )
                 )
             except Exception as e:
@@ -235,25 +243,22 @@ class BackgroundWorker:
 
             # Step 3: Prepare workflow
 
-            # Output overrides are optional; only apply if explicitly provided
-            output = job.request.output
-            seed = None
-            resolution = None
-            aspect_ratio = None
-            batch_size = None
-            if output:
-                if "seed" in output.model_fields_set:
-                    seed = output.seed
-                if "resolution" in output.model_fields_set:
-                    resolution = output.resolution
-                if "aspectRatio" in output.model_fields_set:
-                    aspect_ratio = output.aspectRatio
-                if "n" in output.model_fields_set:
-                    batch_size = output.n
-
-            # Generate random seed if not provided
-            if seed is None:
-                seed = random.randint(0, 2**32 - 1)
+            # Output options: defaults always apply (whitelisted at the API edge).
+            output = job.request.output or OutputOptions()
+            seed = output.seed if output.seed is not None else random.randint(0, 2**32 - 1)
+            aspect_ratio = output.aspectRatio or "2:3"
+            resolution = output.resolution  # None unless an explicit whitelisted value
+            if output.n and output.n > 1:
+                # Multi-output needs Job/DB/response changes — clamped for now so
+                # no GPU is spent on images that would be discarded.
+                logger.warning(
+                    f"[WORKFLOW] {job.job_id} | n={output.n} requested but clamped to 1"
+                )
+            hires = (
+                output.hires
+                if output.hires is not None
+                else settings.GENERATION_HIRES_DEFAULT
+            )
 
             workflow = ComfyUIClient.prepare_character_workflow(
                 workflow_template=self._workflow_template,
@@ -262,11 +267,16 @@ class BackgroundWorker:
                 filename_prefix=f"CHAR_{job.job_id[:8]}",
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
-                batch_size=batch_size,
-                negative_prompt=negative_prompt
+                batch_size=1,
+                negative_prompt=negative_prompt,
+                photo_style=shot.photoStyle.value,
+                hires=hires,
             )
 
-            logger.info(f"[WORKFLOW] {job.job_id} | Seed: {seed}")
+            logger.info(
+                f"[WORKFLOW] {job.job_id} | Seed: {seed} | Shot: {shot.framing.value}/"
+                f"{shot.angle.value} | Style: {shot.photoStyle.value} | Hires: {hires}"
+            )
 
             await self.job_manager.update_job_status(
                 job.job_id,
@@ -443,49 +453,6 @@ class BackgroundWorker:
 
         finally:
             self.job_manager.mark_done()
-
-    def _parse_resolution(self, request) -> tuple[int, int]:
-        """
-        Parse resolution from request.
-
-        Args:
-            request: GenerateImageRequest
-
-        Returns:
-            Tuple of (width, height)
-        """
-        # Default dimensions
-        width = 944
-        height = 1408
-
-        if request.output:
-            # Try to parse from resolution string (e.g., "944x1408")
-            if request.output.resolution:
-                try:
-                    parts = request.output.resolution.lower().split("x")
-                    if len(parts) == 2:
-                        width = int(parts[0])
-                        height = int(parts[1])
-                except (ValueError, IndexError):
-                    logger.warning(f"Invalid resolution: {request.output.resolution}, using default")
-
-            # Or parse from aspect ratio (if resolution not provided)
-            elif request.output.aspectRatio:
-                # Common aspect ratios
-                aspect_ratios = {
-                    "1:1": (1024, 1024),
-                    "2:3": (944, 1408),
-                    "3:2": (1408, 944),
-                    "16:9": (1408, 792),
-                    "9:16": (792, 1408),
-                    "4:3": (1216, 912),
-                    "3:4": (912, 1216),
-                }
-                if request.output.aspectRatio in aspect_ratios:
-                    width, height = aspect_ratios[request.output.aspectRatio]
-
-        return width, height
-
 
 class CleanupWorker:
     """

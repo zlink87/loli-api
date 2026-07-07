@@ -14,7 +14,7 @@ loli_api/
 │           ├── outfit.py           # POST /v1/edit/outfit
 │           ├── pose.py             # POST /v1/edit/pose
 │           ├── background.py       # POST /v1/edit/background
-│           ├── pipeline.py         # POST /v1/pipeline
+│           ├── pipeline.py         # POST /v1/edit
 │           ├── edit.py             # Legacy edit endpoint
 │           ├── jobs.py             # GET/DELETE /v1/jobs/{jobId}
 │           └── preview.py          # GET /v1/preview/{token}

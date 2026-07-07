@@ -7,6 +7,8 @@ from typing import Optional, List
 
 from services.url_guard import validate_source_image, SourceImageError
 
+from services.output_presets import ASPECT_RATIO_DIMS, ALLOWED_RESOLUTIONS
+
 from .enums import (
     StyleType,
     EthnicityType,
@@ -23,6 +25,10 @@ from .enums import (
     AccessoryType,
     NudityLevel,
     PoseType,
+    ShotFramingType,
+    CameraAngleType,
+    ExpressionType,
+    PhotoStyleType,
 )
 
 
@@ -132,11 +138,14 @@ class OutputOptions(BaseModel):
 
     aspectRatio: Optional[str] = Field(
         default="2:3",
-        description="Aspect ratio (e.g., 1:1, 16:9, 2:3)"
+        description=f"Aspect ratio preset. Allowed: {', '.join(sorted(ASPECT_RATIO_DIMS))}"
     )
     resolution: Optional[str] = Field(
-        default="944x1408",
-        description="Resolution (e.g., 1024x1024, 1920x1080)"
+        default=None,
+        description=(
+            "Explicit whitelisted resolution (wins over aspectRatio). "
+            f"Allowed: {', '.join(sorted(ALLOWED_RESOLUTIONS))}"
+        )
     )
     seed: Optional[int] = Field(
         default=None,
@@ -148,7 +157,59 @@ class OutputOptions(BaseModel):
         default=1,
         ge=1,
         le=4,
-        description="Number of images to generate (1-4)"
+        description="Number of images (accepted for compatibility but currently clamped to 1)"
+    )
+    hires: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Run a second detail-refine pass (upscale-model round trip + refine steps). "
+            "Output resolution is unchanged; adds roughly 50-100% GPU time. "
+            "None = server default (GENERATION_HIRES_DEFAULT)."
+        )
+    )
+
+    @field_validator("aspectRatio")
+    @classmethod
+    def validate_aspect_ratio(cls, v):
+        if v is not None and v not in ASPECT_RATIO_DIMS:
+            raise ValueError(
+                f"Unsupported aspectRatio '{v}'. Allowed: {', '.join(sorted(ASPECT_RATIO_DIMS))}"
+            )
+        return v
+
+    @field_validator("resolution")
+    @classmethod
+    def validate_resolution(cls, v):
+        if v is not None and v not in ALLOWED_RESOLUTIONS:
+            raise ValueError(
+                f"Unsupported resolution '{v}'. Allowed: {', '.join(sorted(ALLOWED_RESOLUTIONS))}"
+            )
+        return v
+
+
+class ShotOptions(BaseModel):
+    """
+    Camera/framing configuration for the hero shot. All fields optional with
+    hero defaults (waist-up, eye level, polished finish) so persona-only
+    requests produce consistent Candy.ai-style character cards.
+    """
+
+    framing: ShotFramingType = Field(
+        default=ShotFramingType.WAIST_UP,
+        description="How much of the subject is in frame"
+    )
+    angle: CameraAngleType = Field(
+        default=CameraAngleType.EYE_LEVEL,
+        description="Camera position relative to the subject"
+    )
+    expression: Optional[ExpressionType] = Field(
+        default=None,
+        description="Explicit expression override. None = derive from persona.personality, "
+                    "or a soft smile when no personality is set"
+    )
+    photoStyle: PhotoStyleType = Field(
+        default=PhotoStyleType.POLISHED,
+        description="Photographic finish: polished (retouched editorial), studio, or candid_phone (legacy raw look)"
     )
 
 
@@ -194,7 +255,12 @@ class GenerateImageRequest(BaseModel):
     )
     output: Optional[OutputOptions] = Field(
         default=None,
-        description="Output configuration (optional - seed only used)"
+        description="Output configuration (aspect ratio / resolution / seed / hires)"
+    )
+    shot: Optional[ShotOptions] = Field(
+        default=None,
+        description="Camera/framing configuration. None = hero defaults "
+                    "(waist-up, eye level, polished finish)"
     )
     providerHints: Optional[ProviderHints] = Field(
         default=None,
@@ -219,7 +285,13 @@ class GenerateImageRequest(BaseModel):
                     "occupation": "nurse"
                 },
                 "context": "After a long shift, relaxing at home",
-                "isEnhance": True
+                "isEnhance": True,
+                "shot": {
+                    "framing": "waist_up",
+                    "angle": "eye_level",
+                    "photoStyle": "polished"
+                },
+                "output": {"aspectRatio": "2:3", "hires": True}
             }
         }
 
@@ -243,6 +315,11 @@ class OutfitEditRequest(BaseModel):
         default=None,
         max_length=5,
         description="List of accessories to add (max 5)"
+    )
+    negativePrompt: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Extra negative prompt terms for the outfit edit"
     )
     seed: Optional[int] = Field(
         default=None,
@@ -281,6 +358,16 @@ class PoseEditRequest(BaseModel):
     pose: PoseType = Field(
         ...,
         description="Target pose to apply"
+    )
+    negativePrompt: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Accepted for request-shape parity with the other edit endpoints but "
+            "IGNORED: the pose workflow runs at cfg=1 with a zeroed negative "
+            "conditioning branch (ConditioningZeroOut), so negative text is "
+            "mathematically inert. See pose.py."
+        )
     )
     seed: Optional[int] = Field(
         default=None,
@@ -399,6 +486,14 @@ class PipelineEditRequest(BaseModel):
     pipeline_order: Optional[List[str]] = Field(
         default=None,
         description="Override default pipeline order. Must contain only 'pose', 'outfit', 'background'."
+    )
+    photoStyle: Optional[PhotoStyleType] = Field(
+        default=None,
+        description=(
+            "Photographic finish appended to every step's edit instruction: "
+            "polished (retouched editorial), studio, or candid_phone. "
+            "None = legacy behavior (no style clause)."
+        )
     )
 
     @field_validator("source_image")

@@ -18,6 +18,9 @@ python-multipart
 # HTTP clients (RunPod API, xAI Grok, image downloads)
 httpx>=0.26.0
 requests>=2.31.0
+# comfyui_client.py imports this at module load (legacy GPU_BACKEND=local path).
+# Even in RunPod mode the module is imported, so the control plane needs it to boot.
+websocket-client>=1.7.0
 
 # Data validation / settings
 pydantic>=2.5.0

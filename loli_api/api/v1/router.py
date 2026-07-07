@@ -3,7 +3,10 @@ API v1 router - aggregates all endpoint routers.
 """
 from fastapi import APIRouter
 
-from .endpoints import generate, jobs, preview, edit, outfit, pose, background, pipeline
+from .endpoints import (
+    generate, jobs, preview, edit, outfit, pose, background, pipeline,
+    characters, batches,
+)
 
 # Create main API router
 api_router = APIRouter()
@@ -17,6 +20,8 @@ api_router.include_router(outfit.router)
 api_router.include_router(pose.router)
 api_router.include_router(background.router)
 api_router.include_router(pipeline.router)
+api_router.include_router(characters.router)
+api_router.include_router(batches.router)
 
 
 def configure_services(
@@ -29,7 +34,10 @@ def configure_services(
     pose_workflow_path: str = "",
     image_cache_service=None,
     supabase_storage_service=None,
-    runpod_client=None
+    runpod_client=None,
+    character_store=None,
+    batch_store=None,
+    batch_orchestrator=None,
 ):
     """
     Configure services for all endpoint modules.
@@ -65,3 +73,10 @@ def configure_services(
     pipeline.set_job_manager(job_manager)
     if notification_service:
         pipeline.set_notification_service(notification_service)
+    # Story Batches (optional — only wired when the Supabase DB is configured)
+    if character_store is not None:
+        characters.set_character_store(character_store)
+    if batch_store is not None:
+        batches.set_batch_store(batch_store)
+    if batch_orchestrator is not None:
+        batches.set_orchestrator(batch_orchestrator)

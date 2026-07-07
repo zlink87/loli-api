@@ -7,6 +7,7 @@ A FastAPI service for generating character images using:
 - JWT authentication
 - Local storage with signed URLs
 """
+import asyncio
 import logging
 import sys
 import os
@@ -32,12 +33,20 @@ from services.notification_service import NotificationService
 from services.supabase_storage_service import SupabaseStorageService
 from services.image_cache_service import ImageCacheService
 from services.base_url_service import upload_base_url
+from services import pose_assets
 from workers.background_worker import BackgroundWorker, CleanupWorker
 from workers.outfit_worker import OutfitBackgroundWorker
 from workers.pose_worker import PoseBackgroundWorker
 from workers.background_edit_worker import BackgroundEditWorker
 from workers.pipeline_worker import PipelineBackgroundWorker
+from workers.batch_pipeline_worker import BatchPipelineWorker
+from services import supabase_db
+from services.character_store import CharacterStore
+from services.character_image_store import CharacterImageStore
+from services.batch_store import BatchStore
+from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
 from models.responses import HealthResponse, ErrorResponse
+from models.enums import PoseType
 from auth.dependencies import create_test_token
 
 # Configure logging
@@ -183,6 +192,52 @@ pipeline_worker = PipelineBackgroundWorker(
     runpod_client=runpod_client
 )
 
+# --- Character Batches subsystem (optional; requires Supabase DB) ---
+character_store = None
+character_image_store = None
+batch_store = None
+batch_orchestrator = None
+batch_reconciler = None
+batch_engine = None
+batch_workers = []
+
+if supabase_db.is_configured():
+    _db = supabase_db.get_supabase_db_client()
+    character_store = CharacterStore(_db)
+    character_image_store = CharacterImageStore(_db)
+    batch_store = BatchStore(_db)
+    batch_orchestrator = BatchOrchestrator(job_manager, character_store, batch_store, settings)
+    batch_reconciler = BatchReconciler(
+        job_manager, character_store, batch_store, settings,
+        supabase_storage_service=supabase_storage_service,
+        character_image_store=character_image_store,
+    )
+    # One shared step-execution engine (templates loaded once); M lightweight workers
+    # drain the dedicated batch queue in parallel, isolated from interactive edits.
+    batch_engine = PipelineBackgroundWorker(
+        job_manager=job_manager,
+        comfyui_client=comfyui_client,
+        storage_service=storage_service,
+        pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
+        outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+        image_cache_service=image_cache_service,
+        notification_service=notification_service,
+        supabase_storage_service=supabase_storage_service,
+        runpod_client=runpod_client,
+    )
+    for i in range(settings.BATCH_WORKER_POOL_SIZE):
+        batch_workers.append(BatchPipelineWorker(
+            job_manager=job_manager,
+            engine=batch_engine,
+            storage_service=storage_service,
+            supabase_storage_service=supabase_storage_service,
+            notification_service=notification_service,
+            name=f"batch-{i}",
+        ))
+    logger.info(f"Character Batches enabled: {settings.BATCH_WORKER_POOL_SIZE} batch workers")
+else:
+    logger.info("Character Batches disabled (Supabase DB not configured)")
+
 
 def _validate_production_settings() -> None:
     """
@@ -236,6 +291,22 @@ async def lifespan(app: FastAPI):
     logger.info(f"Image Cache TTL: {settings.IMAGE_CACHE_TTL_SECONDS}s")
     logger.info(f"Debug Mode: {settings.DEBUG}")
 
+    # Preload pose reference assets into the in-process cache. Missing assets do
+    # NOT block boot — pose/pipeline endpoints 422 cleanly until the references
+    # are generated (scripts/generate_pose_refs.py); non-pose endpoints are
+    # unaffected.
+    total_poses = len(list(PoseType))
+    installed = pose_assets.preload()
+    logger.info(f"Pose references: {installed}/{total_poses} installed")
+    missing = pose_assets.missing_pose_assets()
+    if missing:
+        logger.warning(
+            "Pose references missing for: "
+            + ", ".join(p.value for p in missing)
+            + ". Pose and pipeline (with pose) requests will return 422 until "
+            "scripts/generate_pose_refs.py is run."
+        )
+
     # Configure services for API endpoints
     configure_services(
         job_manager,
@@ -247,7 +318,10 @@ async def lifespan(app: FastAPI):
         settings.COMFYUI_POSE_WORKFLOW_PATH,
         image_cache_service,
         supabase_storage_service,
-        runpod_client
+        runpod_client,
+        character_store=character_store,
+        batch_store=batch_store,
+        batch_orchestrator=batch_orchestrator,
     )
 
     # Sync BASE_URL to Supabase so external services know our tunnel URL
@@ -262,6 +336,10 @@ async def lifespan(app: FastAPI):
         await pipeline_worker.start()
         # await cleanup_worker.start()
         await image_cache_service.start_cleanup_worker()
+        for w in batch_workers:
+            await w.start()
+        if batch_reconciler:
+            await batch_reconciler.start()
         logger.info("Background workers started successfully")
     except Exception as e:
         logger.error(f"Failed to start background workers: {e}")
@@ -276,6 +354,10 @@ async def lifespan(app: FastAPI):
     await pose_worker.stop()
     await background_edit_worker.stop()
     await pipeline_worker.stop()
+    for w in batch_workers:
+        await w.stop()
+    if batch_reconciler:
+        await batch_reconciler.stop()
     await cleanup_worker.stop()
     await image_cache_service.stop_cleanup_worker()
     logger.info("Shutdown complete")
@@ -299,10 +381,10 @@ Pass token as `Authorization: Bearer <token>` header.
 - **POST /v1/generate/image** — Generate a new character image from persona attributes
 
 ### Image Editing
-- **POST /v1/edit/outfit** — Change character outfit/clothing (44 outfit types, 3 nudity levels)
+- **POST /v1/edit/outfit** — Change character outfit/clothing (47 outfit types, 3 nudity levels)
 - **POST /v1/edit/pose** — Change character pose (16 pose types with reference images)
 - **POST /v1/edit/background** — Change environment/scene (with natural lighting adaptation)
-- **POST /v1/pipeline** — Chain multiple edits: pose → outfit → background
+- **POST /v1/edit** — Chain multiple edits: pose → outfit → background
 
 ### Job Management
 - **GET /v1/jobs/{jobId}** — Poll job status and get result URLs
@@ -422,6 +504,15 @@ async def health_check():
     - Current queue size
     - API version
     """
+    # Non-fatal RunPod endpoint probe: log-only, never affects the response body
+    # or status code. Capped at 2s — the client's own retry/backoff loop could
+    # otherwise hang this request for ~90s.
+    if runpod_client.is_configured():
+        try:
+            await asyncio.wait_for(runpod_client.health(), timeout=2.0)
+        except Exception as e:
+            logger.warning(f"/health: RunPod endpoint probe failed: {e}")
+
     return HealthResponse(
         status="healthy",
         queueSize=job_manager.queue_size(),

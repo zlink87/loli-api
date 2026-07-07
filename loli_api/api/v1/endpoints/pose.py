@@ -13,6 +13,8 @@ from auth.dependencies import get_current_user
 from models.enums import PoseType, JobStatus
 from models.requests import PoseEditRequest
 from models.responses import JobCreateResponse
+from services import pose_assets
+from services import prompt_constants as pc
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -29,8 +31,9 @@ _pose_workflow_template: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
-# Pose Reference Images - Maps pose types to ComfyUI input filenames
-# These files should exist in the ComfyUI input directory under poses/
+# Pose Descriptions - Text descriptions of each target pose, injected into the
+# workflow prompt (node 114). The reference image itself is resolved and shipped
+# per-request via services/pose_assets.py (worker_filename -> node 170).
 # ---------------------------------------------------------------------------
 POSE_DESCRIPTIONS: Dict[PoseType, str] = {
     PoseType.STANDING_LEANING: "standing and leaning against a wall or surface, relaxed casual pose",
@@ -49,25 +52,6 @@ POSE_DESCRIPTIONS: Dict[PoseType, str] = {
     PoseType.JOGGING: "jogging or running, dynamic motion pose",
     PoseType.OPENING_FRIDGE: "standing and reaching into an open refrigerator",
     PoseType.COOKING: "standing in a kitchen cooking, hands busy with food preparation",
-}
-
-POSE_REFERENCES: Dict[PoseType, str] = {
-    PoseType.STANDING_LEANING: "poses/standing_leaning.png",
-    PoseType.SITTING: "poses/Sitting.jpeg",
-    PoseType.SITTING_LEGS_WIDE_OPEN: "poses/sitting_legs_wide_open.png",
-    PoseType.SOFA: "poses/sofa.jpeg",
-    PoseType.LYING_BACK: "poses/lying_back.png",
-    PoseType.LYING_STOMACH: "poses/lying_stomach.png",
-    PoseType.KNEELING: "poses/kneeling.png",
-    PoseType.BENDING_OVER: "poses/bending_over.png",
-    PoseType.HANDS_BEHIND_HEAD: "poses/hands_behind_head.png",
-    PoseType.SQUATTING: "poses/squatting.jpeg",
-    PoseType.ALL_FOURS: "poses/all_fours.png",
-    PoseType.SPREAD_LEGS: "poses/spread_legs.png",
-    PoseType.EATING: "poses/eating.jpeg",
-    PoseType.JOGGING: "poses/jogging.jpg",
-    PoseType.OPENING_FRIDGE: "poses/opening_fridge.jpeg",
-    PoseType.COOKING: "poses/cooking.png",
 }
 
 
@@ -120,11 +104,10 @@ def build_pose_prompt(pose: PoseType) -> str:
         A descriptive prompt string for the ComfyUI workflow
     """
     desc = POSE_DESCRIPTIONS.get(pose, "natural pose")
+    clause = pc.pose_identity_clause()
     return (
         f"Make the person in image 1 do the exact same pose of the person in image 2. "
-        f"The target pose is: {desc}. "
-        f"Keep the original appearance, body proportion, skin type, facial features, "
-        f"hair style, hair color, and outfit from image 1. "
+        f"The target pose is: {desc}. {clause}. "
         f"The new pose should match image 2 accurately. "
         f"Adapt the background and environment to suit the pose naturally."
     )
@@ -132,20 +115,36 @@ def build_pose_prompt(pose: PoseType) -> str:
 
 def get_pose_reference(pose: PoseType) -> str:
     """
-    Get the reference image filename for a pose.
+    Get the reference image filename (flat name) for a pose.
+
+    The actual PNG bytes are shipped per-request as a base64 ``input.images[]``
+    entry (see services/pose_assets.py); this returns the flat filename that the
+    workflow's LoadImage node (170) should reference.
 
     Args:
         pose: The pose type
 
     Returns:
         ComfyUI input filename for the reference pose image
+        (e.g. ``pose_ref_sitting.png``)
+
+    Raises:
+        ValueError: if ``pose`` is not a known PoseType member (kept for the
+            existing 422 mapping in ``edit_pose``).
     """
-    ref = POSE_REFERENCES.get(pose)
-    if not ref:
-        raise ValueError(f"No reference image for pose: {pose.value}")
-    return ref
+    if not isinstance(pose, PoseType):
+        raise ValueError(f"No reference image for pose: {pose}")
+    return pose_assets.worker_filename(pose)
 
 
+# NOTE (W7): The pose workflow (edit_pose_action.json) has NO negative
+# conditioning BY DESIGN. It runs the KSampler at cfg=1 and routes the negative
+# branch through ConditioningZeroOut, so any negative-prompt text is
+# mathematically inert. PoseEditRequest.negativePrompt is therefore accepted for
+# request-shape parity but deliberately not wired here. Do NOT wire a negative
+# prompt into this workflow without also raising cfg above 1 AND adding a real
+# negative encoder node — otherwise you change the sampler math and the intended
+# behavior. This is intentional; do not "fix" it.
 def prepare_pose_workflow(
     template: dict,
     source_image: str,
@@ -254,6 +253,18 @@ async def edit_pose(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(e),
+            )
+
+        # Validate the pose reference asset is actually installed on disk.
+        # References ship per-request as base64; a missing PNG means the
+        # generator has not been run yet, so fail fast with a clear 422.
+        if not pose_assets.asset_path(request.pose).exists():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Pose reference not installed for pose '{request.pose.value}'. "
+                    f"Run scripts/generate_pose_refs.py."
+                ),
             )
 
         # Log payload

@@ -269,3 +269,112 @@ class AccessoryType(str, Enum):
     GLASSES = "glasses"
     HAT = "hat"
     SUNGLASSES = "sunglasses"
+
+
+# ---------------------------------------------------------------------------
+# Structured scene vocabulary (Story Batches)
+# Used by the story planner to compose coherent, controllable backgrounds.
+# Each value has a descriptive phrase in services/attribute_phrases.py.
+# ---------------------------------------------------------------------------
+class LocationType(str, Enum):
+    """Where a scene takes place."""
+    # --- home ---
+    HOME_BEDROOM = "home_bedroom"
+    HOME_LIVING_ROOM = "home_living_room"
+    HOME_KITCHEN = "home_kitchen"
+    HOME_BATHROOM = "home_bathroom"
+    HOME_BALCONY = "home_balcony"
+    HOME_OFFICE = "home_office"
+    # --- workplace (profession-linked) ---
+    OFFICE = "office"
+    HOSPITAL_WARD = "hospital_ward"
+    CLASSROOM = "classroom"
+    PHOTO_STUDIO = "photo_studio"
+    GYM = "gym"
+    YOGA_STUDIO = "yoga_studio"
+    RESTAURANT_KITCHEN = "restaurant_kitchen"
+    LIBRARY = "library"
+    SALON = "salon"
+    STAGE = "stage"
+    LAB = "lab"
+    # --- outdoors ---
+    BEACH = "beach"
+    PARK = "park"
+    CITY_STREET = "city_street"
+    FOREST_TRAIL = "forest_trail"
+    ROOFTOP = "rooftop"
+    POOLSIDE = "poolside"
+    GARDEN = "garden"
+    # --- social venues ---
+    CAFE = "cafe"
+    RESTAURANT = "restaurant"
+    BAR = "bar"
+    NIGHTCLUB = "nightclub"
+    HOTEL_ROOM = "hotel_room"
+    LUXURY_LOUNGE = "luxury_lounge"
+    CAR_INTERIOR = "car_interior"
+
+
+class TimeOfDayType(str, Enum):
+    """Time of day for a scene."""
+    EARLY_MORNING = "early_morning"
+    MORNING = "morning"
+    DAYTIME = "daytime"
+    GOLDEN_HOUR = "golden_hour"
+    SUNSET = "sunset"
+    EVENING = "evening"
+    NIGHT = "night"
+
+
+class LightingType(str, Enum):
+    """Lighting style for a scene."""
+    NATURAL_SOFT = "natural_soft"
+    BRIGHT_DAYLIGHT = "bright_daylight"
+    GOLDEN_WARM = "golden_warm"
+    MOODY_DIM = "moody_dim"
+    NEON = "neon"
+    CANDLELIT = "candlelit"
+    STUDIO_SOFTBOX = "studio_softbox"
+    BACKLIT_RIM = "backlit_rim"
+    OVERCAST = "overcast"
+
+
+# ---------------------------------------------------------------------------
+# Camera / shot vocabulary (hero-shot generation)
+# Controls framing, angle, expression and photographic finish of generated
+# character images. Each value has a phrase in services/camera_vocab.py.
+# ---------------------------------------------------------------------------
+class ShotFramingType(str, Enum):
+    """How much of the subject is in frame."""
+    PORTRAIT_CLOSEUP = "portrait_closeup"
+    CHEST_UP = "chest_up"
+    WAIST_UP = "waist_up"          # hero-shot default
+    THREE_QUARTER = "three_quarter"
+    FULL_BODY = "full_body"        # legacy default behavior
+    SELFIE = "selfie"
+
+
+class CameraAngleType(str, Enum):
+    """Camera position relative to the subject."""
+    EYE_LEVEL = "eye_level"        # default
+    HIGH_ANGLE = "high_angle"
+    LOW_ANGLE = "low_angle"
+    THREE_QUARTER_VIEW = "three_quarter_view"
+    SIDE_PROFILE = "side_profile"
+
+
+class ExpressionType(str, Enum):
+    """Explicit facial-expression override (else derived from personality)."""
+    SOFT_SMILE = "soft_smile"
+    NEUTRAL = "neutral"
+    PLAYFUL = "playful"
+    SEDUCTIVE = "seductive"
+    CONFIDENT = "confident"
+    LAUGHING = "laughing"
+
+
+class PhotoStyleType(str, Enum):
+    """Photographic finish applied by the workflow-side style wrapper."""
+    POLISHED = "polished"          # new default: retouched editorial/glamour
+    STUDIO = "studio"
+    CANDID_PHONE = "candid_phone"  # legacy raw/candid phone-cam look

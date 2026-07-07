@@ -13,6 +13,9 @@ from typing import Dict, Any, Optional, List
 import logging
 import requests
 
+from services import output_presets
+from services import prompt_constants as pc
+
 logger = logging.getLogger(__name__)
 
 class ComfyUIClient:
@@ -264,14 +267,18 @@ class ComfyUIClient:
         resolution: Optional[str] = None,
         aspect_ratio: Optional[str] = None,
         batch_size: Optional[int] = None,
-        negative_prompt: Optional[str] = None
+        negative_prompt: Optional[str] = None,
+        photo_style: Optional[str] = None,
+        hires: bool = False
     ) -> dict:
         """
         Prepare the character creation workflow with injected parameters.
 
         Based on amazing-z-photo_API(Create CHAR).json analysis:
         - Node 110: Character prompt (PrimitiveStringMultiline) - MAIN INPUT
+        - Node 125: Photo-style wrapper template (rewritten per photo_style)
         - Node 67: Seed value (optional, uses workflow default if not provided)
+        - Node 207: Output switch — single-pass (284) vs detail-refine (300)
         - Node 9: Output filename prefix
 
         Args:
@@ -279,45 +286,42 @@ class ComfyUIClient:
             character_prompt: Generated character description prompt
             seed: Optional random seed for generation (None = use workflow default)
             filename_prefix: Output filename prefix
-            resolution: Optional resolution override (e.g., "1024x1536")
-            aspect_ratio: Optional aspect ratio override (e.g., "2:3")
+            resolution: Optional whitelisted resolution override (e.g., "1088x1600")
+            aspect_ratio: Optional aspect ratio preset (e.g., "2:3")
             batch_size: Optional batch size override (1-4)
+            photo_style: PhotoStyleType value; rewrites the node 125 wrapper.
+                None/unknown = keep the workflow's baked-in template.
+            hires: When True, route the output through the detail-refine branch
+                (upscale-model round trip + refine steps; same output resolution).
 
         Returns:
             Modified workflow dictionary ready for execution
         """
         workflow = copy.deepcopy(workflow_template)
 
-        def parse_resolution(value: str) -> Optional[tuple[int, int]]:
-            parts = value.lower().split("x")
-            if len(parts) != 2:
-                return None
-            if not parts[0].isdigit() or not parts[1].isdigit():
-                return None
-            width = int(parts[0])
-            height = int(parts[1])
-            if width <= 0 or height <= 0:
-                return None
-            return width, height
-
-        def parse_aspect_ratio(value: str) -> Optional[float]:
-            parts = value.split(":")
-            if len(parts) != 2:
-                return None
-            try:
-                numerator = float(parts[0])
-                denominator = float(parts[1])
-            except ValueError:
-                return None
-            if numerator <= 0 or denominator <= 0:
-                return None
-            return numerator / denominator
-
         # Node 110: Inject character prompt into PrimitiveStringMultiline
         # This is the ONLY required parameter from API
         if "110" in workflow:
             workflow["110"]["inputs"]["value"] = character_prompt
             logger.debug(f"Set character prompt in node 110 ({len(character_prompt)} chars)")
+
+        # Node 125: Photo-style wrapper. The workflow substitutes the API prompt
+        # into this template AFTER Grok polish (inside ComfyUI), so the finish
+        # here is immune to the polisher. Unknown/None -> baked-in text stands.
+        if photo_style and "125" in workflow:
+            template_text = pc.PHOTO_STYLE_TEMPLATES.get(photo_style)
+            if template_text:
+                workflow["125"]["inputs"]["value"] = template_text
+                logger.debug(f"Set photo style wrapper in node 125: {photo_style}")
+
+        # Node 207: output switch. Default input is node 284 (single-pass decode).
+        # hires re-points it at node 300 (VAEDecode of the refine sampler 181),
+        # activating the dormant upscale-model + refine branch.
+        if hires and "207" in workflow and "300" in workflow:
+            workflow["207"]["inputs"]["any_01"] = ["300", 0]
+            if seed is not None and "181" in workflow:
+                workflow["181"]["inputs"]["noise_seed"] = seed
+            logger.debug("Enabled detail-refine output branch (node 207 -> 300)")
 
         # Node 7: Inject negative prompt if the workflow has a negative text node.
         # The input field name varies by node type, so set whichever string field exists.
@@ -339,24 +343,15 @@ class ComfyUIClient:
             if "50" in workflow:
                 workflow["50"]["inputs"]["noise_seed"] = seed
 
+        # Dims come from the whitelist (services/output_presets.py) — explicit
+        # resolution wins over the aspect-ratio preset; both are validated at the
+        # API edge, so unknown values simply fall back to the template defaults.
         width = None
         height = None
-        if resolution:
-            parsed = parse_resolution(resolution)
-            if parsed:
-                width, height = parsed
-
-        if (width is None or height is None) and aspect_ratio:
-            ratio = parse_aspect_ratio(aspect_ratio)
-            if ratio:
-                default_width = 1088
-                default_height = 1600
-                if "243" in workflow and isinstance(workflow["243"].get("inputs", {}).get("value"), int):
-                    default_width = workflow["243"]["inputs"]["value"]
-                if "248" in workflow and isinstance(workflow["248"].get("inputs", {}).get("value"), int):
-                    default_height = workflow["248"]["inputs"]["value"]
-                width = int(round(default_height * ratio))
-                height = default_height
+        if resolution or aspect_ratio:
+            width, height = output_presets.dims_for(
+                aspect_ratio=aspect_ratio, resolution=resolution
+            )
 
         if width and height:
             if "243" in workflow:

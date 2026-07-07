@@ -1,0 +1,602 @@
+# Character Batches — Admin Panel Integration Guide
+
+Handoff spec for wiring the **admin area** to the Character Batches API in `loli-api`.
+Everything here is self-contained; you do not need the backend source.
+
+**What the feature does:** an admin defines one **Character** (a persona + a single
+"hero" photo they love) and requests a **Batch** of 20–50 images. The backend plans a
+coherent "story flow" of scenes (varied pose / outfit / nudity / background) from the
+character's traits and generates each image by **editing the hero photo** (so the face
+stays consistent). Generation is async; the UI polls for progress.
+
+**Where the data lands (this is the point):** batches write to the REAL product
+schema the chat app reads —
+
+- the character is a real `characters` row (created as `status='draft'`; persona in
+  the flat typed columns, `bio` → `context`, hero photo → `profile_image_url` /
+  `avatar_image_url` / `chat_avatar_url`);
+- every generated photo becomes a `character_images` row (`image_type='gallery'`);
+- each photo also gets a `chat_persona_actions` quick action (`media_type='image'`,
+  `trigger_type='manual'`, `sort_order=scene_index`) pointing at that image row.
+
+So after a batch completes, the admin only reviews the photos and flips the
+character's `status` to published (in the existing admin UI) — chat is then fully
+wired: profile image + quick-action photo reveals.
+
+---
+
+## 0. Authoritative schema
+
+The live OpenAPI schema is the source of truth for every field and enum value:
+
+- **Swagger UI:** `GET {API_BASE}/docs`
+- **Raw schema:** `GET {API_BASE}/openapi.json`
+
+Fetch `/openapi.json` at build time (or once) to generate types / dropdown option
+lists rather than hard-coding them. The values below are provided for convenience but
+OpenAPI is canonical.
+
+---
+
+## 0.5 Base URL & CORS (do this first)
+
+- **Base URL (`{API_BASE}`):** get it from backend ops (the tunnel/deploy URL). All
+  paths below are relative to it, under `/v1`.
+- **CORS:** the API only accepts cross-origin browser requests from origins on its
+  `CORS_ALLOW_ORIGINS` allowlist. **Your admin panel's origin must be added to that
+  env var on the backend**, or every request fails at the browser with a CORS error
+  (before auth even runs). Coordinate this with backend ops as step one.
+
+---
+
+## 1. Auth (all endpoints are admin-only)
+
+Send the signed-in user's **Supabase access token** as a Bearer header:
+
+```
+Authorization: Bearer <supabase_access_token>
+```
+
+A user is treated as admin if **either**:
+- their JWT has `app_metadata.role == "admin"` (set this on the Supabase user), **or**
+- their `sub` (user id) is in the backend's `ADMIN_USER_IDS` allowlist (env var).
+
+Non-admins get **403**. No token / invalid token → **401**.
+
+> The API is single-admin by design: there is no per-user data isolation. Every admin
+> sees the same characters and batches.
+
+---
+
+## 2. The hero photo (important)
+
+`hero_image_url` must be a URL on the backend's SSRF allowlist
+(`SOURCE_IMAGE_ALLOWED_HOSTS`) — in practice a **Supabase Storage public URL**.
+
+**UI flow:** upload the chosen photo to Supabase Storage first, take the resulting
+public URL, and pass that as `hero_image_url` when creating the character. A raw file
+upload to this API is not supported — it takes a URL.
+
+> This also applies to characters created outside this API: batching one requires its
+> `profile_image_url` host to be on the allowlist, otherwise items fail with
+> `ENQUEUE_ERROR`.
+
+---
+
+## 3. Endpoints
+
+Base path: `/v1`. All return JSON. Async endpoints return **202 Accepted**.
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| POST | `/v1/characters` | Create a character (real `characters` row, `status='draft'`) | 201 → `CharacterRead` |
+| GET | `/v1/characters?limit=&offset=` | List characters | 200 → `CharacterRead[]` |
+| GET | `/v1/characters/{id}` | Get one | 200 → `CharacterRead` |
+| PATCH | `/v1/characters/{id}` | Update (partial) | 200 → `CharacterRead` |
+| DELETE | `/v1/characters/{id}` | Delete (removes its quick actions + gallery images + batches) | 204 |
+| POST | `/v1/characters/{id}/batches` | Plan + launch a batch | 202 → `BatchLaunchResponse` |
+| GET | `/v1/characters/{id}/batches` | List batches for a character | 200 → `BatchRead[]` |
+| GET | `/v1/batches/{id}` | Batch status + all items | 200 → `BatchDetailRead` |
+| GET | `/v1/batches/{id}/results?ready_only=true` | Finished items only | 200 → `BatchItemRead[]` |
+| POST | `/v1/batches/{id}/launch` | Run a dry-run (`planned`) batch as-is | 202 → `BatchRead` |
+| POST | `/v1/batches/{id}/retry` | Re-run failed items | 202 → `BatchRead` |
+| DELETE | `/v1/batches/{id}` | Cancel the batch | 204 |
+
+**Error codes:** 401 (auth), 403 (not admin), 404 (not found), 409 (retry when nothing
+failed / launch when not `planned`), 422 (validation — bad enum / URL not allowlisted),
+503 (batch services not configured — backend Supabase DB missing).
+
+**Pagination:** `GET /v1/characters` takes `limit` (default 50, 1–200) and `offset`
+(default 0). It returns a plain `CharacterRead[]` with no total-count header — page by
+requesting until you get fewer than `limit` rows. `GET /v1/characters/{id}/batches`
+returns all of a character's batches (no pagination).
+
+---
+
+## 4. Request / response shapes
+
+### 4.1 `PersonaOptions` (the character's identity + traits)
+
+```jsonc
+{
+  "style": "realistic",          // realistic | anime  (default realistic)
+  "ethnicity": "caucasian",      // REQUIRED
+  "age": 28,                     // REQUIRED, 18–99
+  "hairStyle": "straight",       // REQUIRED
+  "hairColor": "blonde",         // REQUIRED
+  "eyeColor": "green",           // REQUIRED
+  "bodyType": "curvy",           // default average
+  "breastSize": "medium",        // default medium
+  "name": "Estella",             // REQUIRED, 1–50 chars
+  "personality": "temptress",    // optional
+  "relationship": "girlfriend",  // optional
+  "occupation": "nurse",         // optional — drives the story arcs
+  "kinks": ["playful_teasing", "slow_sensual"], // optional, max 3
+  "voice": null                  // optional
+}
+```
+
+The persona is stored in the `characters` table's flat columns (`ethnicity`,
+`hair_style`, `kinks[]`, …) — it round-trips through the API unchanged.
+
+### 4.2 `CharacterCreate` → `POST /v1/characters`
+
+```jsonc
+{
+  "persona": { /* PersonaOptions */ },
+  "hero_image_url": "https://<proj>.supabase.co/storage/v1/object/public/images/estella.png",
+  "bio": "Night-shift nurse, introverted, loves slow mornings.",  // optional, ≤4000 → stored as characters.context
+  "name": null   // optional; defaults to persona.name
+}
+```
+
+`CharacterRead` (also returned by GET/PATCH) adds: `id`, `status` (`draft` until
+published), `created_at`, `updated_at`.
+
+`CharacterUpdate` (PATCH) — every field optional; send only what changes.
+
+> `likes` / `dislikes` moved off the character: they are **batch-level** fields now
+> (see 4.3) because they only tune scene planning.
+
+### 4.3 `BatchCreate` → `POST /v1/characters/{id}/batches`
+
+```jsonc
+{
+  "count": 24,                 // REQUIRED, 1–50
+  "dry_run": false,            // true = plan only, NO image generation (see §6)
+  "likes": ["coffee", "silk", "rainy days"],   // bias scenes toward these
+  "dislikes": ["gyms", "neon clubs"],          // soft-excluded from scenes
+  "controls": {
+    "max_nudity": "medium",    // low | medium | high — hard ceiling, never exceeded
+    "sfw_only": false,         // true forces nudity=low and drops the "naked" outfit
+    "content_rating": "nsfw",  // nsfw | sfw
+    "escalation": "building",  // building (nudity rises across the set) | flat
+    "photo_style": "polished", // polished (default) | studio | candid_phone (legacy raw look)
+    "arc_count": 4,            // optional 1–8; capped by available story arcs
+    "seed_strategy": "per_item", // per_item | fixed | random
+    "base_seed": 42,           // optional; enables reproducible plans/images
+    "allowed_outfits": null,   // optional allowlist of outfit enums
+    "blocked_outfits": ["naked"], // default blocks "naked"
+    "blocked_poses": [],
+    "allowed_locations": null,
+    "blocked_locations": [],
+    "pipeline_order": null
+  }
+}
+```
+
+`controls` is optional — omit it for sensible defaults (max_nudity=medium, blocks
+"naked", building escalation, per_item seeds, polished finish).
+
+**`photo_style`** applies the photographic finish to every generated photo:
+`polished` = retouched editorial glamour (matches the hero-card generation look),
+`studio` = clean softbox studio, `candid_phone` = the legacy raw phone-cam look.
+
+**Response `BatchLaunchResponse` (202):**
+
+```jsonc
+{
+  "batch": { /* BatchRead */ },
+  "estimate": {
+    "items_total": 24,
+    "est_runpod_jobs": 58,     // total GPU jobs (each image = 1–3 steps)
+    "est_seconds_min": 1160,
+    "est_seconds_max": 1856,
+    "est_cost_usd": null       // populated only if backend sets a GPU rate
+  },
+  "provider": null             // planner used; currently always null in the body (logged server-side)
+}
+```
+
+Show the estimate immediately so the admin knows the time/jobs before results exist.
+
+### 4.4 `BatchRead` / `BatchDetailRead` → `GET /v1/batches/{id}`
+
+```jsonc
+{
+  "id": "uuid",
+  "character_id": "uuid",
+  "count": 24,
+  "controls": { /* echoed */ },
+  "likes": ["coffee"], "dislikes": ["gyms"],
+  "status": "running",         // see status list below
+  "progress": 0.42,            // 0.0–1.0
+  "items_total": 24,
+  "items_succeeded": 10,
+  "items_failed": 0,
+  "error": null,
+  "created_at": "…", "updated_at": "…",
+  "items": [ /* BatchItemRead[] — only on the detail endpoint */ ]
+}
+```
+
+**`BatchItemRead`** (one planned scene / one image):
+
+```jsonc
+{
+  "id": "uuid",
+  "scene_index": 0,            // ordering within the story
+  "status": "succeeded",       // pending|queued|running|succeeded|failed|cancelled
+  "scene_spec": {              // the plan for this beat (great for a storyboard view)
+    "arc_id": "morning_home", "arc_title": "A slow morning at home",
+    "beat_index": 0, "global_index": 0,
+    "beat_description": "Waking up slow, wrapped in a robe",
+    "pose": "sitting", "outfit": "satin_robe", "nudityLevel": "low",
+    "accessories": null,
+    "location": "home_bedroom", "time_of_day": "early_morning", "lighting": "natural_soft",
+    "background_text": null, "mood_kinks": ["slow_sensual"], "mood_personality": "temptress",
+    "seed": 331198
+  },
+  "job_id": "batjob_…",
+  "image_url": "https://<proj>.supabase.co/storage/v1/object/public/images/batch_edits/batjob_….png",
+  "preview_url": "…",          // may be a signed/expiring URL; prefer image_url
+  "image_hash": "sha256…",
+  "seed": 331198,
+  "arc": "morning_home", "beat": 0,
+  "attempts": 1,
+  "error_code": null, "error_message": null,
+  "character_image_id": "uuid" // the character_images row created for this photo
+}
+```
+
+**For display use `image_url`** (stable public URL). `preview_url` can expire.
+`character_image_id` links the item to its `character_images` gallery row (and the
+quick action pointing at it) — set only on succeeded items.
+
+---
+
+## 5. Status values
+
+**Batch `status`:**
+`planning` → `running` → one of `completed` (all ok) / `partial` (some failed) /
+`failed` (all failed) / `cancelled`. Plus `planned` (a dry-run result, terminal).
+
+**Item `status`:** `pending` → `queued` → `running` → `succeeded` | `failed` |
+`cancelled`.
+
+An item is only marked `succeeded` **after** its `character_images` +
+`chat_persona_actions` rows exist, so `items_succeeded` doubles as "photos visible to
+chat" (once the character is published).
+
+**Polling:** after launching, `GET /v1/batches/{id}` every ~5s while
+`status ∈ {planning, running}`; stop on any terminal status. Render the items grid live:
+spinner for pending/queued/running, the image for succeeded, an error chip (with
+`error_message`) for failed.
+
+---
+
+## 6. Dry-run (storyboard preview before spending GPU)
+
+`POST …/batches` with `"dry_run": true` **plans and persists the scenes but generates
+no images**. The returned batch has `status: "planned"`; `GET /v1/batches/{id}` shows
+all items with their `scene_spec` populated and no `image_url`. Use this to render a
+**storyboard preview** (beat descriptions, pose/outfit/location per scene) so the admin
+can review the story before committing.
+
+**To run the previewed plan as-is**, call `POST /v1/batches/{id}/launch` on the *same*
+batch. It promotes the `planned` batch to `running` and generates exactly the scenes
+you previewed (same items, same seeds) — no re-planning. This is the recommended
+"preview → confirm" flow:
+
+1. `POST …/batches` with `dry_run: true` → storyboard the returned `planned` batch.
+2. If approved, `POST /v1/batches/{id}/launch` → it starts generating and you poll as usual.
+3. `launch` returns **409** if the batch isn't in the `planned` state (e.g. already running).
+
+(Alternatively, submitting a brand-new batch with `dry_run: false` also works; with a
+fixed `base_seed` + deterministic planner it reproduces the same plan, but `launch` on
+the existing batch is exact and avoids a duplicate.)
+
+---
+
+## 7. Enum values
+
+**In OpenAPI (`/openapi.json` → `components.schemas`)** — pull option lists from here:
+persona enums (`EthnicityType`, `HairStyleType`, `HairColorType`, `EyeColorType`,
+`BodyType`, `BreastSize`, `PersonalityType`, `RelationshipType`, `OccupationType`,
+`KinkType`, `StyleType`), the edit enums (`OutfitType` 47, `PoseType` 16,
+`AccessoryType` 5, `NudityLevel`), and — because they're used by `BatchControls` —
+**`LocationType`**, **`SeedStrategy`** and **`PhotoStyleType`**.
+
+**NOT in OpenAPI — documented here only.** `scene_spec` is returned as a free-form
+`dict`, so the two enums nested inside it never appear in the schema. You only need
+these to *display* storyboard labels (the planner chooses them; the UI never inputs
+them). Values are lowercase `snake_case`, so rendering them raw is fine:
+
+- **`TimeOfDayType`**: `early_morning`, `morning`, `daytime`, `golden_hour`, `sunset`,
+  `evening`, `night`
+- **`LightingType`**: `natural_soft`, `bright_daylight`, `golden_warm`, `moody_dim`,
+  `neon`, `candlelit`, `studio_softbox`, `backlit_rim`, `overcast`
+
+**Plain string fields on `BatchControls`** (constrained by convention, not enum types):
+`content_rating` ∈ {`nsfw`, `sfw`}, `escalation` ∈ {`building`, `flat`}.
+
+**`LocationType`** (also inline for convenience):
+
+- `home_bedroom`, `home_living_room`, `home_kitchen`, `home_bathroom`,
+  `home_balcony`, `home_office`, `office`, `hospital_ward`, `classroom`, `photo_studio`,
+  `gym`, `yoga_studio`, `restaurant_kitchen`, `library`, `salon`, `stage`, `lab`, `beach`,
+  `park`, `city_street`, `forest_trail`, `rooftop`, `poolside`, `garden`, `cafe`,
+  `restaurant`, `bar`, `nightclub`, `hotel_room`, `luxury_lounge`, `car_interior`
+
+All enum values are lowercase `snake_case` strings.
+
+---
+
+## 8. Suggested admin UI
+
+1. **Characters list** — cards with hero thumbnail + name + `status` chip
+   (draft/published); "New character".
+2. **Character form** — hero upload (→ Supabase → URL), persona fields (dropdowns from
+   OpenAPI enums), bio. Create/Update/Delete.
+3. **Character detail** — persona summary + "New batch" + batch history
+   (`GET /v1/characters/{id}/batches`).
+4. **Batch launch modal** — `count` slider (1–50), likes/dislikes tag inputs, controls
+   (max_nudity, escalation, photo_style, sfw toggle, blocked outfits/poses/locations,
+   seed strategy + base_seed). Show the `estimate` on submit. Recommended flow:
+   **Preview** (`dry_run:true`) → render the storyboard from each item's `scene_spec` →
+   **Launch this plan** (`POST /v1/batches/{id}/launch`) to generate exactly what was
+   previewed. (A direct **Generate** button with `dry_run:false` is also fine.)
+5. **Batch detail** — header with `progress` bar + counts; live items grid (poll §5);
+   per-item: image (`image_url`) / spinner / error. Actions: **Retry failed**
+   (`POST …/retry`, enabled when `items_failed > 0`) and **Cancel** (`DELETE …`).
+6. **Publish** — once the photos look right, flip the character's `status` in the
+   existing admin UI (this API leaves it `draft`); the quick actions are already wired.
+
+---
+
+## 9. Gotchas checklist
+
+- [ ] Admin panel origin must be on the backend's `CORS_ALLOW_ORIGINS` or browser calls
+      fail with a CORS error before auth even runs.
+- [ ] Admin JWT must satisfy `require_admin` (role claim or allowlist) or you get 403.
+- [ ] `hero_image_url` must be on the backend SSRF allowlist (Supabase public URL) or 422 —
+      also true for characters created outside this API (their `profile_image_url`).
+- [ ] Launch/retry/cancel are **202 async** — don't expect images in the response; poll.
+- [ ] Prefer `image_url` over `preview_url` for display (preview URLs can expire).
+- [ ] `arc_count` is capped by how many story arcs exist for the character's occupation,
+      so you may get fewer arcs than requested (not an error).
+- [ ] `503` on batch endpoints means the backend's Supabase DB isn't configured — surface
+      a clear "batches unavailable" state.
+- [ ] Deleting a character deletes its quick actions, gallery images, and batches.
+- [ ] Batch-created characters stay `status='draft'` until published — chat won't show
+      them (or their quick actions) before that.
+- [ ] Run migration `loli_api/migrations/0002_character_batches.sql` once (creates the
+      `character_batches` job tables; the product tables must already exist).
+
+---
+
+## 10. Supabase schema (reference)
+
+Current `public` schema. **The API endpoints are your contract — OpenAPI (§0) is
+canonical.** This is provided so you understand where data lands and which tables the
+admin panel / chat runtime may read directly.
+
+How this feature relates to the tables:
+
+- **Written by this API:** `characters` (created `status='draft'`), `character_images`
+  (batch photos, `image_type='gallery'`), `chat_persona_actions` (one quick action per
+  photo), and its own job tables `character_batches` / `character_batch_items`.
+- **Read by the chat runtime:** `characters`, `character_images`, `chat_persona_actions`,
+  `chat_personas` (linked via `characters.chat_persona_id`), `conversations`,
+  `chat_messages`.
+- **Publishing:** this API leaves `characters.status='draft'`; the admin flips it to the
+  chat-visible value and (optionally) sets `chat_persona_id`/`welcome_message` in the
+  existing admin UI. Those two columns are never touched by batches.
+
+> The export format below omits `ON DELETE` actions, `UNIQUE` constraints, and indexes.
+> In reality `character_batch_items` has `UNIQUE (batch_id, scene_index)`, and the job
+> tables' FKs cascade (`character_batches.character_id` → `characters` cascades;
+> `character_batch_items.character_image_id` → `character_images` is `SET NULL`).
+
+```sql
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
+
+CREATE TABLE public.chat_personas (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  system_prompt text NOT NULL,
+  greeting_message text,
+  tone text,
+  style text,
+  boundaries text,
+  summary text,
+  model_id text NOT NULL DEFAULT 'venice-uncensored'::text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT chat_personas_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.characters (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  style text NOT NULL DEFAULT 'realistic'::text,
+  ethnicity text NOT NULL,
+  age integer NOT NULL,
+  hair_style text NOT NULL,
+  hair_color text NOT NULL,
+  eye_color text NOT NULL,
+  body_type text NOT NULL,
+  breast_size text NOT NULL,
+  personality text,
+  relationship text,
+  occupation text,
+  kinks ARRAY NOT NULL DEFAULT '{}'::text[],
+  voice text,
+  context text,
+  chat_persona_id uuid,
+  avatar_image_url text,
+  profile_image_url text,
+  profile_image_2_url text,
+  chat_avatar_url text,
+  welcome_message text,
+  status text NOT NULL DEFAULT 'draft'::text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT characters_pkey PRIMARY KEY (id),
+  CONSTRAINT characters_chat_persona_id_fkey FOREIGN KEY (chat_persona_id) REFERENCES public.chat_personas(id)
+);
+CREATE TABLE public.character_images (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  character_id uuid NOT NULL,
+  image_type text NOT NULL,
+  image_url text NOT NULL,
+  original_image_url text,
+  provider text,
+  model text,
+  prompt text,
+  cost numeric NOT NULL DEFAULT 0,
+  latency numeric NOT NULL DEFAULT 0,
+  file_size integer,
+  outfit text,
+  accessories ARRAY NOT NULL DEFAULT '{}'::text[],
+  seed integer,
+  source_image_id uuid,
+  is_avatar boolean NOT NULL DEFAULT false,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT character_images_pkey PRIMARY KEY (id),
+  CONSTRAINT character_images_character_id_fkey FOREIGN KEY (character_id) REFERENCES public.characters(id),
+  CONSTRAINT character_images_source_image_id_fkey FOREIGN KEY (source_image_id) REFERENCES public.character_images(id)
+);
+CREATE TABLE public.chat_persona_actions (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  character_id uuid NOT NULL,
+  label text NOT NULL,
+  suggested_prompt text,
+  character_image_id uuid,
+  media_url text,
+  media_type text NOT NULL DEFAULT 'image'::text,
+  trigger_type text NOT NULL DEFAULT 'manual'::text,
+  trigger_after_messages integer,
+  trigger_keywords ARRAY NOT NULL DEFAULT '{}'::text[],
+  sort_order integer NOT NULL DEFAULT 0,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT chat_persona_actions_pkey PRIMARY KEY (id),
+  CONSTRAINT chat_persona_actions_character_id_fkey FOREIGN KEY (character_id) REFERENCES public.characters(id),
+  CONSTRAINT chat_persona_actions_character_image_id_fkey FOREIGN KEY (character_image_id) REFERENCES public.character_images(id)
+);
+CREATE TABLE public.conversations (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  character_id uuid NOT NULL,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT conversations_pkey PRIMARY KEY (id),
+  CONSTRAINT conversations_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id),
+  CONSTRAINT conversations_character_id_fkey FOREIGN KEY (character_id) REFERENCES public.characters(id)
+);
+CREATE TABLE public.chat_messages (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  conversation_id uuid NOT NULL,
+  role text NOT NULL,
+  content text NOT NULL,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT chat_messages_pkey PRIMARY KEY (id),
+  CONSTRAINT chat_messages_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id)
+);
+CREATE TABLE public.profiles (
+  id uuid NOT NULL,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT profiles_pkey PRIMARY KEY (id),
+  CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id)
+);
+CREATE TABLE public.admin_users (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  auth_user_id uuid NOT NULL UNIQUE,
+  email text NOT NULL UNIQUE,
+  role text NOT NULL DEFAULT 'editor'::text,
+  display_name text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT admin_users_pkey PRIMARY KEY (id),
+  CONSTRAINT admin_users_auth_user_id_fkey FOREIGN KEY (auth_user_id) REFERENCES auth.users(id)
+);
+CREATE TABLE public.app_config (
+  key text NOT NULL,
+  value text NOT NULL,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT app_config_pkey PRIMARY KEY (key)
+);
+CREATE TABLE public.ai_generated_images (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  provider text,
+  model text,
+  prompt text,
+  original_image_url text,
+  supabase_image_url text,
+  cost numeric,
+  latency numeric,
+  image_width integer,
+  image_height integer,
+  file_size integer,
+  metadata jsonb,
+  CONSTRAINT ai_generated_images_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.character_batches (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  character_id uuid NOT NULL,
+  count integer NOT NULL CHECK (count >= 1 AND count <= 50),
+  controls jsonb NOT NULL DEFAULT '{}'::jsonb,
+  likes ARRAY NOT NULL DEFAULT '{}'::text[],
+  dislikes ARRAY NOT NULL DEFAULT '{}'::text[],
+  status text NOT NULL DEFAULT 'pending'::text,
+  progress real NOT NULL DEFAULT 0,
+  items_total integer NOT NULL DEFAULT 0,
+  items_succeeded integer NOT NULL DEFAULT 0,
+  items_failed integer NOT NULL DEFAULT 0,
+  error text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT character_batches_pkey PRIMARY KEY (id),
+  CONSTRAINT character_batches_character_id_fkey FOREIGN KEY (character_id) REFERENCES public.characters(id)
+);
+CREATE TABLE public.character_batch_items (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  batch_id uuid NOT NULL,
+  scene_index integer NOT NULL,
+  scene_spec jsonb NOT NULL,
+  pipeline_request jsonb,
+  job_id text,
+  status text NOT NULL DEFAULT 'pending'::text,
+  preview_url text,
+  image_url text,
+  image_hash text,
+  seed bigint,
+  arc text,
+  beat integer,
+  attempts integer NOT NULL DEFAULT 0,
+  error_code text,
+  error_message text,
+  character_image_id uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT character_batch_items_pkey PRIMARY KEY (id),
+  CONSTRAINT character_batch_items_batch_id_fkey FOREIGN KEY (batch_id) REFERENCES public.character_batches(id),
+  CONSTRAINT character_batch_items_character_image_id_fkey FOREIGN KEY (character_image_id) REFERENCES public.character_images(id)
+);
+```

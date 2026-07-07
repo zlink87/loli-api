@@ -13,7 +13,6 @@ from models.enums import JobStatus
 
 from api.v1.endpoints.pose import (
     build_pose_prompt,
-    get_pose_reference,
     prepare_pose_workflow,
 )
 
@@ -65,9 +64,11 @@ class PoseBackgroundWorker(BaseEditWorker):
                 job, request.source_image, "pose"
             )
 
-            # Step 3: Get reference pose image (must exist in the worker's ComfyUI
-            # input dir — baked onto the RunPod network volume, see RUNPOD_SETUP.md)
-            reference_image = get_pose_reference(request.pose)
+            # Step 3: Stage the pose reference image. Its PNG bytes ship with the
+            # RunPod submission as a second base64 input.images[] entry (no
+            # network-volume dependency); the returned flat filename is what the
+            # workflow's LoadImage node (170) references.
+            reference_image = await self.stage_pose_reference(request.pose)
             logger.info(f"[POSE] {job.job_id} | Reference image: {reference_image}")
 
             # Step 4: Prepare seed and prompt

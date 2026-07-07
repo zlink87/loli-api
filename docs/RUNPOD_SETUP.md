@@ -35,10 +35,14 @@ files loli-api expects (from `setup.sh` / `download2.sh`):
 
 ```bash
 cd /runpod-volume
-mkdir -p ComfyUI/models/{diffusion_models,text_encoders,vae,checkpoints,sam3,upscale_models} \
-         ComfyUI/input/poses
+mkdir -p ComfyUI/models/{diffusion_models,text_encoders,vae,checkpoints,sam3,upscale_models,loras}
 
 # Z-Image Turbo (character generation)
+# NOTE: the production workflow (amazing-z-photo_API_Create_CHAR.json) loads the
+# bf16 UNET + qwen_3_4b text encoder. The nvfp4/fp4_mixed variants are the smaller
+# alternatives — only needed if the workflow is switched to them.
+wget -c https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors -P ComfyUI/models/diffusion_models
+wget -c https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors -P ComfyUI/models/text_encoders
 wget -c https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_nvfp4.safetensors -P ComfyUI/models/diffusion_models
 wget -c https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b_fp4_mixed.safetensors -P ComfyUI/models/text_encoders
 wget -c https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors -P ComfyUI/models/vae
@@ -46,15 +50,32 @@ wget -c https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/
 # Qwen-Image-Edit-Rapid-AIO (outfit / pose / background edits)
 wget -c https://huggingface.co/Phr00t/Qwen-Image-Edit-Rapid-AIO/resolve/main/v23/Qwen-Rapid-AIO-NSFW-v23.safetensors -P ComfyUI/models/checkpoints
 
-# Upscalers (quality)
-# 4x_foolhardy_Remacri.safetensors, 4x_Nickelback_70000G.safetensors -> ComfyUI/models/upscale_models
+# AnyPose LoRAs (required by the pose edit workflow, strength 0.7) -> ComfyUI/models/loras
+# 2511-AnyPose-base-000006250.safetensors    # TODO: add download URL
+# 2511-AnyPose-helper-00006000.safetensors   # TODO: add download URL
+
+# Upscalers — REQUIRED for the hero-shot detail-refine pass
+# (GENERATION_HIRES_DEFAULT=true / output.hires). Only .pth builds are publicly
+# downloadable; the generation workflow references the .pth filenames.
+wget -c https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/4x_Nickelback_70000G.pth -P ComfyUI/models/upscale_models
+wget -c https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/resolve/main/4x_foolhardy_Remacri.pth -P ComfyUI/models/upscale_models
+
 # SAM3 segmentation model -> ComfyUI/models/sam3/sam3.pt  (per comfyui-sam3 node)
 ```
 
-> **Pose references (required for pose & pipeline edits):** copy the pose reference PNGs
-> from this repo's ComfyUI input into `/runpod-volume/ComfyUI/input/poses/`. The pose
-> workflow loads them **by filename** (LoadImage node 170), so they must exist on the
-> worker or pose/pipeline jobs fail with a missing-image error.
+> **Detail-refine pass (`output.hires` / `GENERATION_HIRES_DEFAULT`):** hero-shot
+> generation routes its output through an upscale-model round trip + refine steps
+> (same output resolution, ~+50-100% GPU time). It fails with a ComfyUI node error
+> (surfaces as `PROVIDER_ERROR`) if `4x_Nickelback_70000G.pth` is missing from
+> `upscale_models/` — set `GENERATION_HIRES_DEFAULT=false` until the model is on
+> the volume.
+
+> **Pose references (pose & pipeline edits):** these ship **per-request** as base64
+> `input.images[]` entries from `loli_api/assets/poses/` (generated once via
+> `scripts/generate_pose_refs.py`). loli-api stages the correct PNG alongside the source
+> image and sets node 170 (LoadImage) to the matching flat filename, so **no volume copy
+> is required**. Pre-copying the PNGs to `/runpod-volume/ComfyUI/input/poses/` is an
+> optional latency optimization only, not a requirement.
 
 > **Do NOT download** the SD1.5 IP-Adapter FaceID models (`ip-adapter-faceid-*_sd15.*`,
 > `CLIP-ViT-H-14`). They are architecturally incompatible with the Qwen/Z-Image (DiT)
@@ -68,8 +89,10 @@ wget -c https://huggingface.co/Phr00t/Qwen-Image-Edit-Rapid-AIO/resolve/main/v23
 The workflows reference these custom nodes, so the worker image must contain them:
 `comfyui-sam3`, `comfyui_faceanalysis`, `ComfyUI-QwenVL`, `ComfyUI-GGUF`,
 `comfyui-kjnodes`, `rgthree-comfy`, `ComfyUI_JPS-Nodes`, `comfyui-easy-use`,
-`comfyui_controlnet_aux`. (Add `ComfyUI-Impact-Pack` + `ComfyUI-Impact-Subpack` if you
-adopt the detailer follow-up in §6.)
+`comfyui_controlnet_aux`, `rect`. (`rect` provides RectFill/RectSelect — the pose
+workflow's node 170 face black-out uses it and the graph will not load without it.)
+(Add `ComfyUI-Impact-Pack` + `ComfyUI-Impact-Subpack` if you adopt the detailer
+follow-up in §6.)
 
 Start from `runpod/worker-comfyui:<version>-base` and add the custom nodes via a
 `Dockerfile` (clone each into `/comfyui/custom_nodes` and `pip install -r requirements.txt`),
@@ -78,8 +101,7 @@ Start from `runpod/worker-comfyui:<version>-base` and add the custom nodes via a
 ```
 # Container start command (volume-mounted custom nodes)
 sh -c "ln -sfn /runpod-volume/ComfyUI/custom_nodes/* /comfyui/custom_nodes/ && \
-       ln -sfn /runpod-volume/ComfyUI/models /comfyui/models && \
-       ln -sfn /runpod-volume/ComfyUI/input/poses /comfyui/input/poses && /start.sh"
+       ln -sfn /runpod-volume/ComfyUI/models /comfyui/models && /start.sh"
 ```
 
 Tip: upload a workflow JSON to https://comfy.getrunpod.io to auto-detect required custom

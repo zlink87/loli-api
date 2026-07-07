@@ -38,13 +38,7 @@ class Settings(BaseSettings):
     RUNPOD_BASE_URL: str = "https://api.runpod.ai/v2"
     RUNPOD_EXECUTION_TIMEOUT_MS: int = 600_000   # policy.executionTimeout (per-job cap)
     RUNPOD_TTL_MS: int = 3_600_000               # policy.ttl (total job lifespan)
-    RUNPOD_WEBHOOK_SECRET: str = ""              # shared secret validating inbound webhooks
     RUNPOD_POLL_INTERVAL_SECONDS: int = 5        # reconciler poll cadence
-    RUNPOD_RECONCILE_AFTER_SECONDS: int = 30     # start polling if no webhook by then
-    RUNPOD_MAX_IN_FLIGHT: int = 50               # bound concurrent submissions
-    # How the worker receives the source image for edits: "url" (worker fetches the
-    # Supabase URL) or "base64" (FastAPI streams bytes into input.images[]).
-    RUNPOD_SOURCE_IMAGE_MODE: str = "url"
 
     # Image Cache (for outfit edit)
     IMAGE_CACHE_TTL_SECONDS: int = 1800  # 30 minutes
@@ -54,6 +48,38 @@ class Settings(BaseSettings):
     XAI_API_KEY: str = ""
     XAI_BASE_URL: str = "https://api.x.ai/v1"
     XAI_MODEL: str = "grok-4"
+
+    # Character generation: run the second detail-refine pass by default
+    # (upscale-model round trip + refine steps; same output resolution,
+    # ~+50-100% GPU time per image). Requires 4x_Nickelback_70000G.safetensors
+    # in upscale_models/ on the RunPod volume — set false until it's uploaded.
+    # Per-request override: output.hires.
+    GENERATION_HIRES_DEFAULT: bool = True
+
+    # Anthropic Claude (story planner — SFW-only fallback provider).
+    # Claude refuses explicit adult content, so it is never routed NSFW batches;
+    # it stays a guarded, optional SFW planner. Left unset by default.
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-5"
+
+    # Story Batches (persona-driven batch generation).
+    # Preferred planner provider: "grok" | "deterministic" | "claude" | "manual".
+    # Empty -> auto-select (grok primary, deterministic fallback, claude SFW-only).
+    STORY_PLANNER_PROVIDER: str = ""
+    # Number of dedicated batch pipeline workers (real parallelism for batches,
+    # isolated from interactive /v1/edit traffic). Keep RunPod max_workers >= this.
+    BATCH_WORKER_POOL_SIZE: int = 3
+    # Max in-flight items per batch (fairness: stops one batch monopolizing the queue).
+    BATCH_MAX_INFLIGHT: int = 3
+    # Per-item retry attempts before an item is marked failed.
+    BATCH_ITEM_MAX_ATTEMPTS: int = 2
+    # Rough per-step wall-clock estimate (seconds) used only for BatchEstimate.
+    RUNPOD_AVG_STEP_SECONDS: int = 60
+    # Optional GPU cost rate (USD/second) for BatchEstimate.est_cost_usd. 0 -> omit.
+    RUNPOD_GPU_USD_PER_SECOND: float = 0.0
+    # Comma-separated allowlist of admin user IDs (JWT `sub`). Combined with the
+    # app_metadata.role == "admin" claim check in require_admin.
+    ADMIN_USER_IDS: str = ""
 
     # Storage
     STORAGE_DIR: str = "./storage/images"
@@ -91,11 +117,6 @@ class Settings(BaseSettings):
     SUPABASE_S3_ACCESS_KEY_ID: str = ""
     SUPABASE_S3_SECRET_ACCESS_KEY: str = ""
 
-    # Job persistence (durable job state in a Supabase table; falls back to
-    # in-memory only when disabled). Survives FastAPI restarts so late webhooks finalize.
-    JOB_PERSISTENCE_ENABLED: bool = False
-    JOB_TABLE_NAME: str = "image_jobs"
-
     # Security
     # Comma-separated allowlist of CORS origins (admin panel + website). Empty -> deny cross-origin.
     CORS_ALLOW_ORIGINS: str = ""
@@ -111,6 +132,11 @@ class Settings(BaseSettings):
     def source_image_allowed_hosts_list(self) -> list[str]:
         """Parsed source_image host allowlist (lowercased)."""
         return [h.strip().lower() for h in self.SOURCE_IMAGE_ALLOWED_HOSTS.split(",") if h.strip()]
+
+    @property
+    def admin_user_ids_list(self) -> list[str]:
+        """Parsed admin user-id allowlist (JWT `sub` values)."""
+        return [u.strip() for u in self.ADMIN_USER_IDS.split(",") if u.strip()]
 
     class Config:
         env_file = ".env"

@@ -33,9 +33,15 @@ download_file() {
 }
 
 # 1. Diffusion Models
+# The production workflow (amazing-z-photo_API_Create_CHAR.json node 291) loads the
+# bf16 variant. The nvfp4 variant is kept as the smaller (~half size) alternative —
+# only needed if the workflow is switched back to nvfp4.
+download_file "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors" "diffusion_models"
 download_file "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_nvfp4.safetensors" "diffusion_models"
 
-# 2. Text Encoders
+# 2. Text Encoders (workflow node 288 loads qwen_3_4b.safetensors; fp4_mixed is the
+# smaller alternative for the nvfp4 workflow variant)
+download_file "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors" "text_encoders"
 download_file "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b_fp4_mixed.safetensors" "text_encoders"
 
 # 3. VAE
@@ -44,7 +50,15 @@ download_file "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split
 # 4. Checkpoints
 download_file "https://huggingface.co/Phr00t/Qwen-Image-Edit-Rapid-AIO/resolve/main/v23/Qwen-Rapid-AIO-NSFW-v23.safetensors" "checkpoints"
 
-# 5. IP-Adapter FaceID Models — DISABLED.
+# 5. Upscale models — REQUIRED for the hero-shot detail-refine pass
+# (GENERATION_HIRES_DEFAULT / output.hires). Node 175 loads Nickelback for the
+# photo refine branch; Remacri (node 211) is the dormant illustration branch.
+# Note: only .pth builds are publicly downloadable; the workflow references the
+# .pth filenames accordingly.
+download_file "https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/4x_Nickelback_70000G.pth" "upscale_models"
+download_file "https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/resolve/main/4x_foolhardy_Remacri.pth" "upscale_models"
+
+# 6. IP-Adapter FaceID Models — DISABLED.
 # These are SD1.5 adapters and are architecturally INCOMPATIBLE with the Qwen-Image-Edit /
 # Z-Image (DiT) models this project actually uses. They cannot be loaded into the Qwen/Z-Image
 # workflows, so downloading them only wastes ~2.5 GB. Identity preservation is handled via

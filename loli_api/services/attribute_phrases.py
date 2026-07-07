@@ -16,11 +16,13 @@ def _val(v) -> Optional[str]:
     return getattr(v, "value", v)
 
 
-# --- Scaffold (shot/format) --------------------------------------------------
+# --- Scaffold (medium/lens only) ----------------------------------------------
+# Framing lives in the shot block (services/camera_vocab.py), lighting/polish in
+# the workflow-side photo-style wrapper (prompt_constants.PHOTO_STYLE_TEMPLATES).
 STYLE_PHRASES = {
-    "realistic": "ultra-realistic professional photograph, full-body shot, 85mm lens, "
-                 "natural soft lighting, sharp focus, high detail, photorealistic skin texture",
-    "anime": "high-quality anime illustration, full-body, clean line art, vibrant cel shading, "
+    "realistic": "ultra-realistic professional photograph, 85mm lens, sharp focus, "
+                 "photorealistic skin texture",
+    "anime": "high-quality anime illustration, clean line art, vibrant cel shading, "
              "detailed, masterpiece",
 }
 
@@ -87,15 +89,30 @@ PERSONALITY_PHRASES = {
     "queen": "a regal, elegant expression",
 }
 
+# One entry for every RelationshipType value (models/enums.py).
+# NOTE: no phrase may contain age-down language (e.g. young-appearance terms) —
+# such wording is negated by prompt_constants.ADULT_APPEARANCE_NEGATIVE and would
+# fight the model. This is why school_mate/step_daughter/student avoid it.
 RELATIONSHIP_PHRASES = {
+    "stranger": "intriguing stranger vibe",
     "girlfriend": "girlfriend vibe",
+    "sex_friend": "casual flirtatious vibe",
+    "school_mate": "casual collegiate style",
+    "work_colleague": "professional colleague look",
     "wife": "elegant married woman",
     "mistress": "alluring mistress",
+    "friend": "warm friendly vibe",
+    "step_sister": "playful familiar vibe",
+    "step_mom": "mature confident look",
+    "step_daughter": "playful lighthearted vibe",
+    "landlord": "confident authoritative look",
     "sugar_baby": "glamorous look",
-    "teacher": "refined teacher look",
-    "student": "youthful student look",
     "boss": "powerful boss look",
+    "teacher": "refined teacher look",
+    "student": "collegiate student look",
     "neighbour": "approachable everyday look",
+    "mother_in_law": "poised mature look",
+    "sister_in_law": "familiar approachable vibe",
 }
 
 OCCUPATION_PHRASES = {
@@ -145,15 +162,31 @@ OCCUPATION_PHRASES = {
 }
 
 # Kinks contribute mood/atmosphere only; kept tasteful and descriptive.
+# One entry for every KinkType value (models/enums.py).
 KINK_PHRASES = {
+    "bondage": "tense restrained mood",
+    "spanking": "playful power-play mood",
+    "collar_leash": "submissive dynamic mood",
+    "punishment": "stern disciplinary mood",
+    "humiliation": "vulnerable blushing mood",
+    "public_play": "daring exhibitionist mood",
+    "roleplay": "playful roleplay theme",
+    "anal_play": "intense intimate mood",
+    "oral_play": "sultry intimate mood",
+    "cum_play": "heated intimate mood",
+    "creampie": "deeply intimate mood",
+    "squirting": "intense ecstatic mood",
+    "dirty_talk": "sultry confident mood",
+    "breeding": "primal passionate mood",
+    "edging": "teasing anticipatory mood",
+    "obedience": "submissive mood",
+    "control": "commanding dominant mood",
+    "inexperienced": "shy curious mood",
     "shy_flirting": "shy flirtatious mood",
     "playful_teasing": "playful teasing mood",
     "cuddling": "intimate affectionate mood",
     "slow_sensual": "slow sensual mood",
-    "dirty_talk": "sultry confident mood",
-    "roleplay": "playful roleplay theme",
-    "dominant": "dominant mood",
-    "obedience": "submissive mood",
+    "hair_pulling": "rough passionate mood",
 }
 
 
