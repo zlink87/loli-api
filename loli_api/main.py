@@ -196,7 +196,9 @@ pipeline_worker = PipelineBackgroundWorker(
     comfyui_client=comfyui_client,
     storage_service=storage_service,
     pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
-    outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+    # Pipeline outfit step follows the same V2 flag as the interactive outfit worker
+    # (auto-detected by prepare_outfit_workflow). Batch stays on V1 until validated.
+    outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
