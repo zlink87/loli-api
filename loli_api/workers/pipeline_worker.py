@@ -283,7 +283,7 @@ class PipelineBackgroundWorker:
                 })
                 logger.info(
                     f"[PIPELINE] {job_id} | outfit | Head mask staged "
-                    f"({'face found' if face_found else 'no face — black mask'})"
+                    f"({'face found' if face_found else 'no face — fallback box (fail-closed)'})"
                 )
             except Exception as e:  # noqa: BLE001 — protective, not critical
                 logger.warning(f"[PIPELINE] {job_id} | Head mask failed: {e}")

@@ -137,7 +137,29 @@ class VideoBackgroundWorker(BaseEditWorker):
             logger.info(f"[VIDEO] {job.job_id} | Clip generated in {gen_duration:.2f}s")
 
             # Step 4: Persist the reel to the character (gallery row + DRAFT action).
-            await self._persist_reel(job, request, preview_url, seed, prompt, video_hash)
+            # A persistence failure must NOT be reported as a clean SUCCEEDED: the
+            # clip would silently vanish from the admin review queue (which reads
+            # the character_images / chat_persona_actions rows, not the job). Mark
+            # the job FAILED with a distinct code, but keep the preview_url/hash on
+            # the record so the generated clip is still recoverable manually.
+            try:
+                await self._persist_reel(job, request, preview_url, seed, prompt, video_hash)
+            except Exception as persist_err:  # noqa: BLE001 - surface, don't swallow
+                logger.error(
+                    f"[VIDEO] {job.job_id} | Reel persistence failed: {persist_err}"
+                )
+                traceback.print_exc()
+                await self.job_manager.update_job_status(
+                    job.job_id, JobStatus.FAILED,
+                    error_message=f"Clip generated but persistence failed: {persist_err}",
+                    error_code="REEL_PERSIST_ERROR",
+                    result_path=relative_path,
+                    preview_url=preview_url,
+                    preview_expires_at=expires_at,
+                    image_hash=video_hash,
+                    media_type=media_type,
+                )
+                return
 
             completed_at = datetime.utcnow()
             await self.job_manager.update_job_status(
@@ -190,34 +212,34 @@ class VideoBackgroundWorker(BaseEditWorker):
                 f"skipping persistence (clip still returned via job poll)"
             )
             return
-        try:
-            image_id = await self.character_image_store.create_image(
-                request.character_id,
-                image_url=video_url,
-                original_image_url=request.source_image,
-                prompt=prompt,
-                seed=seed,
-                image_type="video",
-                source_image_id=request.source_image_id,
-                metadata={
-                    "media_type": "video",
-                    "motion": request.motion.value,
-                    "job_id": job.job_id,
-                    "video_hash": video_hash,
-                },
-            )
-            await self.character_image_store.create_action(
-                request.character_id,
-                character_image_id=image_id,
-                media_url=video_url,
-                label=motion_label(request.motion),
-                media_type="video",
-                is_active=False,  # DRAFT — admin publishes after review
-            )
-            logger.info(
-                f"[VIDEO] {job.job_id} | Persisted reel -> character_images {image_id} "
-                f"(+ draft action) for character {request.character_id}"
-            )
-        except Exception as e:  # noqa: BLE001 - persistence failure shouldn't lose the clip
-            logger.error(f"[VIDEO] {job.job_id} | Reel persistence failed: {e}")
-            traceback.print_exc()
+        # NOTE: this intentionally does NOT swallow exceptions. The caller
+        # (_process_job) catches a persistence failure and marks the job FAILED
+        # with REEL_PERSIST_ERROR (keeping the preview_url) rather than reporting
+        # a SUCCEEDED job whose clip never reached the review queue.
+        image_id = await self.character_image_store.create_image(
+            request.character_id,
+            image_url=video_url,
+            original_image_url=request.source_image,
+            prompt=prompt,
+            seed=seed,
+            image_type="video",
+            source_image_id=request.source_image_id,
+            metadata={
+                "media_type": "video",
+                "motion": request.motion.value,
+                "job_id": job.job_id,
+                "video_hash": video_hash,
+            },
+        )
+        await self.character_image_store.create_action(
+            request.character_id,
+            character_image_id=image_id,
+            media_url=video_url,
+            label=motion_label(request.motion),
+            media_type="video",
+            is_active=False,  # DRAFT — admin publishes after review
+        )
+        logger.info(
+            f"[VIDEO] {job.job_id} | Persisted reel -> character_images {image_id} "
+            f"(+ draft action) for character {request.character_id}"
+        )

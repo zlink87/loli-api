@@ -476,7 +476,7 @@ class BaseEditWorker(ABC):
             error_code = "DOWNLOAD_ERROR"
         elif "upload" in error_msg.lower() or "ComfyUI" in error_msg:
             error_code = "PROVIDER_ERROR"
-        elif "No image" in error_msg:
+        elif "no image" in error_msg.lower() or "no output" in error_msg.lower():
             error_code = "NO_OUTPUT_ERROR"
 
         await self.job_manager.update_job_status(

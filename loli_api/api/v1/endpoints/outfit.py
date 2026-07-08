@@ -139,6 +139,100 @@ def build_prompt(outfit: OutfitType, accessories: Optional[List[AccessoryType]],
     return ", ".join(prompt_parts)
 
 
+# Outfit types that use the tight GARMENT mask (ClothesSegment) instead of the
+# whole-PERSON mask in the crop-and-stitch (V2) graph. GARMENT mode requires a
+# DRESSED source — ClothesSegment finds nothing on a nude body and would yield an
+# empty crop. It is therefore OPT-IN: start empty (every outfit uses the universal
+# BODY mode) and graduate individual outfits here only after validating each on a
+# known-dressed source via the mask-preview trick. BODY mode + crop-and-stitch is
+# already a large quality win over V1 and is safe for nude and dressed sources
+# alike, so it is the correct default for the first cutover.
+GARMENT_MODE_OUTFITS: set = set()
+
+
+def _is_cropstitch_template(template: dict) -> bool:
+    """True if this is the V2 crop-and-stitch graph (has InpaintCropImproved)."""
+    node = template.get("235")
+    return bool(node and node.get("class_type") == "InpaintCropImproved")
+
+
+def prepare_outfit_cropstitch_workflow(
+    template: dict,
+    image_name: str,
+    prompt: str,
+    seed: Optional[int] = None,
+    nudity_level: Optional[NudityLevel] = None,
+    outfit: Optional[OutfitType] = None,
+    negative_prompt: Optional[str] = None,
+    head_mask_name: Optional[str] = None,
+) -> dict:
+    """
+    Prepare the V2 crop-and-stitch outfit graph (``outfit_cropstitch_API.json``).
+
+    Identity is preserved by construction: the edit is confined to a mask (person
+    or garment) MINUS the head, cropped to that region, regenerated at full model
+    resolution, and stitched back so every pixel outside the feathered mask —
+    including the face — is byte-identical to the source (InpaintStitchImproved).
+    This replaces V1's whole-frame, low-effective-resolution re-diffusion that
+    mangled the garment/body boundary.
+
+    Mask mode:
+      * BODY (default, node 233 destination = node 213 hole-filled person mask):
+        universal — works for a nude source (dress-up) and a dressed source alike.
+      * GARMENT (node 233 destination = node 230 ClothesSegment mask): tight,
+        semantic clothing mask that also excludes hair/skin — but only when the
+        source is DRESSED. Enabled per-OutfitType via ``GARMENT_MODE_OUTFITS``.
+
+    Head protection: the server-computed YuNet mask (node 211 -> 212) is subtracted
+    (node 233). With no staged mask, the subtraction is bypassed (node 235 reads the
+    base mask directly) so the graph still validates.
+
+    Key nodes in outfit_cropstitch_API.json:
+        108  LoadImage             -> source image filename
+        211  LoadImage             -> head-protect mask filename
+        213  GrowMaskWithBlur      -> hole-filled BODY (person) base mask
+        230  ClothesSegment        -> GARMENT base mask (output index 1)
+        233  MaskComposite         -> base mask MINUS head (destination = selected base)
+        235  InpaintCropImproved   -> crop the edit region to full resolution
+        16   easy positive         -> clothing change prompt
+        117  easy negative         -> quality/adult/identity/nudity negatives
+        106  KSampler              -> seed + denoise
+        238  InpaintStitchImproved -> pixel-exact recomposite
+    """
+    wf = copy.deepcopy(template)
+
+    wf["108"]["inputs"]["image"] = image_name
+    wf["16"]["inputs"]["positive"] = prompt
+    wf["117"]["inputs"]["negative"] = pc.edit_negative(negative_prompt, nudity_level=nudity_level)
+    if seed is not None:
+        wf["106"]["inputs"]["seed"] = seed
+
+    # Mask mode: GARMENT (tight clothing) for the opt-in set, else BODY (person).
+    use_garment = outfit is not None and outfit in GARMENT_MODE_OUTFITS
+    base_ref = ["230", 1] if use_garment else ["213", 0]
+    wf["233"]["inputs"]["destination"] = base_ref
+
+    # Head protection: subtract the server YuNet mask. If none was staged, bypass
+    # the subtraction (crop reads the base mask directly) and keep node 211 valid.
+    if head_mask_name:
+        wf["211"]["inputs"]["image"] = head_mask_name
+    else:
+        wf["211"]["inputs"]["image"] = image_name
+        wf["235"]["inputs"]["mask"] = base_ref
+        logger.debug("No head mask staged; crop reads base mask directly")
+
+    # Denoise: GARMENT is an in-place swap on a dressed body (lower); BODY may be a
+    # full dress-up over bare skin (higher). Both far below V1's whole-frame risk
+    # because the crop confines regeneration to the masked region.
+    wf["106"]["inputs"]["denoise"] = 0.80 if use_garment else 0.85
+
+    logger.debug(
+        f"V2 outfit graph prepared: mode={'GARMENT' if use_garment else 'BODY'}, "
+        f"outfit={getattr(outfit, 'value', outfit)}"
+    )
+    return wf
+
+
 def prepare_outfit_workflow(
     template: dict,
     image_name: str,
@@ -201,6 +295,15 @@ def prepare_outfit_workflow(
     Returns:
         Prepared workflow dict
     """
+    # V2 crop-and-stitch graph has its own preparer; detect by template content so
+    # every caller (interactive outfit worker, batch pipeline) auto-routes by which
+    # workflow file it loaded — no caller changes needed to cut over.
+    if _is_cropstitch_template(template):
+        return prepare_outfit_cropstitch_workflow(
+            template, image_name, prompt, seed=seed, nudity_level=nudity_level,
+            outfit=outfit, negative_prompt=negative_prompt, head_mask_name=head_mask_name,
+        )
+
     wf = copy.deepcopy(template)
 
     # Node 108: Source image
@@ -246,15 +349,21 @@ def prepare_outfit_workflow(
     # garbage). The head is protected by the subtracted server-computed mask
     # (node 211/212/205).
     #
-    # Widen the mask edge so new garment silhouettes (collars, straps, hemlines,
-    # sleeves) have room to render without being clipped at the mask boundary.
-    # Safe at any nudity level now that node 121 does a real masked edit with
-    # pixel-exact composite-back (node 220) — over-masking no longer risks
-    # unmasked drift the way it did under the old green-overlay-only config.
+    # Feather the mask edge modestly. The previous expand=20/blur=10 grew the
+    # whole-PERSON silhouette ~20px outward all around, pushing the editable
+    # region into the surrounding background and producing halos / garment bleed
+    # at the person's outline (visible as a mangled boundary on in-place edits).
+    # A tight 8/4 edge keeps enough headroom for new collars/straps/hemlines
+    # (which sit INSIDE the person mask anyway) while cutting the background
+    # bleed. Composite-back (node 220) still guarantees pixels outside this edge
+    # are byte-exact. NOTE: node 106 denoise is deliberately left at the template
+    # value (0.8) here — aggressive, direction-aware denoise is only safe once
+    # the Phase-1 crop-and-stitch graph confines regeneration to the garment
+    # region (a whole-person mask + high denoise = more full-body drift).
     if "119" in wf:
-        wf["119"]["inputs"]["expand"] = 20
-        wf["119"]["inputs"]["blur_radius"] = 10
-        logger.debug("Increased mask grow/blur for outfit silhouette headroom")
+        wf["119"]["inputs"]["expand"] = 8
+        wf["119"]["inputs"]["blur_radius"] = 4
+        logger.debug("Set mask grow=8/blur=4 (reduced from 20/10 to cut edge bleed)")
 
     return wf
 

@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     COMFYUI_WORKFLOW_PATH: str = "workflows/amazing-z-photo_API_Create_CHAR.json"
     COMFYUI_EDIT_WORKFLOW_PATH: str = "workflows/edit.json"
     COMFYUI_OUTFIT_WORKFLOW_PATH: str = "workflows/test_final_API.json"
+    # V2 crop-and-stitch outfit graph (ClothesSegment/crop-and-stitch). EMPTY keeps
+    # the interactive outfit worker on V1 (test_final_API.json). Set to
+    # "workflows/outfit_cropstitch_API.json" to cut the /v1/edit/outfit path over to
+    # V2 — the preparer auto-detects the graph, and background/pose/batch stay on V1
+    # for rollback. Requires the worker image's staged nodes (redeploy first).
+    COMFYUI_OUTFIT_WORKFLOW_PATH_V2: str = ""
     COMFYUI_POSE_WORKFLOW_PATH: str = "workflows/edit_pose_action.json"
     COMFYUI_VIDEO_WORKFLOW_PATH: str = "workflows/wan_i2v.json"
     COMFYUI_INPUT_DIR: str = "../ComfyUI/input"
@@ -44,6 +50,19 @@ class Settings(BaseSettings):
     # they need much longer caps than image jobs.
     RUNPOD_VIDEO_EXECUTION_TIMEOUT_MS: int = 1_800_000   # 30 min per-job cap
     RUNPOD_VIDEO_TTL_MS: int = 5_400_000                 # 90 min total lifespan
+
+    # Keep-warm pinger (OPTIONAL, OFF by default). When enabled, the API submits a
+    # lightweight warm-up job to the RunPod endpoint every WARMUP_INTERVAL_SECONDS
+    # for as long as WARMUP_WINDOW_MINUTES after the last REAL job — so an active
+    # admin session doesn't pay a cold start on every request. This costs GPU
+    # seconds per ping; the PRIMARY cold-start mitigation is the RunPod dashboard
+    # settings (raise idle timeout, enable FlashBoot). Point WARMUP_WORKFLOW_PATH
+    # at a minimal 1-step / tiny-resolution graph to keep each ping cheap; empty
+    # falls back to the generation workflow (COMFYUI_WORKFLOW_PATH).
+    WARMUP_ENABLED: bool = False
+    WARMUP_INTERVAL_SECONDS: int = 200          # ping cadence within the warm window
+    WARMUP_WINDOW_MINUTES: int = 15             # keep pinging this long after real traffic
+    WARMUP_WORKFLOW_PATH: str = ""              # empty -> COMFYUI_WORKFLOW_PATH
 
     # Image Cache (for outfit edit)
     IMAGE_CACHE_TTL_SECONDS: int = 1800  # 30 minutes
