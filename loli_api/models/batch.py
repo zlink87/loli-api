@@ -61,11 +61,11 @@ class BatchControls(BaseModel):
         default=None, description="Override pipeline step order forwarded to each item"
     )
     photo_style: PhotoStyleType = Field(
-        default=PhotoStyleType.NATURAL,
+        default=PhotoStyleType.POLISHED,
         description=(
             "Photographic finish applied once (final edit step) to every item: "
-            "natural (realistic photo, default), polished (retouched), studio, "
-            "or candid_phone (legacy raw look)"
+            "polished (retouched, default — matches the generated hero), natural "
+            "(realistic/unstaged), studio, or candid_phone (legacy raw look)"
         ),
     )
 

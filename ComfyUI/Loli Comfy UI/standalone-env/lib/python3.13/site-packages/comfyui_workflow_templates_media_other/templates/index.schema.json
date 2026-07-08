@@ -1,0 +1,279 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ComfyUI Workflow Templates Index",
+  "description": "Schema for validating the index.json file containing workflow template metadata",
+  "type": "array",
+  "items": {
+    "$ref": "#/definitions/templateCategory"
+  },
+  "definitions": {
+    "templateCategory": {
+      "type": "object",
+      "required": ["moduleName", "title", "templates"],
+      "properties": {
+        "isEssential": {
+          "type": "boolean",
+          "description": "Whether the category is Getting Started"
+        },
+        "moduleName": {
+          "type": "string",
+          "description": "Module identifier for the category",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Display name for the category"
+        },
+        "category": {
+          "type": "string",
+          "description": "Category of the template"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["image", "video", "audio", "3d"],
+          "description": "Optional type hint for the category"
+        },
+        "templates": {
+          "type": "array",
+          "description": "Array of workflow templates in this category",
+          "items": {
+            "$ref": "#/definitions/templateInfo"
+          }
+        },
+        "icon": {
+          "type" : "string",
+          "description": "Icon for the category"
+        }
+      },
+      "additionalProperties": false
+    },
+    "templateInfo": {
+      "type": "object",
+      "required": ["name", "mediaType", "mediaSubtype", "description"],
+      "properties": {
+        "openSource": {
+          "type": "boolean",
+          "description": "Whether the template is Open Source"
+        },
+        "name": {
+          "type": "string",
+          "description": "Workflow filename without .json extension",
+          "pattern": "^[a-zA-Z0-9._-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Optional display title for the template"
+        },
+        "tutorialUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "Optional URL to tutorial or documentation"
+        },
+        "mediaType": {
+          "type": "string",
+          "enum": ["image", "video", "audio", "3d"],
+          "description": "Type of output media this workflow produces"
+        },
+        "mediaSubtype": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9]+$",
+          "description": "File extension/format of the thumbnail (e.g., webp, mp3, mp4)"
+        },
+        "thumbnailVariant": {
+          "type": "string",
+          "enum": ["compareSlider", "hoverDissolve", "hoverZoom", "zoomHover"],
+          "description": "Optional thumbnail hover effect"
+        },
+        "thumbnail": {
+          "type": "array",
+          "description": "Array of thumbnail image filenames (max 2). Files can be from thumbnail/, output/, or input/ folder.",
+          "maxItems": 2,
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string",
+          "description": "Brief description of what the workflow does"
+        },
+        "tags": {
+          "type": "array",
+          "description": "Array of tags for categorizing and filtering templates",
+          "items": {
+            "type": "string"
+          }
+        },
+        "models": {
+          "type": "array",
+          "description": "Array of model names used by this workflow",
+          "items": {
+            "type": "string"
+          }
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "description": "Date when the template was created or last updated (YYYY-MM-DD format)"
+        },
+        "size": {
+          "type": "number",
+          "description": "Size of the template in bytes"
+        },
+        "vram": {
+          "type": "number",
+          "description": "VRAM of the template in bytes"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived", "deprecated"],
+          "description": "Status of the template: active, archived, deprecated"
+        },
+        "requiresCustomNodes": {
+          "type": "array",
+          "description": "Array of custom node package IDs required for this template (from Custom Node Registry)",
+          "items": {
+            "type": "string"
+          }
+        },
+      "usage": {
+        "type": "number",
+        "description": "Usage count of the category"
+      },
+      "searchRank": {
+        "type": "number",
+        "description": "Search ranking score for prioritizing templates in search results (0-1000, higher = better ranking)"
+      },
+      "includeOnDistributions": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": ["cloud", "local", "desktop", "mac", "windows"]
+        },
+        "description": "Distributions on which the template is included"
+      },
+      "logos": {
+        "type": "array",
+        "description": "Logo overlays to display on the template thumbnail",
+        "items": {
+          "$ref": "#/definitions/logoInfo"
+        }
+      },
+      "username": {
+        "type": "string",
+        "description": "Creator username linking this template to a profile in creators.json"
+      },
+      "io": {
+        "type": "object",
+        "description": "Input and output file information for the workflow",
+        "properties": {
+          "inputs": {
+            "type": "array",
+            "description": "Array of input nodes (LoadImage, LoadVideo, etc.)",
+            "items": {
+              "$ref": "#/definitions/ioInput"
+            }
+          },
+          "outputs": {
+            "type": "array",
+            "description": "Array of output nodes (SaveImage, SaveVideo, etc.)",
+            "items": {
+              "$ref": "#/definitions/ioOutput"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+      },
+      "additionalProperties": false
+    },
+    "logoInfo": {
+      "type": "object",
+      "required": ["provider"],
+      "properties": {
+        "provider": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Single provider name matching index_logo.json"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Array of provider names for stacked logos"
+            }
+          ],
+          "description": "Provider name(s) matching index_logo.json. String for single, array for stacked logos."
+        },
+        "label": {
+          "type": "string",
+          "description": "Custom label text. If omitted, defaults to provider names joined with ' & '"
+        },
+        "gap": {
+          "type": "number",
+          "description": "Gap between stacked logos in pixels. Negative for overlap effect. Default: -6"
+        },
+        "position": {
+          "type": "string",
+          "description": "Tailwind positioning classes (e.g., 'top-2 left-2', 'bottom-2 right-2')"
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Opacity 0-1, default 0.85"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ioInput": {
+      "type": "object",
+      "required": ["nodeId", "nodeType", "file", "mediaType"],
+      "properties": {
+        "nodeId": {
+          "type": "number",
+          "description": "ComfyUI node ID from the workflow"
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "Node type (e.g., LoadImage, LoadVideo, LoadAudio)"
+        },
+        "file": {
+          "type": "string",
+          "description": "Input filename. File path relative to the input/ folder."
+        },
+        "mediaType": {
+          "type": "string",
+          "enum": ["image", "video", "audio", "3d"],
+          "description": "Media type of the input"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ioOutput": {
+      "type": "object",
+      "required": ["nodeId", "nodeType", "file", "mediaType"],
+      "properties": {
+        "nodeId": {
+          "type": "number",
+          "description": "ComfyUI node ID from the workflow"
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "Node type (e.g., SaveImage, SaveVideo, SaveAudio)"
+        },
+        "file": {
+          "type": "string",
+          "description": "Output filename. File path relative to the output/ folder. Can be empty placeholder for user to fill."
+        },
+        "mediaType": {
+          "type": "string",
+          "enum": ["image", "video", "audio", "3d"],
+          "description": "Media type of the output"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

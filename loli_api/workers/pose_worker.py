@@ -9,7 +9,8 @@ import logging
 from datetime import datetime
 
 from services.job_manager import Job
-from models.enums import JobStatus
+from services.prompt_constants import apply_edit_photo_style
+from models.enums import JobStatus, PhotoStyleType
 
 from api.v1.endpoints.pose import (
     build_pose_prompt,
@@ -73,7 +74,7 @@ class PoseBackgroundWorker(BaseEditWorker):
 
             # Step 4: Prepare seed and prompt
             seed = request.seed if request.seed is not None else random.randint(1, 999_999_999)
-            prompt = build_pose_prompt(request.pose)
+            prompt = apply_edit_photo_style(build_pose_prompt(request.pose), PhotoStyleType.POLISHED)
             logger.info(f"[POSE] {job.job_id} | Pose: {request.pose.value} | Seed: {seed}")
             logger.info(f"[POSE] {job.job_id} | Prompt: {prompt[:80]}...")
 

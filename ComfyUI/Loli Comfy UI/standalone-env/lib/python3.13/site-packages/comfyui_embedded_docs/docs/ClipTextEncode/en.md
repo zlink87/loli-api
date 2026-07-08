@@ -1,0 +1,65 @@
+`CLIP Text Encode (CLIPTextEncode)` acts as a translator, converting your text descriptions into a format that AI can understand. This helps the AI interpret your input and generate the desired image.
+
+Think of it as communicating with an artist who speaks a different language. The CLIP model, trained on vast image-text pairs, bridges this gap by converting your descriptions into "instructions" that the AI model can follow.
+
+## Inputs
+
+| Parameter | Data Type | Input Method | Default | Range | Description |
+|-----------|-----------|--------------|---------|--------|-------------|
+| text | STRING | Text Input | Empty | Any text | Enter the description (prompt) for the image you want to create. Supports multi-line input for detailed descriptions. |
+| clip | CLIP | Model Selection | None | Loaded CLIP models | Select the CLIP model to use when translating your description into instructions for the AI model. |
+
+## Outputs
+
+| Output Name | Data Type | Description |
+|-------------|-----------|-------------|
+| CONDITIONING | CONDITIONING | The processed "instructions" of your description that guide the AI model when generating an image. |
+
+## Prompt Features
+
+### Embedding Models
+
+Embedding models allow you to apply specific artistic effects or styles. Supported formats include `.safetensors`, `.pt`, and `.bin`. To use an embedding model:
+
+1. Place the file in the `ComfyUI/models/embeddings` folder.
+2. Reference it in your text using `embedding:model_name`.
+
+Example: If you have a model named `EasyNegative.pt` in your `ComfyUI/models/embeddings` folder, then you can use it like this:
+
+```
+worst quality, embedding:EasyNegative, bad quality
+```
+
+**IMPORTANT**: When using embedding models, verify that the file name matches and is compatible with your model's architecture. For example an embedding designed for SD1.5 will not work correctly for a SDXL model.
+
+### Prompt Weight Adjustment
+
+You can adjust the importance of certain parts of your description using parentheses. For example:
+
+- `(beautiful:1.2)` increases the weight of "beautiful".
+- `(beautiful:0.8)` decrease the weight of "beautiful".
+- Plain parentheses `(beautiful)` will apply a default weight of 1.1.
+
+You can use the keyboard shortcuts `ctrl + up/down arrow` to quickly adjust weights. The weight adjustment step size can be modified in the settings.
+
+If you want to include literal parentheses in your prompt without changing the weight, you can escape them using a backslash e.g. `\(word\)`.
+
+### Wildcard/Dynamic Prompts
+
+Use `{}` to create dynamic prompts. For example, `{day|night|morning}` will randomly select one option each time the prompt is processed.
+
+If you want to include literal curly braces in your prompt without triggering dynamic behavior, you can escape them using a backslash e.g. `\{word\}`.
+
+### Comments in Prompts
+
+You can add comments that are excluded from the prompt by using:
+
+- `//` to comment out a single line.
+- `/* */` to comment out a section or multiple lines.
+
+Example:
+
+```
+// this line is excluded from the prompt.
+a beautiful landscape, /* this part is ignored */ high quality
+```
