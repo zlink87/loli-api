@@ -597,11 +597,12 @@ class PipelineEditRequest(BaseModel):
         description="Override default pipeline order. Must contain only 'pose', 'outfit', 'background'."
     )
     photoStyle: Optional[PhotoStyleType] = Field(
-        default=None,
+        default=PhotoStyleType.POLISHED,
         description=(
-            "Photographic finish appended to every step's edit instruction: "
-            "polished (retouched editorial), studio, or candid_phone. "
-            "None = legacy behavior (no style clause)."
+            "Photographic finish appended to the final step's edit instruction so a "
+            "pipeline edit matches the generated hero's retouched look: polished "
+            "(retouched, default), natural, studio, or candid_phone (legacy raw, "
+            "no style clause)."
         )
     )
 

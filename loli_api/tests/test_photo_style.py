@@ -104,16 +104,28 @@ def test_build_step_workflow_wraps_all_steps_when_polished():
         assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] in prompt, f"{step} missing polished clause"
 
 
-def test_build_step_workflow_unset_style_is_byte_identical_legacy():
+def test_pipeline_defaults_to_polished():
+    # The unified /v1/edit pipeline now DEFAULTS to POLISHED (was None) so a pipeline
+    # edit matches the generated hero's retouched finish across all steps.
+    assert _request().photoStyle == PhotoStyleType.POLISHED
     w = _worker()
-    legacy = _request()          # photoStyle defaults to None
+    req = _request()  # unset -> POLISHED default
+    for step in ("pose", "outfit", "background"):
+        wf = w._build_step_workflow(step, req, "src.png", 42, "job-1", pose_ref_name="ref.png")
+        assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] in _positive_prompt(wf, step)
+
+
+def test_build_step_workflow_explicit_none_or_candid_is_legacy_no_style():
+    # Legacy "no style clause" is still reachable by explicitly opting out.
+    w = _worker()
+    none_style = _request(photoStyle=None)
     candid = _request(photoStyle=PhotoStyleType.CANDID_PHONE)
     for step in ("pose", "outfit", "background"):
-        wf_legacy = w._build_step_workflow(step, legacy, "src.png", 42, "job-1", pose_ref_name="ref.png")
+        wf_none = w._build_step_workflow(step, none_style, "src.png", 42, "job-1", pose_ref_name="ref.png")
         wf_candid = w._build_step_workflow(step, candid, "src.png", 42, "job-1", pose_ref_name="ref.png")
-        assert _positive_prompt(wf_legacy, step) == _positive_prompt(wf_candid, step)
+        assert _positive_prompt(wf_none, step) == _positive_prompt(wf_candid, step)
         for suffix in (EDIT_PHOTO_STYLE_SUFFIXES["polished"], EDIT_PHOTO_STYLE_SUFFIXES["studio"]):
-            assert suffix not in _positive_prompt(wf_legacy, step)
+            assert suffix not in _positive_prompt(wf_none, step)
 
 
 if __name__ == "__main__":
