@@ -98,6 +98,7 @@ class CharacterRead(BaseModel):
     persona: PersonaOptions
     hero_image_url: str
     bio: Optional[str] = None
+    chat_persona_id: Optional[str] = None
     status: str = "draft"
     created_at: datetime
     updated_at: datetime

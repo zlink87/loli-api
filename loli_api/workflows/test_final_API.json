@@ -274,7 +274,7 @@
     "inputs": {
       "seed": 301651179604540,
       "steps": 8,
-      "cfg": 1.5,
+      "cfg": 1.0,
       "sampler_name": "euler_ancestral",
       "scheduler": "beta",
       "denoise": 0.8,

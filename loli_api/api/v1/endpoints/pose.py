@@ -193,11 +193,15 @@ def prepare_pose_workflow(
         if seed is not None:
             wf["3"]["inputs"]["seed"] = seed
             logger.debug(f"Set node 3 seed: {seed}")
-        # Bump steps for fewer artifacts (was 4; 6 gives cleaner results on Qwen edit).
+        # Bump steps for fewer artifacts. The pose step is a full-frame re-diffusion
+        # (node 3 denoise=1.0) with no mask to confine it and inert negatives (cfg=1),
+        # so it is the dominant source of extra-limb / anatomy artifacts in a batch.
+        # More steps is the main lever we have here (denoise can't drop — it's a genuine
+        # pose transfer — and cfg can't rise on this distilled checkpoint). 4 -> 8.
         try:
-            if int(wf["3"]["inputs"].get("steps", 0)) < 6:
-                wf["3"]["inputs"]["steps"] = 6
-                logger.debug("Bumped pose KSampler steps to 6")
+            if int(wf["3"]["inputs"].get("steps", 0)) < 8:
+                wf["3"]["inputs"]["steps"] = 8
+                logger.debug("Bumped pose KSampler steps to 8")
         except (TypeError, ValueError):
             pass
 

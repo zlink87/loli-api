@@ -43,6 +43,15 @@ IDENTITY_NEGATIVE = (
     "different skin tone, aged, younger"
 )
 
+# Anti-airbrush SKIN negative for EDIT workflows only (appended by edit_negative).
+# Commit 7804c2c8 removed the "beautified/airbrushed FACE" terms because the face is
+# composited/stitched back byte-exact and those terms fought the retouched finish.
+# These SKIN/body terms are safe (they never touch the preserved face) and suppress
+# the waxy, over-smoothed body-region look the POLISHED finish can otherwise induce.
+EDIT_SKIN_NEGATIVE = (
+    "airbrushed skin, waxy skin, over-smoothed skin, overprocessed, blurry skin texture"
+)
+
 # Positive identity-preservation clause appended to edit prompts. {what} is the
 # thing being changed (e.g. "the clothing", "the pose", "the background").
 IDENTITY_PRESERVATION_CLAUSE = (
@@ -211,10 +220,10 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
         "sources, and realistic skin with visible fine texture and pores."
     ),
     "polished": (
-        "Render it as an ultra-realistic professional photograph, 85mm lens, "
-        "sharp focus, professionally retouched: soft flattering key light, natural "
-        "true-to-life color grade, clean lightly retouched skin that keeps real "
-        "fine texture and pores, photorealistic and detailed."
+        "Render it as an ultra-realistic photograph, 85mm lens, crisp sharp focus, "
+        "true-to-life neutral color with accurate exposure, and natural skin with "
+        "clearly visible fine texture and pores; keep every fine detail of the "
+        "clothing crisp and intact."
     ),
     "studio": (
         "Give the photo a high-end portrait finish: controlled softbox lighting, "
@@ -254,7 +263,7 @@ def edit_negative(extra: Optional[str] = None, nudity_level=None) -> str:
     as 'low', matching the outfit/background prompt builders' own default) so
     an edit never silently renders more exposed than requested.
     """
-    parts = [QUALITY_NEGATIVE, ADULT_APPEARANCE_NEGATIVE, IDENTITY_NEGATIVE]
+    parts = [QUALITY_NEGATIVE, ADULT_APPEARANCE_NEGATIVE, IDENTITY_NEGATIVE, EDIT_SKIN_NEGATIVE]
     key = getattr(nudity_level, "value", nudity_level) or "low"
     suppression = NUDITY_SUPPRESSION.get(key, NUDITY_SUPPRESSION["low"])
     if suppression:

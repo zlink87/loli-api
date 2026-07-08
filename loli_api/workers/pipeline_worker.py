@@ -93,6 +93,7 @@ class PipelineBackgroundWorker:
         storage_service: StorageService,
         pose_workflow_path: str,
         outfit_workflow_path: str,
+        background_workflow_path: Optional[str] = None,
         image_cache_service: Optional[ImageCacheService] = None,
         notification_service: Optional[NotificationService] = None,
         supabase_storage_service: Optional[SupabaseStorageService] = None,
@@ -105,6 +106,13 @@ class PipelineBackgroundWorker:
         self.supabase_storage = supabase_storage_service
         self.pose_workflow_path = pose_workflow_path
         self.outfit_workflow_path = outfit_workflow_path
+        # The background step uses its OWN template (a V1 whole-person graph), NOT the
+        # outfit template. The outfit step may point at a crop-and-stitch graph (V2 /
+        # Tier-A 2511), whose node topology lacks the InvertMask/GrowMaskWithBlur nodes
+        # (204/119) that prepare_background_workflow rewires — feeding it a crop-stitch
+        # template silently skips the person-mask inversion and regenerates the person
+        # instead of the background. Defaults to the outfit path for backward compat.
+        self.background_workflow_path = background_workflow_path or outfit_workflow_path
         self.image_cache = image_cache_service
         self.notification = notification_service
         self._running = False
@@ -113,6 +121,7 @@ class PipelineBackgroundWorker:
         # Workflow templates loaded on start
         self._pose_template: Optional[dict] = None
         self._outfit_template: Optional[dict] = None
+        self._background_template: Optional[dict] = None
 
     async def start(self) -> None:
         """Start the pipeline background worker."""
@@ -133,10 +142,11 @@ class PipelineBackgroundWorker:
         logger.info("Pipeline background worker stopped")
 
     async def _load_workflows(self) -> None:
-        """Load workflow templates from files (background reuses outfit template)."""
+        """Load workflow templates from files (outfit and background are separate)."""
         for label, path, attr in [
             ("pose", self.pose_workflow_path, "_pose_template"),
-            ("outfit/background", self.outfit_workflow_path, "_outfit_template"),
+            ("outfit", self.outfit_workflow_path, "_outfit_template"),
+            ("background", self.background_workflow_path, "_background_template"),
         ]:
             try:
                 workflow_file = Path(path)
@@ -234,12 +244,13 @@ class PipelineBackgroundWorker:
                 self._outfit_template, source_name, prompt, seed=seed,
                 nudity_level=request.nudityLevel, outfit=request.outfit,
                 head_mask_name=head_mask_name,
+                source_dressed=getattr(request, "sourceDressed", False),
             )
         if step_name == "background":
             prompt = apply_edit_photo_style(build_background_prompt(request.prompt), photo_style)
             logger.info(f"[PIPELINE] {job_id} | background | Prompt: {prompt[:80]}...")
             return prepare_background_workflow(
-                self._outfit_template, source_name, prompt, seed=seed,
+                self._background_template, source_name, prompt, seed=seed,
                 negative_prompt=request.negativePrompt,
                 nudity_level=request.nudityLevel,
             )

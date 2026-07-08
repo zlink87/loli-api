@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from supabase import Client
 
-from models.batch import BatchControls, BatchRead, BatchDetailRead, BatchItemRead
+from models.batch import BatchControls, BatchRead, BatchDetailRead, BatchItemRead, assemble_story
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,10 @@ class BatchStore:
         if batch is None:
             return None
         items = await self.list_items(batch_id)
-        return BatchDetailRead(**batch.model_dump(), items=items)
+        # Story is derived (no new storage) from the items' scene_spec jsonb; None for
+        # non-story batches.
+        story = assemble_story(items)
+        return BatchDetailRead(**batch.model_dump(), items=items, story=story)
 
     async def list_batches(self, character_id: Optional[str] = None) -> List[BatchRead]:
         def _select():

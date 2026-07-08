@@ -45,6 +45,8 @@ from workers.video_worker import VideoBackgroundWorker
 from services import supabase_db
 from services.character_store import CharacterStore
 from services.character_image_store import CharacterImageStore
+from services.chat_persona_store import ChatPersonaStore
+from services.persona_writer import PersonaWriter
 from services.batch_store import BatchStore
 from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
 from models.responses import HealthResponse, ErrorResponse
@@ -90,6 +92,16 @@ runpod_client = RunPodServerlessClient(
 job_manager.attach_runpod_client(runpod_client)
 
 prompt_generator = PromptGenerator()
+
+# Persona/bio writer (Feature 1). Unconditional — works keyless (deterministic
+# templates) and uses Venice when VENICE_API_KEY is set.
+persona_writer = PersonaWriter(
+    api_key=settings.VENICE_API_KEY,
+    base_url=settings.VENICE_BASE_URL,
+    model=settings.PERSONA_WRITER_MODEL or settings.VENICE_MODEL,
+    temperature=settings.PERSONA_WRITER_TEMPERATURE,
+    max_tokens=settings.PERSONA_WRITER_MAX_TOKENS,
+)
 
 storage_service = StorageService(
     storage_dir=settings.STORAGE_DIR,
@@ -160,9 +172,10 @@ outfit_worker = OutfitBackgroundWorker(
     job_manager=job_manager,
     comfyui_client=comfyui_client,
     storage_service=storage_service,
-    # V2 crop-and-stitch graph when COMFYUI_OUTFIT_WORKFLOW_PATH_V2 is set, else V1.
-    # Only the interactive outfit path cuts over; background/batch stay on V1.
-    workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+    # Precedence: Tier A full-2511 (COMFYUI_OUTFIT_WORKFLOW_PATH_2511) -> Rapid V2
+    # crop-and-stitch (_V2) -> V1. Only the interactive outfit path cuts over;
+    # background/batch stay on the fast path for cost.
+    workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
@@ -196,9 +209,12 @@ pipeline_worker = PipelineBackgroundWorker(
     comfyui_client=comfyui_client,
     storage_service=storage_service,
     pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
-    # Pipeline outfit step follows the same V2 flag as the interactive outfit worker
-    # (auto-detected by prepare_outfit_workflow). Batch stays on V1 until validated.
-    outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+    # Pipeline outfit step follows the same precedence as the interactive outfit worker
+    # (Tier A full-2511 -> Rapid V2 -> V1; auto-detected by prepare_outfit_workflow).
+    outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+    # Background step stays on V1 (whole-person composite-back); it is not a distortion
+    # source and its preparer needs V1-only nodes absent from the crop-stitch tiers.
+    background_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
@@ -208,6 +224,7 @@ pipeline_worker = PipelineBackgroundWorker(
 # --- Character Batches subsystem (optional; requires Supabase DB) ---
 character_store = None
 character_image_store = None
+chat_persona_store = None
 batch_store = None
 batch_orchestrator = None
 batch_reconciler = None
@@ -218,6 +235,7 @@ if supabase_db.is_configured():
     _db = supabase_db.get_supabase_db_client()
     character_store = CharacterStore(_db)
     character_image_store = CharacterImageStore(_db)
+    chat_persona_store = ChatPersonaStore(_db)
     batch_store = BatchStore(_db)
     batch_orchestrator = BatchOrchestrator(job_manager, character_store, batch_store, settings)
     batch_reconciler = BatchReconciler(
@@ -232,7 +250,13 @@ if supabase_db.is_configured():
         comfyui_client=comfyui_client,
         storage_service=storage_service,
         pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
-        outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+        # Batch outfit step follows the same tier precedence as the interactive/pipeline
+        # workers (Tier A full-2511 -> Rapid V2 -> V1; auto-detected by
+        # prepare_outfit_workflow). Enabling _V2 / _2511 requires the worker image +
+        # volume models staged first (see docs/RUNBOOK_masking_v2.md).
+        outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+        # Background step stays on V1 (see pipeline_worker note above).
+        background_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
         image_cache_service=image_cache_service,
         notification_service=notification_service,
         supabase_storage_service=supabase_storage_service,
@@ -351,6 +375,8 @@ async def lifespan(app: FastAPI):
         character_image_store=character_image_store,
         batch_store=batch_store,
         batch_orchestrator=batch_orchestrator,
+        persona_writer=persona_writer,
+        chat_persona_store=chat_persona_store,
     )
 
     # Sync BASE_URL to Supabase so external services know our tunnel URL

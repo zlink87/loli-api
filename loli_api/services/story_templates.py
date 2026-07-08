@@ -332,3 +332,34 @@ ARC_TEMPLATES: Dict[str, Tuple[ArcTemplate, ...]] = {
     "maid": (MORNING_HOME_ARC, OUT_AND_ABOUT_ARC, EVENING_UNWIND_ARC),
     "flight_attendant": (OUT_AND_ABOUT_ARC, NIGHT_OUT_ARC, EVENING_UNWIND_ARC),
 }
+
+
+# ---------------------------------------------------------------------------
+# Deterministic story helpers (Feature 2)
+# ---------------------------------------------------------------------------
+# Used when Venice is unavailable so a story_mode batch still gets a title + one
+# narrative sentence per photo. Prose is THIRD-PERSON, PRESENT-TENSE and identity-free
+# (built only from the scene-only beat_description + a mood phrase; the character's
+# name is a safe proper noun).
+_STORY_OPENERS: Tuple[str, ...] = (
+    "{name} lets the moment linger — {desc}.",
+    "{name} settles into it: {desc}.",
+    "Right now, {name} is caught up in it — {desc}.",
+    "{name} takes her time here — {desc}.",
+)
+
+
+def deterministic_story_title(name: str, occupation: str = "") -> str:
+    who = (occupation or "").replace("_", " ").strip()
+    title = f"A Day with {name} the {who}" if who else f"A Day with {name}"
+    return title[:160]
+
+
+def deterministic_beat_narrative(
+    name: str, beat_description: str, mood_phrase: str = "", index: int = 0
+) -> str:
+    desc = (beat_description or "").strip().rstrip(".").lower()
+    text = _STORY_OPENERS[index % len(_STORY_OPENERS)].format(name=name, desc=desc)
+    if mood_phrase:
+        text += f" The mood: {mood_phrase}."
+    return text[:700]

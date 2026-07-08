@@ -124,6 +124,7 @@ class OutfitBackgroundWorker(BaseEditWorker):
                 nudity_level=request.nudityLevel, outfit=request.outfit,
                 negative_prompt=request.negativePrompt,
                 head_mask_name=head_mask_name,
+                source_dressed=request.sourceDressed,
             )
 
             image_start = datetime.utcnow()

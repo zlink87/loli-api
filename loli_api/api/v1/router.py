@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from .endpoints import (
     generate, jobs, preview, edit, outfit, pose, background, pipeline,
-    characters, batches, video,
+    characters, batches, video, persona,
 )
 
 # Create main API router
@@ -23,6 +23,7 @@ api_router.include_router(pipeline.router)
 api_router.include_router(characters.router)
 api_router.include_router(batches.router)
 api_router.include_router(video.router)
+api_router.include_router(persona.router)
 
 
 def configure_services(
@@ -40,6 +41,8 @@ def configure_services(
     character_image_store=None,
     batch_store=None,
     batch_orchestrator=None,
+    persona_writer=None,
+    chat_persona_store=None,
 ):
     """
     Configure services for all endpoint modules.
@@ -84,6 +87,14 @@ def configure_services(
         batches.set_batch_store(batch_store)
     if batch_orchestrator is not None:
         batches.set_orchestrator(batch_orchestrator)
+    # Persona/bio writer (Feature 1). Writer works keyless (deterministic); persistence
+    # is Supabase-gated (character_store + chat_persona_store).
+    if persona_writer is not None:
+        persona.set_persona_writer(persona_writer)
+    if character_store is not None:
+        persona.set_character_store(character_store)
+    if chat_persona_store is not None:
+        persona.set_chat_persona_store(chat_persona_store)
     # Reels (image-to-video) — admin, Supabase-gated
     video.set_job_manager(job_manager)
     if notification_service:

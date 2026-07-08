@@ -75,6 +75,7 @@ def _row_to_character(row: dict) -> CharacterRead:
         persona=_row_to_persona(row),
         hero_image_url=row.get("profile_image_url") or "",
         bio=row.get("context"),
+        chat_persona_id=row.get("chat_persona_id"),
         status=row.get("status") or DRAFT_STATUS,
         created_at=row["created_at"],
         updated_at=row["updated_at"],

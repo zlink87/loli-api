@@ -270,8 +270,9 @@ def test_v2_prepare_defaults_to_body_mode():
         _load("outfit_cropstitch_API.json"), "src.png", "a red dress",
         seed=7, outfit=OutfitType.CROP_TOP_CARGO, head_mask_name="hm.png",
     )
-    # BODY mode by default (GARMENT_MODE_OUTFITS is opt-in and starts empty).
-    assert GARMENT_MODE_OUTFITS == set()
+    # BODY mode by default: source_dressed defaults False (and CROP_TOP_CARGO is not
+    # an opt-in garment-swap type), so GARMENT never engages.
+    assert OutfitType.CROP_TOP_CARGO not in GARMENT_MODE_OUTFITS
     assert wf["233"]["inputs"]["destination"] == ["213", 0]  # person base, not garment
     assert wf["211"]["inputs"]["image"] == "hm.png"
     assert wf["108"]["inputs"]["image"] == "src.png"
@@ -285,6 +286,7 @@ def test_v2_garment_mode_selects_clothes_mask():
         wf = prepare_outfit_workflow(
             _load("outfit_cropstitch_API.json"), "src.png", "cargo set",
             seed=1, outfit=OutfitType.CROP_TOP_CARGO, head_mask_name="hm.png",
+            source_dressed=True,  # GARMENT now also requires the source-dressed flag
         )
         assert wf["233"]["inputs"]["destination"] == ["230", 1]  # ClothesSegment mask
         assert wf["230"]["class_type"] == "ClothesSegment"

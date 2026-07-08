@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # V2 — the preparer auto-detects the graph, and background/pose/batch stay on V1
     # for rollback. Requires the worker image's staged nodes (redeploy first).
     COMFYUI_OUTFIT_WORKFLOW_PATH_V2: str = ""
+    # Tier A quality path: FULL (non-distilled) Qwen-Image-Edit-2511 + realism/NSFW
+    # LoRAs, loaded natively (UNet+CLIP+VAE) at >20 steps / cfg 2.5 instead of the
+    # 4-8 step distilled Rapid-AIO. EMPTY keeps the fast Rapid V2 path. Set to
+    # "workflows/outfit_cropstitch_2511full_API.json" to cut the interactive outfit +
+    # /v1/edit pipeline over to the full model. Takes precedence over _V2. Same
+    # crop-and-stitch graph (auto-detected), so no code change; background/batch stay
+    # on the fast path for cost. REQUIRES the worker image to stage the 2511 model +
+    # LoRA files first (see download2.sh Tier-A section) — redeploy before enabling.
+    COMFYUI_OUTFIT_WORKFLOW_PATH_2511: str = ""
     COMFYUI_POSE_WORKFLOW_PATH: str = "workflows/edit_pose_action.json"
     COMFYUI_VIDEO_WORKFLOW_PATH: str = "workflows/wan_i2v.json"
     COMFYUI_INPUT_DIR: str = "../ComfyUI/input"
@@ -74,6 +83,12 @@ class Settings(BaseSettings):
     VENICE_API_KEY: str = ""
     VENICE_BASE_URL: str = "https://api.venice.ai/api/v1"
     VENICE_MODEL: str = "venice-uncensored"
+
+    # Persona/bio writer (Feature 1: AI chat-persona generation). Uses Venice above.
+    # Empty PERSONA_WRITER_MODEL -> VENICE_MODEL. Works keyless (deterministic templates).
+    PERSONA_WRITER_TEMPERATURE: float = 0.8
+    PERSONA_WRITER_MAX_TOKENS: int = 1200
+    PERSONA_WRITER_MODEL: str = ""
 
     # Character generation: run the second detail-refine pass by default
     # (upscale-model round trip + refine steps; same output resolution,

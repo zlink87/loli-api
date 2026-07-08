@@ -153,4 +153,30 @@ download_file "https://huggingface.co/1038lab/segformer_clothes/resolve/main/con
 download_file "https://huggingface.co/1038lab/segformer_clothes/resolve/main/model.safetensors" "RMBG/segformer_clothes"
 download_file "https://huggingface.co/1038lab/segformer_clothes/resolve/main/preprocessor_config.json" "RMBG/segformer_clothes"
 
+# 10. TIER A — FULL (non-distilled) Qwen-Image-Edit-2511 quality path.
+# ONLY needed when COMFYUI_OUTFIT_WORKFLOW_PATH_2511 is enabled (workflow
+# workflows/outfit_cropstitch_2511full_API.json). This is the full 2511 model loaded
+# natively (UNet + CLIP + VAE) at >20 steps / cfg 2.5 instead of the 4-8 step distilled
+# Rapid AIO, plus a realism LoRA and an NSFW LoRA. Adds ~30 GB to the worker image.
+# IMPORTANT: the filenames below MUST match the workflow's loader nodes
+# (301 UNETLoader, 302 CLIPLoader, 303 VAELoader, 304/305 LoraLoaderModelOnly). VERIFY
+# each URL against the current Comfy-Org / author repos before building — repo paths
+# change over time and these were NOT download-tested. If a path 404s, find the current
+# one on the Comfy-Org HF repos (mind repo casing).
+#
+# 10a. Diffusion model — Comfy-Org fp8mixed (~20 GB). (bf16 = qwen_image_edit_2511_bf16.safetensors ~41 GB.)
+download_file "https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors" "diffusion_models"
+# 10b. Qwen2.5-VL text encoder (fp8 ~8 GB) — shared with base Qwen-Image-Edit.
+download_file "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors" "text_encoders"
+# 10c. Qwen-Image VAE.
+download_file "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors" "vae"
+# 10d. Realism LoRA (node 304): anti-plastic, identity-preserving. Apache-2.0. The repo
+# ships epoch checkpoints URP_5/10/15/20 — 20 = most trained (drop to 15 if it overcooks).
+download_file "https://huggingface.co/prithivMLmods/Qwen-Image-Edit-2511-Ultra-Realistic-Portrait/resolve/main/URP_20.safetensors" "loras"
+# 10e. NSFW LoRA (node 305) — REQUIRED for HIGH-tier editing (base 2511 is only mildly
+# NSFW). HF-hosted (wget-able) starting point for the Qwen-Image-Edit-Plus line:
+download_file "https://huggingface.co/aiunivers/qwen-image-edit-plus-nsfw-lora/resolve/main/qwen-image-edit-plus-nsfw-lora.safetensors" "loras"
+# A/B alternatives (mostly Civitai, need an API token): Meta4, Snofs, "Sex-tacular",
+# qwen_MCNL. Swap node 305's lora_name + strength (0.8-1.0) to try them.
+
 echo -e "${GREEN}All downloads finished!${NC}"

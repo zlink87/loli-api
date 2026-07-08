@@ -60,6 +60,22 @@ class SceneSpec(BaseModel):
         ),
     )
 
+    # --- render-safe story channel (identity-free; DOES reach the image prompt) ---
+    # Unlike `narrative` (gallery-only, below), `setting` and `activity` are folded
+    # into the background prompt by scene_mapper so the AI-authored day actually drives
+    # what each photo shows. They are scrubbed of identity tokens by the planner and
+    # gated by has_banned_style_words in the mapper, so they describe place/action only.
+    setting: Optional[str] = Field(
+        default=None,
+        max_length=400,
+        description="Identity-free one-sentence environment description; folded into the background prompt",
+    )
+    activity: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Identity-free short action phrase (what she is doing); folded into the background prompt",
+    )
+
     # --- optional per-scene mood overrides (do NOT change identity) ---
     mood_kinks: Optional[List[KinkType]] = Field(
         default=None,
@@ -77,6 +93,21 @@ class SceneSpec(BaseModel):
         ge=1,
         le=1_000_000_000,
         description="Per-scene seed; set by the planner/orchestrator when a base seed is supplied",
+    )
+
+    # --- story narrative (Feature 2) ---
+    # Additive, purely for surfacing (gallery/chat). NEVER fed into the image prompt —
+    # scene_mapper reads only beat_description + the render-safe setting/activity above,
+    # never this free prose — so it cannot leak identity/style into a render or bloat tokens.
+    narrative: Optional[str] = Field(
+        default=None,
+        max_length=700,
+        description="Per-beat story prose for this photo; excluded from the render prompt",
+    )
+    story_title: Optional[str] = Field(
+        default=None,
+        max_length=160,
+        description="Batch-level story title, denormalized onto every beat",
     )
 
     model_config = {"use_enum_values": False}

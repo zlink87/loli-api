@@ -8,15 +8,6 @@
       "title": "Image1 (source)"
     }
   },
-  "101": {
-    "inputs": {
-      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
-    },
-    "class_type": "CheckpointLoaderSimple",
-    "_meta": {
-      "title": "Load Checkpoint"
-    }
-  },
   "200": {
     "inputs": {
       "model_name": "sam_vit_h (2.56GB)"
@@ -227,12 +218,12 @@
         0
       ],
       "clip": [
-        "101",
-        1
+        "302",
+        0
       ],
       "vae": [
-        "101",
-        2
+        "303",
+        0
       ],
       "image1": [
         "235",
@@ -251,12 +242,12 @@
         0
       ],
       "clip": [
-        "101",
-        1
+        "302",
+        0
       ],
       "vae": [
-        "101",
-        2
+        "303",
+        0
       ],
       "image1": [
         "235",
@@ -280,8 +271,8 @@
         0
       ],
       "vae": [
-        "101",
-        2
+        "303",
+        0
       ],
       "pixels": [
         "235",
@@ -300,7 +291,7 @@
   "237": {
     "inputs": {
       "model": [
-        "101",
+        "305",
         0
       ]
     },
@@ -312,10 +303,10 @@
   "106": {
     "inputs": {
       "seed": 301651179604540,
-      "steps": 8,
-      "cfg": 1.0,
-      "sampler_name": "euler_ancestral",
-      "scheduler": "beta",
+      "steps": 20,
+      "cfg": 2.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
       "denoise": 0.9,
       "model": [
         "237",
@@ -346,8 +337,8 @@
         0
       ],
       "vae": [
-        "101",
-        2
+        "303",
+        0
       ]
     },
     "class_type": "VAEDecode",
@@ -382,6 +373,64 @@
     "class_type": "SaveImage",
     "_meta": {
       "title": "Save Image"
+    }
+  },
+  "301": {
+    "inputs": {
+      "unet_name": "qwen_image_edit_2511_fp8mixed.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Qwen-Image-Edit-2511 (full, fp8)"
+    }
+  },
+  "302": {
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP (Qwen2.5-VL)"
+    }
+  },
+  "303": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE (Qwen-Image)"
+    }
+  },
+  "304": {
+    "inputs": {
+      "model": [
+        "301",
+        0
+      ],
+      "lora_name": "URP_20.safetensors",
+      "strength_model": 0.8
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Realism LoRA (ultra-realistic skin)"
+    }
+  },
+  "305": {
+    "inputs": {
+      "model": [
+        "304",
+        0
+      ],
+      "lora_name": "qwen-image-edit-plus-nsfw-lora.safetensors",
+      "strength_model": 0.9
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "NSFW LoRA (edit)"
     }
   }
 }

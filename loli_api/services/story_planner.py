@@ -62,6 +62,9 @@ class Character:
     likes: List[str] = field(default_factory=list)
     dislikes: List[str] = field(default_factory=list)
     hero_photo_url: Optional[str] = None
+    # Free-text persona/context (characters.context). Story-mode uses it for narrative
+    # coherence; inert to beat-slot/pool selection.
+    bio: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +190,11 @@ class DeterministicScenePlanner(StoryPlanner):
         like_kw = _keyword_set(character.likes)
         dislike_kw = _keyword_set(character.dislikes)
 
+        # Story mode: a simple templated story so a Venice-off batch is never blank.
+        story_mode = getattr(controls, "story_mode", False)
+        name = character.persona.name
+        story_title = st.deterministic_story_title(name, occ or "") if story_mode else None
+
         scenes: List[SceneSpec] = []
         gidx = 0
         for arc, beat_count in arcs:
@@ -196,6 +204,10 @@ class DeterministicScenePlanner(StoryPlanner):
                 outfit = self._pick_outfit(tmpl, rng, like_kw, dislike_kw, controls)
                 location = self._pick_location(tmpl, rng, like_kw, dislike_kw, controls)
                 nudity = _nudity_for(tmpl.nudity_bias, gidx, count, controls)
+                narrative = None
+                if story_mode:
+                    mood = sv.scene_mood_phrase(character.persona.kinks, character.persona.personality)
+                    narrative = st.deterministic_beat_narrative(name, tmpl.beat_description, mood, gidx)
                 scenes.append(
                     SceneSpec(
                         arc_id=arc.arc_id,
@@ -212,6 +224,8 @@ class DeterministicScenePlanner(StoryPlanner):
                         mood_kinks=character.persona.kinks,
                         mood_personality=character.persona.personality,
                         seed=_derive_seed(controls, gidx),
+                        narrative=narrative,
+                        story_title=story_title,
                     )
                 )
                 gidx += 1
@@ -388,6 +402,77 @@ HARD RULES:
 """
 
 
+# Story mode: same scene-selection rules, plus one continuous multi-part story.
+STORY_PLANNER_SYSTEM_PROMPT = """You are a story director for a photorealistic NSFW image series of ONE fixed character.
+You will write ONE continuous, coherent multi-part STORY told across the beats in the user
+message — each beat is ONE photo in the story. Each beat gives you a short "vibe" hint and that
+beat's OWN allowed pose/outfit/location/time_of_day/lighting options (hand-authored to be
+scene-coherent, differing per beat).
+
+You must output ONLY valid JSON of the form:
+{"story_title":"Short title","arcs":[{"arc_id":"snake_case_id","arc_title":"Chapter title","beats":[BEAT, ...]}, ...]}
+
+Each BEAT is:
+{"beat_description":"one short sentence","narrative":"1-3 sentences of story prose",
+ "pose":<pose|null>,"outfit":<outfit|null>,"nudityLevel":"low|medium|high",
+ "accessories":[<accessory>...]|null,"location":<location>,"time_of_day":<time>,
+ "lighting":<lighting>,"mood_kinks":[<kink>...]|null,"mood_personality":<personality>|null}
+
+HARD RULES:
+- Output the SAME arcs and the SAME number of beats per arc, in the SAME order, as given in the user message. Treat each arc as a CHAPTER of the story.
+- For each beat, choose pose/outfit/location/time_of_day/lighting ONLY from THAT beat's own allowed lists in the user message. Never borrow from another beat's list, never invent a value. If a beat's list is empty/"(none allowed)", output null for that field (pose/outfit only).
+- accessories/mood_kinks/mood_personality are chosen from the shared lists at the end of the user message.
+- "story_title": a short, evocative title (title case), a few words, no quotes inside.
+- "narrative": 1-3 sentences (max ~55 words) of THIRD-PERSON, PRESENT-TENSE prose about the character BY NAME. It must continue directly from the previous beat so the whole set reads as one story, reflect the character's personality/likes/persona-context, and avoid the dislikes. Keep the EXACT SAME third-person present voice for EVERY beat — never switch person or tense.
+- Describe actions, feelings and setting only. NEVER describe the person's face, age, ethnicity, hair, eyes, body, breasts or skin anywhere (identity is pixel-protected). Using her first name is fine.
+- "beat_description" stays a short concrete scene caption matching the attributes YOU picked for that beat.
+- nudityLevel must never exceed the stated maximum.
+- Output the requested number of beats total across all arcs. No prose outside JSON, no markdown, only the JSON object.
+"""
+
+
+# Story-director mode (story_mode=True): the LLM AUTHORS a cohesive "day in her life"
+# and picks freely from the full (controls-filtered) vocab, keeping each scene coherent
+# ITSELF instead of being handed a per-beat menu. It emits two render-safe fields —
+# `setting` and `activity` — that DO reach the image prompt (via scene_mapper), plus the
+# gallery-only `narrative`. This is what makes the AI story actually drive the pictures.
+STORY_DIRECTOR_SYSTEM_PROMPT = """You are a story director for a photorealistic NSFW image series of ONE fixed character.
+Invent ONE cohesive "day in her life": a real narrative with a beginning, middle and end,
+distinct settings, changing activities, shifting moods, and a natural progression of
+time-of-day. YOU choose everything from the allowed lists in the user message — you are
+NOT filling a fixed template.
+
+Output ONLY valid JSON of the form:
+{"story_title":"Short evocative title","arcs":[{"arc_id":"snake_case_id","arc_title":"Chapter title","beats":[BEAT, ...]}, ...]}
+
+Each BEAT is:
+{"beat_description":"short concrete caption for this photo (scene only)",
+ "setting":"ONE sentence describing the PLACE/environment for this photo (scene only)",
+ "activity":"short phrase: what she is DOING in this photo (e.g. 'pouring coffee', 'stretching by the window')",
+ "narrative":"1-3 sentences of THIRD-PERSON, PRESENT-TENSE story prose (gallery only)",
+ "pose":<pose|null>,"outfit":<outfit|null>,"nudityLevel":"low|medium|high",
+ "accessories":[<accessory>...]|null,"location":<location>,"time_of_day":<time>,
+ "lighting":<lighting>,"mood_kinks":[<kink>...]|null,"mood_personality":<personality>|null}
+
+HARD RULES:
+- Choose pose/outfit/location/time_of_day/lighting ONLY from the exact lists in the user
+  message. Use null for pose/outfit if none fits a beat; location/time_of_day/lighting are
+  always required. accessories/mood_kinks/mood_personality come from the shared lists.
+- COHERENCE IS YOUR JOB now (no menu enforces it): outfit, location, activity and time must
+  make sense together in each beat — no gym clothes in a nightclub, no cocktail dress while
+  cooking breakfast, no swimwear in an office.
+- FLOW: consecutive beats connect. time_of_day generally advances across the day; the setting
+  changes between chapters. Group beats into arcs as CHAPTERS of the one story.
+- IDENTITY IS PIXEL-LOCKED. In beat_description, setting, activity AND narrative, NEVER
+  describe her face, age, ethnicity, hair, eyes, body, breasts or skin. Using her first name
+  is fine. Describe places, clothes, actions, light and mood only.
+- "narrative": keep the EXACT SAME third-person present voice for EVERY beat; continue directly
+  from the previous beat; reflect her personality/likes/persona-context; avoid her dislikes.
+- nudityLevel must never exceed the stated maximum; follow the escalation style.
+- Emit EXACTLY the requested number of beats total across all arcs. No prose outside JSON, no markdown.
+"""
+
+
 class VeniceScenePlanner(StoryPlanner):
     name = "venice"
     supports_nsfw = True
@@ -402,8 +487,14 @@ class VeniceScenePlanner(StoryPlanner):
     ) -> List[SceneSpec]:
         if not self.api_key:
             return []
-        user_prompt = self._build_user_prompt(character, count, controls)
-        raw = await self._call_venice(user_prompt)
+        story_mode = getattr(controls, "story_mode", False)
+        # Story mode -> the story-director prompt (free vocab, authors a cohesive day,
+        # emits render-safe setting/activity). Non-story -> the legacy per-beat-menu prompt.
+        if story_mode:
+            user_prompt = self._build_director_user_prompt(character, count, controls)
+        else:
+            user_prompt = self._build_user_prompt(character, count, controls)
+        raw = await self._call_venice(user_prompt, story_mode=story_mode, count=count)
         if raw is None:
             return []
         return _parse_arcs_json(raw)
@@ -411,12 +502,15 @@ class VeniceScenePlanner(StoryPlanner):
     def _build_user_prompt(self, character: Character, count: int, controls: BatchControls) -> str:
         persona = character.persona
         summary_parts = [
+            f"name: {persona.name}",
             f"occupation: {ap.phrase(ap.OCCUPATION_PHRASES, persona.occupation) or 'unspecified'}",
             f"personality: {ap.phrase(ap.PERSONALITY_PHRASES, persona.personality) or 'unspecified'}",
             f"relationship vibe: {ap.phrase(ap.RELATIONSHIP_PHRASES, persona.relationship) or 'unspecified'}",
             f"likes: {', '.join(character.likes) or 'none given'}",
             f"dislikes: {', '.join(character.dislikes) or 'none given'}",
         ]
+        if character.bio:
+            summary_parts.append(f"persona/context: {character.bio.strip()[:600]}")
         max_nudity = "low" if controls.sfw_only else _val(controls.max_nudity)
 
         # Per-beat menus from the SAME hand-authored pools + filtering the
@@ -454,6 +548,18 @@ class VeniceScenePlanner(StoryPlanner):
             "kink": _allowed_values(KinkType),
             "personality": _allowed_values(PersonalityType),
         }
+        story_block = ""
+        if getattr(controls, "story_mode", False):
+            story_block = (
+                f"\n\nSTORY MODE: Tell ONE continuous story for {persona.name} across these "
+                f"{count} beats (one scene per photo). Output a top-level \"story_title\" and, "
+                "for each beat, a \"narrative\": 1-3 sentences (max ~55 words) of THIRD-PERSON, "
+                "PRESENT-TENSE prose about her by name that continues from the previous beat, "
+                "treats each arc as a chapter, reflects her personality/likes/persona-context "
+                "and avoids dislikes. Keep the SAME third-person present voice for every beat. "
+                "Describe actions, feelings and setting — NEVER her face, age, hair, eyes, body "
+                "or skin."
+            )
         return (
             f"CHARACTER:\n" + "\n".join(summary_parts) + "\n\n"
             f"PLAN: {count} beats total, grouped into {n_arcs} arcs, "
@@ -463,16 +569,73 @@ class VeniceScenePlanner(StoryPlanner):
             + "\n".join(beat_lines) + "\n\n"
             f"SHARED ALLOWED VALUES (any beat, not beat-specific):\n"
             + "\n".join(f"{k}: {', '.join(v)}" for k, v in shared.items())
+            + story_block
         )
 
-    async def _call_venice(self, user_prompt: str) -> Optional[str]:
+    def _build_director_user_prompt(self, character: Character, count: int, controls: BatchControls) -> str:
+        """
+        Story-director user prompt: presents the FULL controls-filtered vocab ONCE (not a
+        per-beat menu) and lets the LLM author the day and pick freely. Coherence is the
+        model's job (enforced by the system prompt), not a hand-authored BeatTemplate.
+        """
+        persona = character.persona
+        summary_parts = [
+            f"name: {persona.name}",
+            f"occupation: {ap.phrase(ap.OCCUPATION_PHRASES, persona.occupation) or 'unspecified'}",
+            f"personality: {ap.phrase(ap.PERSONALITY_PHRASES, persona.personality) or 'unspecified'}",
+            f"relationship vibe: {ap.phrase(ap.RELATIONSHIP_PHRASES, persona.relationship) or 'unspecified'}",
+            f"likes: {', '.join(character.likes) or 'none given'}",
+            f"dislikes: {', '.join(character.dislikes) or 'none given'}",
+        ]
+        if character.bio:
+            summary_parts.append(f"persona/context: {character.bio.strip()[:600]}")
+        max_nudity = "low" if controls.sfw_only else _val(controls.max_nudity)
+
+        # sfw batches also drop NAKED from the offered outfits (defense-in-depth; the
+        # nudity clamp in validate_and_repair re-enforces regardless).
+        blocked_outfits = list(controls.blocked_outfits or [])
+        if controls.sfw_only:
+            blocked_outfits.append(OutfitType.NAKED)
+
+        pools = {
+            "LOCATIONS": _allowed_values(
+                LocationType, allowed=controls.allowed_locations, blocked=controls.blocked_locations
+            ),
+            "OUTFITS": _allowed_values(
+                OutfitType, allowed=controls.allowed_outfits, blocked=blocked_outfits
+            ),
+            "POSES": _allowed_values(PoseType, blocked=controls.blocked_poses),
+            "TIMES": _allowed_values(TimeOfDayType),
+            "LIGHTINGS": _allowed_values(LightingType),
+            "ACCESSORIES": _allowed_values(AccessoryType),
+            "KINKS": _allowed_values(KinkType),
+            "PERSONALITIES": _allowed_values(PersonalityType),
+        }
+        vocab_block = "\n".join(f"{k}: {', '.join(v) or '(none allowed)'}" for k, v in pools.items())
+        arc_hint = str(controls.arc_count) if controls.arc_count else "3-5"
+        return (
+            "CHARACTER:\n" + "\n".join(summary_parts) + "\n\n"
+            f"PLAN: Write ONE cohesive day-in-the-life story for {persona.name} as {count} photos, "
+            f"grouped into {arc_hint} chapters (arcs). Escalation style: '{_val(controls.escalation)}'. "
+            f"Maximum nudityLevel allowed: {max_nudity}.\n\n"
+            "ALLOWED VALUES (choose freely, keep each scene internally coherent):\n"
+            + vocab_block + "\n\n"
+            f"Return the JSON from the system prompt: a story_title and arcs whose beats total EXACTLY {count}."
+        )
+
+    async def _call_venice(self, user_prompt: str, *, story_mode: bool = False, count: int = 12) -> Optional[str]:
         content, _usage = await self._client.chat(
             [
-                {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": STORY_DIRECTOR_SYSTEM_PROMPT if story_mode else PLANNER_SYSTEM_PROMPT,
+                },
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.7,
-            max_tokens=4000,
+            # Story-director beats each carry setting + activity + narrative, so scale token
+            # headroom with beat count rather than a flat cap.
+            max_tokens=min(16000, 300 * count + 2000) if story_mode else 4000,
         )
         return content
 
@@ -518,6 +681,7 @@ def _parse_arcs_json(raw: str) -> List[SceneSpec]:
     arcs = data.get("arcs")
     if not isinstance(arcs, list):
         return []
+    story_title = data.get("story_title")
     scenes: List[SceneSpec] = []
     gidx = 0
     for arc in arcs:
@@ -531,7 +695,7 @@ def _parse_arcs_json(raw: str) -> List[SceneSpec]:
         for b, raw_beat in enumerate(beats):
             if not isinstance(raw_beat, dict):
                 continue
-            spec = _raw_beat_to_scene(raw_beat, arc_id, arc_title, b, gidx)
+            spec = _raw_beat_to_scene(raw_beat, arc_id, arc_title, b, gidx, story_title=story_title)
             if spec is not None:
                 scenes.append(spec)
                 gidx += 1
@@ -553,7 +717,10 @@ def _extract_json_object(raw: str) -> Optional[dict]:
     return None
 
 
-def _raw_beat_to_scene(raw: dict, arc_id: str, arc_title: str, beat_index: int, global_index: int) -> Optional[SceneSpec]:
+def _raw_beat_to_scene(
+    raw: dict, arc_id: str, arc_title: str, beat_index: int, global_index: int,
+    story_title: Optional[str] = None,
+) -> Optional[SceneSpec]:
     location = _coerce_enum(LocationType, raw.get("location"))
     if location is None:
         location = LocationType.HOME_LIVING_ROOM  # required field; substitute neutral
@@ -562,6 +729,12 @@ def _raw_beat_to_scene(raw: dict, arc_id: str, arc_title: str, beat_index: int, 
     accessories = [a for a in (_coerce_enum(AccessoryType, x) for x in accessories_raw) if a] or None
     kinks_raw = raw.get("mood_kinks") or []
     mood_kinks = [k for k in (_coerce_enum(KinkType, x) for x in kinks_raw) if k][:3] or None
+    # Story narrative: scrub identity at parse time (again in validate_and_repair).
+    narrative_raw = raw.get("narrative")
+    narrative = _scrub_narrative(str(narrative_raw)) if narrative_raw else None
+    # Render-safe channel (folded into the background prompt) — scrub identity here too.
+    setting = _scrub_scene_text(raw.get("setting"), 400)
+    activity = _scrub_scene_text(raw.get("activity"), 200)
     try:
         return SceneSpec(
             arc_id=arc_id,
@@ -578,6 +751,10 @@ def _raw_beat_to_scene(raw: dict, arc_id: str, arc_title: str, beat_index: int, 
             lighting=_coerce_enum(LightingType, raw.get("lighting")) or LightingType.NATURAL_SOFT,
             mood_kinks=mood_kinks,
             mood_personality=_coerce_enum(PersonalityType, raw.get("mood_personality")),
+            setting=setting,
+            activity=activity,
+            narrative=narrative,
+            story_title=(str(story_title)[:160] if story_title else None),
         )
     except Exception as e:  # noqa: BLE001 - a single bad beat must not kill the plan
         logger.warning(f"Dropping unparseable beat: {e}")
@@ -697,6 +874,13 @@ def validate_and_repair(
         if s.background_text:
             s.background_text = _scrub_identity(s.background_text)
         s.beat_description = _scrub_identity(s.beat_description)
+        # setting/activity DO reach the render, so scrubbing them is load-bearing.
+        if s.setting:
+            s.setting = _scrub_scene_text(s.setting, 400)
+        if s.activity:
+            s.activity = _scrub_scene_text(s.activity, 200)
+        if s.narrative:
+            s.narrative = _scrub_narrative(s.narrative)
 
         # Fill per-item seed if missing and a base seed is available.
         if s.seed is None:
@@ -755,6 +939,37 @@ def _scrub_identity(text: str) -> str:
     return out.strip(" ,.;")
 
 
+def _scrub_narrative(text: str) -> Optional[str]:
+    """
+    Identity-scrub narrative prose while preserving terminal sentence punctuation
+    (so a clean sentence keeps its final '.'/'!'/'?' instead of being trimmed by the
+    generic scrub). Returns None if nothing meaningful survives. Clamped to the
+    SceneSpec.narrative limit.
+    """
+    if not text:
+        return None
+    scrubbed = _scrub_identity(text)
+    if not scrubbed:
+        return None
+    end = text.rstrip()[-1:]
+    if end in ".!?" and scrubbed[-1:] not in ".!?":
+        scrubbed = scrubbed + end
+    return scrubbed[:700]
+
+
+def _scrub_scene_text(text, limit: int) -> Optional[str]:
+    """
+    Identity-scrub a render-safe scene field (setting/activity) and cap its length.
+    Returns None if nothing meaningful survives the scrub. These fields DO reach the
+    render, so scrubbing here (and again in validate_and_repair) is load-bearing, not
+    just cosmetic like narrative.
+    """
+    if not text:
+        return None
+    scrubbed = _scrub_identity(str(text))
+    return scrubbed[:limit] if scrubbed else None
+
+
 # ---------------------------------------------------------------------------
 # Provider selection + top-level entry point
 # ---------------------------------------------------------------------------
@@ -784,6 +999,7 @@ async def plan_scenes(
     gate. Returns (validated_scenes, provider_name_used).
     """
     is_nsfw = _val(controls.content_rating) != "sfw"
+    story_mode = getattr(controls, "story_mode", False)
 
     # Manual override wins.
     if manual_scenes or provider_override == "manual":
@@ -817,7 +1033,15 @@ async def plan_scenes(
             logger.warning(f"planner {name} raised {e}; falling back")
             scenes = []
         if scenes:
-            return validate_and_repair(scenes, character, count, controls), name
+            # Venice in story-director mode (story_mode) picks FREELY from the full vocab —
+            # snapping it back to hand-authored beat pools would undo the whole point. The
+            # deterministic planner's picks are already in-pool, so enforcement there is a
+            # safe no-op; legacy scene-only Venice still gets snapped (it was given menus).
+            enforce = not (name == "venice" and story_mode)
+            return (
+                validate_and_repair(scenes, character, count, controls, enforce_beat_pool=enforce),
+                name,
+            )
 
     # Deterministic never returns empty for count>=1, but guard anyway.
     scenes = DeterministicScenePlanner().plan_scenes_sync(character, count, controls)

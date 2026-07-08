@@ -139,15 +139,26 @@ def build_prompt(outfit: OutfitType, accessories: Optional[List[AccessoryType]],
     return ", ".join(prompt_parts)
 
 
-# Outfit types that use the tight GARMENT mask (ClothesSegment) instead of the
-# whole-PERSON mask in the crop-and-stitch (V2) graph. GARMENT mode requires a
-# DRESSED source — ClothesSegment finds nothing on a nude body and would yield an
-# empty crop. It is therefore OPT-IN: start empty (every outfit uses the universal
-# BODY mode) and graduate individual outfits here only after validating each on a
-# known-dressed source via the mask-preview trick. BODY mode + crop-and-stitch is
-# already a large quality win over V1 and is safe for nude and dressed sources
-# alike, so it is the correct default for the first cutover.
-GARMENT_MODE_OUTFITS: set = set()
+# Outfit types eligible for the tight GARMENT mask (ClothesSegment) instead of the
+# whole-PERSON mask in the crop-and-stitch (V2) graph. GARMENT mode edits ONLY the
+# existing clothing, so it keeps far more fine detail (sequins, lace) and stops the
+# body/anatomy being re-diffused — but it needs a DRESSED source (ClothesSegment finds
+# nothing on a nude body). Safety is a conjunction: GARMENT engages only when the caller
+# sets sourceDressed=true (there IS clothing to segment) AND the TARGET outfit is listed
+# here. Membership marks like-coverage swaps suited to a tight mask; a coverage-INCREASING
+# change (e.g. bikini -> fur coat) would clip to the small source mask, so those stay BODY.
+# Seeded with the single-piece dress family (where the blocky-detail problem lives);
+# validate each new type on a dressed source via outfit_cropstitch_maskpreview before adding.
+GARMENT_MODE_OUTFITS: set = {
+    OutfitType.COCKTAIL_DRESS,
+    OutfitType.BODYCON_DRESS,
+    OutfitType.LITTLE_BLACK_DRESS,
+    OutfitType.RED_EVENING_GOWN,
+    OutfitType.VELVET_DRESS,
+    OutfitType.SATIN_SLIP_DRESS,
+    OutfitType.WHITE_SUMMER_DRESS,
+    OutfitType.FLORAL_MAXI_DRESS,
+}
 
 
 def _is_cropstitch_template(template: dict) -> bool:
@@ -165,6 +176,7 @@ def prepare_outfit_cropstitch_workflow(
     outfit: Optional[OutfitType] = None,
     negative_prompt: Optional[str] = None,
     head_mask_name: Optional[str] = None,
+    source_dressed: bool = False,
 ) -> dict:
     """
     Prepare the V2 crop-and-stitch outfit graph (``outfit_cropstitch_API.json``).
@@ -181,7 +193,8 @@ def prepare_outfit_cropstitch_workflow(
         universal — works for a nude source (dress-up) and a dressed source alike.
       * GARMENT (node 233 destination = node 230 ClothesSegment mask): tight,
         semantic clothing mask that also excludes hair/skin — but only when the
-        source is DRESSED. Enabled per-OutfitType via ``GARMENT_MODE_OUTFITS``.
+        source is DRESSED. Enabled only when ``source_dressed`` is true AND the
+        target outfit is in ``GARMENT_MODE_OUTFITS``.
 
     Head protection: the server-computed YuNet mask (node 211 -> 212) is subtracted
     (node 233). With no staged mask, the subtraction is bypassed (node 235 reads the
@@ -207,8 +220,10 @@ def prepare_outfit_cropstitch_workflow(
     if seed is not None:
         wf["106"]["inputs"]["seed"] = seed
 
-    # Mask mode: GARMENT (tight clothing) for the opt-in set, else BODY (person).
-    use_garment = outfit is not None and outfit in GARMENT_MODE_OUTFITS
+    # Mask mode: GARMENT (tight clothing) only when the caller says the source is
+    # dressed AND the target is an opt-in like-coverage swap; else BODY (person).
+    # source_dressed guards the nude case (ClothesSegment would find nothing).
+    use_garment = source_dressed and outfit is not None and outfit in GARMENT_MODE_OUTFITS
     base_ref = ["230", 1] if use_garment else ["213", 0]
     wf["233"]["inputs"]["destination"] = base_ref
 
@@ -221,10 +236,12 @@ def prepare_outfit_cropstitch_workflow(
         wf["235"]["inputs"]["mask"] = base_ref
         logger.debug("No head mask staged; crop reads base mask directly")
 
-    # Denoise: GARMENT is an in-place swap on a dressed body (lower); BODY may be a
-    # full dress-up over bare skin (higher). Both far below V1's whole-frame risk
-    # because the crop confines regeneration to the masked region.
-    wf["106"]["inputs"]["denoise"] = 0.80 if use_garment else 0.85
+    # Denoise: kept modest so the crop-confined regeneration preserves fine garment
+    # structure (laces, straps) rather than re-inventing it. Lowered BODY 0.85 -> 0.80
+    # (the whole-torso re-diffuse was wiping out clothing detail); a full dress-up over
+    # bare skin still applies at 0.80. GARMENT (opt-in, dressed source) shares the value
+    # for now — split the ternary back out if the two modes need independent tuning.
+    wf["106"]["inputs"]["denoise"] = 0.80
 
     logger.debug(
         f"V2 outfit graph prepared: mode={'GARMENT' if use_garment else 'BODY'}, "
@@ -242,6 +259,7 @@ def prepare_outfit_workflow(
     outfit: Optional[OutfitType] = None,
     negative_prompt: Optional[str] = None,
     head_mask_name: Optional[str] = None,
+    source_dressed: bool = False,
 ) -> dict:
     """
     Prepare the outfit workflow with injected parameters.
@@ -302,6 +320,7 @@ def prepare_outfit_workflow(
         return prepare_outfit_cropstitch_workflow(
             template, image_name, prompt, seed=seed, nudity_level=nudity_level,
             outfit=outfit, negative_prompt=negative_prompt, head_mask_name=head_mask_name,
+            source_dressed=source_dressed,
         )
 
     wf = copy.deepcopy(template)

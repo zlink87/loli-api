@@ -68,6 +68,13 @@ class BatchControls(BaseModel):
             "(realistic/unstaged), studio, or candid_phone (legacy raw look)"
         ),
     )
+    story_mode: bool = Field(
+        default=True,
+        description=(
+            "Emit one coherent multi-part story (a story title + per-beat narrative prose, "
+            "one scene per photo). Additive metadata only — never affects render fields."
+        ),
+    )
 
 
 class BatchCreate(BaseModel):
@@ -150,10 +157,67 @@ class BatchRead(BaseModel):
     updated_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Story view (Feature 2) — derived at read time from the items' scene_spec jsonb.
+# No new storage: story_title + per-beat narrative already ride in scene_spec.
+# ---------------------------------------------------------------------------
+class StoryBeat(BaseModel):
+    scene_index: int
+    narrative: Optional[str] = None
+    beat_description: Optional[str] = None
+    image_url: Optional[str] = None
+
+
+class StoryChapter(BaseModel):
+    arc_id: str
+    arc_title: str
+    beats: List[StoryBeat] = Field(default_factory=list)
+
+
+class BatchStory(BaseModel):
+    title: Optional[str] = None
+    chapters: List[StoryChapter] = Field(default_factory=list)
+
+
+def assemble_story(items: List[BatchItemRead]) -> Optional["BatchStory"]:
+    """Reconstruct the story from items' scene_spec. Returns None for non-story batches."""
+    if not items:
+        return None
+    ordered = sorted(items, key=lambda it: it.scene_index)
+    if not any(
+        (it.scene_spec or {}).get("narrative") or (it.scene_spec or {}).get("story_title")
+        for it in ordered
+    ):
+        return None
+
+    title: Optional[str] = None
+    chapters: List[StoryChapter] = []
+    current: Optional[StoryChapter] = None
+    for it in ordered:
+        spec = it.scene_spec or {}
+        if title is None and spec.get("story_title"):
+            title = spec.get("story_title")
+        arc_id = str(spec.get("arc_id") or "arc")
+        arc_title = str(spec.get("arc_title") or "Chapter")
+        if current is None or current.arc_id != arc_id:
+            current = StoryChapter(arc_id=arc_id, arc_title=arc_title, beats=[])
+            chapters.append(current)
+        current.beats.append(
+            StoryBeat(
+                scene_index=it.scene_index,
+                narrative=spec.get("narrative"),
+                beat_description=spec.get("beat_description"),
+                image_url=it.image_url,
+            )
+        )
+    return BatchStory(title=title, chapters=chapters)
+
+
 class BatchDetailRead(BatchRead):
-    """Batch aggregate plus its items."""
+    """Batch aggregate plus its items (and, in story mode, the derived story)."""
 
     items: List[BatchItemRead] = Field(default_factory=list)
+    story: Optional[BatchStory] = None
 
 
 class BatchEstimate(BaseModel):

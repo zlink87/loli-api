@@ -359,6 +359,16 @@ class OutfitEditRequest(BaseModel):
         le=1000000000,
         description="Random seed for reproducibility"
     )
+    sourceDressed: bool = Field(
+        default=False,
+        description=(
+            "Set true when the SOURCE image already shows clothing. Enables the tight "
+            "GARMENT mask (edit only the existing clothing) for supported outfit types, "
+            "which keeps far more fine detail (sequins, lace) and avoids re-diffusing "
+            "the body/anatomy. Leave false for a nude/unclothed source — a garment mask "
+            "would find nothing to segment, so the whole-body mask is used instead."
+        )
+    )
 
     @field_validator("source_image")
     @classmethod
@@ -603,6 +613,16 @@ class PipelineEditRequest(BaseModel):
             "pipeline edit matches the generated hero's retouched look: polished "
             "(retouched, default), natural, studio, or candid_phone (legacy raw, "
             "no style clause)."
+        )
+    )
+    sourceDressed: bool = Field(
+        default=False,
+        description=(
+            "Set true when the SOURCE already shows clothing, so the outfit step can use "
+            "the tight GARMENT mask (edit only the existing clothing) for supported outfit "
+            "types — keeps fine detail and avoids re-diffusing the body. Leave false for a "
+            "nude source. Note: in a pose->outfit pipeline the person is still clothed when "
+            "the outfit step runs, so this reflects the ORIGINAL source's dressed state."
         )
     )
 

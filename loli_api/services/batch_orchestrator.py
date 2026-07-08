@@ -94,6 +94,7 @@ class BatchOrchestrator:
             likes=body.likes,
             dislikes=body.dislikes,
             hero_photo_url=character.hero_image_url,
+            bio=character.bio,  # story-mode narrative coherence
         )
         scenes, provider = await story_planner.plan_scenes(
             planner_character, body.count, controls, settings=self.settings
@@ -361,11 +362,15 @@ class BatchReconciler:
         accessories: List[str] = []
         beat_description = None
         arc_title = None
+        narrative = None
+        story_title = None
         if scene is not None:
             outfit = scene.outfit.value if scene.outfit is not None else None
             accessories = [a.value for a in (scene.accessories or [])]
             beat_description = scene.beat_description
             arc_title = scene.arc_title
+            narrative = scene.narrative
+            story_title = scene.story_title
 
         image_id = await self.character_image_store.create_image(
             batch.character_id,
@@ -382,6 +387,9 @@ class BatchReconciler:
                 "beat": item.beat,
                 "image_hash": job.image_hash,
                 "scene_spec": item.scene_spec,
+                # Story text surfaced for cheap reads (also inside scene_spec).
+                "narrative": narrative,
+                "story_title": story_title,
             },
         )
         await self.character_image_store.create_action(
@@ -389,7 +397,8 @@ class BatchReconciler:
             character_image_id=image_id,
             media_url=image_url,
             label=action_label(beat_description, arc_title, item.scene_index),
-            suggested_prompt=beat_description,
+            # The story beat reads out in chat when the user taps the quick action.
+            suggested_prompt=narrative or beat_description,
             sort_order=item.scene_index,
         )
         logger.info(
