@@ -155,7 +155,13 @@ def prepare_outfit_workflow(
     Identity is preserved in layers:
       1. Node 202 segments the PERSON — the edit region. The person mask (not
          garment terms) is deliberate: it is the only config that works BOTH
-         for undressing and for dressing a nude source.
+         for undressing and for dressing a nude source. Node 213
+         (GrowMaskWithBlur, fill_holes=true, expand=0, blur_radius=0) fills any
+         accidental internal gaps in that raw SAM mask BEFORE it branches to
+         the head-subtract (205) / background-invert (204) steps — SAM's
+         segmentation over folded fabric/shadow can leave small holes, and once
+         composite-back (below) is real, an unfilled hole lets a blurred patch
+         of the STALE original image show through mid-garment.
       2. The SERVER-COMPUTED head-protect mask (``head_mask_name`` -> node 211,
          see services/head_mask.py) is subtracted (205) so the head is never in
          the edit region. Computed with YuNet server-side because on-worker face
@@ -175,6 +181,7 @@ def prepare_outfit_workflow(
     Key nodes in test_final_API.json:
         108    LoadImage             -> inputs.image   (source image filename)
         211    LoadImage             -> inputs.image   (head-protect mask filename)
+        213    GrowMaskWithBlur      -> fill_holes-only pass on the raw person mask
         16     easy positive         -> inputs.positive (clothing change prompt)
         106    KSampler              -> inputs.seed
         117    easy negative         -> inputs.negative (quality/adult/identity/nudity)
@@ -218,17 +225,20 @@ def prepare_outfit_workflow(
 
     # Node 211: server-computed head-protect mask (white = never edit). The
     # caller stages the PNG alongside the source image. Defensive fallback when
-    # no mask was staged: skip the subtraction entirely (119 <- raw person mask)
-    # and point 211 at the source file so graph validation still passes.
+    # no mask was staged: skip the subtraction entirely (119 <- node 213, the
+    # hole-filled person mask — NOT raw node 202, which can have accidental
+    # internal segmentation gaps that now composite-back would let bleed
+    # through as stale-original ghost patches) and point 211 at the source
+    # file so graph validation still passes.
     if "211" in wf:
         if head_mask_name:
             wf["211"]["inputs"]["image"] = head_mask_name
             logger.debug(f"Set node 211 head mask: {head_mask_name}")
         else:
             wf["211"]["inputs"]["image"] = image_name
-            if "119" in wf and "202" in wf:
-                wf["119"]["inputs"]["mask"] = ["202", 1]
-            logger.debug("No head mask staged; using raw person mask")
+            if "119" in wf and "213" in wf:
+                wf["119"]["inputs"]["mask"] = ["213", 0]
+            logger.debug("No head mask staged; using hole-filled person mask")
 
     # Mask target: the template's node 202 segments "person" for EVERY direction —
     # the only config that handles both undressing (garments are on the body) and

@@ -57,11 +57,31 @@
       "title": "Segment (text -> mask)"
     }
   },
-  "204": {
+  "213": {
     "inputs": {
+      "expand": 0,
+      "incremental_expandrate": 0,
+      "tapered_corners": true,
+      "flip_input": false,
+      "blur_radius": 0,
+      "lerp_alpha": 1,
+      "decay_factor": 1,
+      "fill_holes": true,
       "mask": [
         "202",
         1
+      ]
+    },
+    "class_type": "GrowMaskWithBlur",
+    "_meta": {
+      "title": "Fill raw SAM mask holes (no grow/blur here)"
+    }
+  },
+  "204": {
+    "inputs": {
+      "mask": [
+        "213",
+        0
       ]
     },
     "class_type": "InvertMask (segment anything)",
@@ -338,8 +358,8 @@
       "y": 0,
       "operation": "subtract",
       "destination": [
-        "202",
-        1
+        "213",
+        0
       ],
       "source": [
         "212",

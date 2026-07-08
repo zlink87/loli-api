@@ -6,7 +6,8 @@ across batch edits:
 
   - Outfit/background re-diffuse ONLY inside a mask; everything else is composited
     back from the original encode via InpaintModelConditioning (node 121).
-  - The mask comes from GroundingDINO+SAM (node 202); background inverts it (204).
+  - The mask comes from GroundingDINO+SAM (node 202), hole-filled (213) before
+    branching; background inverts the hole-filled mask (204).
   - Pose repose is followed by a ReActor face-swap (node 200) that locks the
     hero's face onto the reposed body before the image is saved.
 
@@ -74,12 +75,37 @@ def test_outfit_template_protects_head_via_server_mask():
     assert wf["212"]["inputs"]["image"] == ["211", 0]
     assert wf["205"]["class_type"] == "MaskComposite"
     assert wf["205"]["inputs"]["operation"] == "subtract"
-    assert wf["205"]["inputs"]["destination"] == ["202", 1]
+    assert wf["205"]["inputs"]["destination"] == ["213", 0]  # hole-filled person mask, not raw 202
     assert wf["205"]["inputs"]["source"] == ["212", 0]
     # The grow/blur node consumes the PROTECTED mask.
     assert wf["119"]["inputs"]["mask"] == ["205", 0]
     # The old on-worker DINO face segment must be gone.
-    assert "203" not in wf and "206" not in wf
+    assert "203" not in wf
+
+
+def test_outfit_template_fills_raw_mask_holes_before_branching():
+    """
+    Node 213 fills accidental internal gaps in SAM's raw person mask (202)
+    BEFORE it branches to the head-subtract (205, outfit) and invert (204,
+    background) paths — a fill_holes-ONLY pass (expand=0, blur_radius=0), so
+    it does not touch the mask's outer boundary. Without this, a small
+    unfilled hole in the segmentation (SAM missing a fold of fabric, a shadow,
+    etc.) survives all the way to the composite-back (node 220) and shows up
+    as a blurred patch of the STALE original image bleeding through mid-
+    garment, since noise_mask=true + composite-back now take the mask's exact
+    shape literally (an earlier noise_mask=false config didn't have this
+    failure mode, because the whole frame was re-diffused regardless of mask
+    shape).
+    """
+    wf = _load("test_final_API.json")
+    assert wf["213"]["class_type"] == "GrowMaskWithBlur"
+    assert wf["213"]["inputs"]["fill_holes"] is True
+    assert wf["213"]["inputs"]["expand"] == 0
+    assert wf["213"]["inputs"]["blur_radius"] == 0
+    assert wf["213"]["inputs"]["mask"] == ["202", 1]  # consumes the RAW SAM mask
+    # Both downstream branches consume the hole-filled mask, not raw 202.
+    assert wf["205"]["inputs"]["destination"] == ["213", 0]  # outfit (head-subtract)
+    assert wf["204"]["inputs"]["mask"] == ["213", 0]         # background (invert)
 
 
 def test_outfit_template_mask_is_a_real_wall():
@@ -121,7 +147,7 @@ def test_prepare_background_inverts_person_mask():
     # ...and inpaints the INVERTED FULL-person mask (background region), keeping
     # the subject incl. face/hair composited back untouched.
     assert wf["119"]["inputs"]["mask"] == ["204", 0]
-    assert wf["204"]["inputs"]["mask"] == ["202", 1]
+    assert wf["204"]["inputs"]["mask"] == ["213", 0]
 
 
 def test_prepare_outfit_keeps_protected_person_mask():
@@ -138,9 +164,10 @@ def test_prepare_outfit_keeps_protected_person_mask():
 
 
 def test_prepare_outfit_without_head_mask_falls_back_safely():
-    """No staged mask -> raw person mask + node 211 points at an existing file."""
+    """No staged mask -> hole-filled person mask (213, not raw 202) + node 211
+    points at an existing file."""
     wf = prepare_outfit_workflow(_load("test_final_API.json"), "src.png", "a red dress")
-    assert wf["119"]["inputs"]["mask"] == ["202", 1]
+    assert wf["119"]["inputs"]["mask"] == ["213", 0]
     assert wf["211"]["inputs"]["image"] == "src.png"
 
 
