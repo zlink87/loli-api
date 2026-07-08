@@ -32,10 +32,15 @@ ADULT_APPEARANCE_NEGATIVE = (
 )
 
 # Identity-preservation negative, for EDIT workflows (outfit/pose/background).
+# NOTE: "beautified face / airbrushed face" were intentionally REMOVED — they
+# fought the retouched POLISHED finish (below) that matches the generated hero,
+# and face identity is already guaranteed structurally (V2 stitches the face back
+# byte-exact outside the mask; pose stamps it via ReActor), so those terms only
+# suppressed the desired retouched skin on the regenerated region.
 IDENTITY_NEGATIVE = (
     "different face, altered identity, face swap, changed facial features, "
     "different person, different hairstyle, different hair color, different eye color, "
-    "different skin tone, aged, younger, beautified face, airbrushed face"
+    "different skin tone, aged, younger"
 )
 
 # Positive identity-preservation clause appended to edit prompts. {what} is the
@@ -206,9 +211,10 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
         "sources, and realistic skin with visible fine texture and pores."
     ),
     "polished": (
-        "Give the photo a professionally retouched finish: soft flattering key "
-        "light, natural true-to-life color grade, clean lightly retouched skin "
-        "that keeps real texture."
+        "Render it as an ultra-realistic professional photograph, 85mm lens, "
+        "sharp focus, professionally retouched: soft flattering key light, natural "
+        "true-to-life color grade, clean lightly retouched skin that keeps real "
+        "fine texture and pores, photorealistic and detailed."
     ),
     "studio": (
         "Give the photo a high-end portrait finish: controlled softbox lighting, "

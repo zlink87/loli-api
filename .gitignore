@@ -90,3 +90,7 @@ loli_api/logs/
 !docs/
 !docs/**
 !README.md
+
+# Local ComfyUI installs (never commit — caused a 24k-file accident 2026-07)
+ComfyUI/Loli Comfy UI/
+ComfyUI/**/standalone-env/

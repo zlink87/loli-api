@@ -11,7 +11,8 @@ from datetime import datetime
 
 from services.job_manager import Job
 from services import head_mask
-from models.enums import JobStatus
+from services.prompt_constants import apply_edit_photo_style
+from models.enums import JobStatus, PhotoStyleType
 
 # Import helpers from outfit endpoint module
 from api.v1.endpoints.outfit import (
@@ -101,8 +102,14 @@ class OutfitBackgroundWorker(BaseEditWorker):
             except Exception as e:  # noqa: BLE001 — mask is protective, not critical
                 logger.warning(f"[OUTFIT] {job.job_id} | Head mask failed: {e}")
 
-            # Step 3: Build prompt
-            prompt = build_prompt(request.outfit, request.accessories, request.nudityLevel)
+            # Step 3: Build prompt. Apply the same POLISHED retouched finish the
+            # character-GENERATION path uses, so an outfit edit keeps the hero's
+            # look (true-to-life grade, lightly retouched skin) instead of the flat
+            # default Qwen render.
+            prompt = apply_edit_photo_style(
+                build_prompt(request.outfit, request.accessories, request.nudityLevel),
+                PhotoStyleType.POLISHED,
+            )
             seed = request.seed if request.seed is not None else random.randint(1, 999_999_999)
             logger.info(f"[OUTFIT] {job.job_id} | Prompt: {prompt[:80]}... | Seed: {seed}")
 

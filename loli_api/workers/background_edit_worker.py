@@ -9,7 +9,8 @@ import logging
 from datetime import datetime
 
 from services.job_manager import Job
-from models.enums import JobStatus
+from services.prompt_constants import apply_edit_photo_style
+from models.enums import JobStatus, PhotoStyleType
 
 # Import helpers from background endpoint module
 from api.v1.endpoints.background import (
@@ -69,7 +70,7 @@ class BackgroundEditWorker(BaseEditWorker):
             )
 
             # Step 3: Build prompt
-            prompt = build_background_prompt(request.prompt)
+            prompt = apply_edit_photo_style(build_background_prompt(request.prompt), PhotoStyleType.POLISHED)
             seed = (
                 request.seed
                 if request.seed is not None

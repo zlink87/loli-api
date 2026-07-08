@@ -58,12 +58,14 @@ def test_vocab_has_no_ageon_language():
 
 
 # --- batch defaults (dressed-by-default) ---
-def test_batch_controls_defaults_to_low_nudity_and_natural_style():
+def test_batch_controls_defaults_to_low_nudity_and_polished_style():
     from models.enums import PhotoStyleType
 
     controls = BatchControls()
     assert controls.max_nudity == NudityLevel.LOW
-    assert controls.photo_style == PhotoStyleType.NATURAL
+    # Batch now defaults to POLISHED so edited items match the generated hero's
+    # retouched finish (was NATURAL, which rendered flatter).
+    assert controls.photo_style == PhotoStyleType.POLISHED
 
 
 # --- deterministic planner ---
