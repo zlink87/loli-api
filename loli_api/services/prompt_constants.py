@@ -6,6 +6,7 @@ Previously negatives were duplicated and inconsistent across workflow JSON files
 prompt assembler and the workflow preparers so every generation/edit shares the same
 anti-deformity and identity-preservation language.
 """
+import re
 from typing import Optional
 
 # Anti-deformity / quality negative. Merged from the strongest strings that were
@@ -66,21 +67,39 @@ POSE_IDENTITY_CLAUSE = (
 # Keyed by PhotoStyleType values (models/enums.py).
 # ---------------------------------------------------------------------------
 PHOTO_STYLE_TEMPLATES = {
+    # Finish-only wording. Earlier revisions claimed a genre and a setting
+    # ("editorial glamour portraits", "studio portraits on a seamless backdrop",
+    # "gentle background bokeh") and the edit/turbo models rendered that claim
+    # INTO the scene — softboxes in frame, bokeh over a kitchen, warm cast over
+    # night shots — overriding the prompt's actual environment. Styles must
+    # describe light/color/skin finish only; the scene belongs to the prompt.
+    "natural": (
+        "YOUR CONTEXT:\n"
+        "Your photographs look like real, unstaged photos.\n"
+        "Your photographs have accurate natural exposure, true-to-life color balance, "
+        "light that matches the scene's own light sources, realistic skin with visible "
+        "fine texture and pores, and backgrounds rendered sharp and true to the "
+        "described setting.\n"
+        "---\n"
+        "YOUR PHOTO:\n"
+        "{$@}"
+    ),
     "polished": (
         "YOUR CONTEXT:\n"
-        "Your photographs are professionally retouched editorial glamour portraits.\n"
-        "Your photographs have a soft flattering key light, a warm color grade, gentle "
-        "background bokeh, flawless yet natural skin, and a clean composition focused "
-        "on the subject.\n"
+        "Your photographs are professionally retouched portraits.\n"
+        "Your photographs have a soft flattering key light, a natural true-to-life "
+        "color grade, clean lightly retouched skin that keeps real texture, and a "
+        "clean composition focused on the subject, with the setting rendered exactly "
+        "as described.\n"
         "---\n"
         "YOUR PHOTO:\n"
         "{$@}"
     ),
     "studio": (
         "YOUR CONTEXT:\n"
-        "Your photographs are high-end studio portraits on a seamless backdrop.\n"
-        "Your photographs have controlled softbox lighting, crisp focus, refined warm "
-        "color grading, and a clean uncluttered background.\n"
+        "Your photographs are high-end portraits with controlled softbox lighting, "
+        "crisp focus, refined neutral color grading, and clean lightly retouched skin "
+        "that keeps real texture, with the setting rendered exactly as described.\n"
         "---\n"
         "YOUR PHOTO:\n"
         "{$@}"
@@ -108,37 +127,43 @@ PHOTO_STYLE_TEMPLATES = {
 # swapped for a matching one so the finish stays POLISHED at any hour.
 # Times absent from this map (morning/daytime/...) keep the default sentence.
 _POLISHED_DAY_LINE = (
-    "Your photographs have a soft flattering key light, a warm color grade, gentle "
-    "background bokeh, flawless yet natural skin, and a clean composition focused "
-    "on the subject.\n"
+    "Your photographs have a soft flattering key light, a natural true-to-life "
+    "color grade, clean lightly retouched skin that keeps real texture, and a "
+    "clean composition focused on the subject, with the setting rendered exactly "
+    "as described.\n"
 )
 _POLISHED_TIME_LINES = {
     "night": (
         "Your photographs are taken at night: a dark low-key nighttime environment "
-        "lit by warm practical light sources, a moody cinematic color grade, gentle "
-        "background bokeh, flawless yet natural skin, and a clean composition "
-        "focused on the subject.\n"
+        "lit by the scene's own practical light sources, a natural nighttime color "
+        "grade, clean lightly retouched skin that keeps real texture, and a clean "
+        "composition focused on the subject, with the setting rendered exactly as "
+        "described.\n"
     ),
     "evening": (
         "Your photographs are taken in the evening after dark: soft ambient dusk "
-        "light with warm artificial accents, a cinematic evening color grade, gentle "
-        "background bokeh, flawless yet natural skin, and a clean composition "
-        "focused on the subject.\n"
+        "light with the scene's own artificial accents, a natural evening color "
+        "grade, clean lightly retouched skin that keeps real texture, and a clean "
+        "composition focused on the subject, with the setting rendered exactly as "
+        "described.\n"
     ),
     "sunset": (
-        "Your photographs are taken at sunset: warm golden backlight, a rich sunset "
-        "color grade, gentle background bokeh, flawless yet natural skin, and a "
-        "clean composition focused on the subject.\n"
+        "Your photographs are taken at sunset: warm golden backlight true to the "
+        "hour, a natural sunset color grade, clean lightly retouched skin that "
+        "keeps real texture, and a clean composition focused on the subject, with "
+        "the setting rendered exactly as described.\n"
     ),
     "golden_hour": (
-        "Your photographs are taken during golden hour: warm low-angle golden light, "
-        "a rich warm color grade, gentle background bokeh, flawless yet natural skin, "
-        "and a clean composition focused on the subject.\n"
+        "Your photographs are taken during golden hour: low-angle golden light true "
+        "to the hour, a natural color grade, clean lightly retouched skin that "
+        "keeps real texture, and a clean composition focused on the subject, with "
+        "the setting rendered exactly as described.\n"
     ),
     "early_morning": (
         "Your photographs are taken in the dim early morning: soft cool dawn light, "
-        "a gentle muted color grade, gentle background bokeh, flawless yet natural "
-        "skin, and a clean composition focused on the subject.\n"
+        "a gentle muted color grade, clean lightly retouched skin that keeps real "
+        "texture, and a clean composition focused on the subject, with the setting "
+        "rendered exactly as described.\n"
     ),
 }
 
@@ -175,14 +200,20 @@ def photo_style_template(style, time_of_day=None) -> str:
 # look stays byte-identical.
 # ---------------------------------------------------------------------------
 EDIT_PHOTO_STYLE_SUFFIXES = {
+    "natural": (
+        "Keep the photo looking like a real, unstaged photo: accurate natural "
+        "exposure, true-to-life color, light that matches the scene's own light "
+        "sources, and realistic skin with visible fine texture and pores."
+    ),
     "polished": (
-        "Give the photo a professionally retouched editorial glamour finish: "
-        "soft flattering key light, warm color grade, gentle background bokeh, "
-        "flawless yet natural skin."
+        "Give the photo a professionally retouched finish: soft flattering key "
+        "light, natural true-to-life color grade, clean lightly retouched skin "
+        "that keeps real texture."
     ),
     "studio": (
-        "Give the photo a high-end studio finish: controlled softbox lighting, "
-        "crisp focus, refined warm color grading, clean uncluttered look."
+        "Give the photo a high-end portrait finish: controlled softbox lighting, "
+        "crisp focus, refined neutral color grading, clean lightly retouched skin "
+        "that keeps real texture."
     ),
     "candid_phone": "",
 }
@@ -208,9 +239,20 @@ def apply_edit_photo_style(prompt: str, style=None) -> str:
     return f"{base} {suffix}" if base else suffix
 
 
-def edit_negative(extra: Optional[str] = None) -> str:
-    """Full negative prompt for edit workflows (quality + adult + identity + optional extra)."""
+def edit_negative(extra: Optional[str] = None, nudity_level=None) -> str:
+    """
+    Full negative prompt for edit workflows (quality + adult + identity +
+    nudity suppression for the requested level + optional extra).
+
+    ``nudity_level`` accepts a NudityLevel, its string value, or None (treated
+    as 'low', matching the outfit/background prompt builders' own default) so
+    an edit never silently renders more exposed than requested.
+    """
     parts = [QUALITY_NEGATIVE, ADULT_APPEARANCE_NEGATIVE, IDENTITY_NEGATIVE]
+    key = getattr(nudity_level, "value", nudity_level) or "low"
+    suppression = NUDITY_SUPPRESSION.get(key, NUDITY_SUPPRESSION["low"])
+    if suppression:
+        parts.append(suppression)
     if extra and extra.strip():
         parts.append(extra.strip())
     return ", ".join(parts)
@@ -253,6 +295,37 @@ def generation_negative(extra: Optional[str] = None, nudity_level=None) -> str:
     if extra and extra.strip():
         parts.append(extra.strip())
     return ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Style/genre words an LLM scene-writer (Venice) reliably injects even when
+# told to describe a specific scene: generic glamour-shot and stock-photo
+# vocabulary that claims its own setting/finish ("studio", "seamless
+# backdrop", "editorial") or is pure marketing filler ("8k", "masterpiece",
+# "cinematic", "stunning"). Any of these fights the user's actual requested
+# scene and is the direct cause of e.g. a "school dance" hint rendering as a
+# plain studio backdrop with softbox lights in frame. Scene text containing
+# these is rejected outright (fall back to the raw hint) rather than
+# stripped — removing words from an LLM sentence usually breaks the grammar.
+# ---------------------------------------------------------------------------
+BANNED_STYLE_WORDS = (
+    "studio", "softbox", "backdrop", "bokeh", "editorial", "glamour",
+    "professional photography", "professional photoshoot", "photoshoot",
+    "8k", "4k", "hdr", "masterpiece", "best quality", "ultra detailed",
+    "hyper detailed", "highly detailed", "cinematic", "stunning",
+    "breathtaking", "flawless", "award winning", "trending on artstation",
+    "octane render", "unreal engine",
+)
+_BANNED_STYLE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in BANNED_STYLE_WORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def has_banned_style_words(text: str) -> bool:
+    """True if `text` contains generic glamour/stock-photo filler that claims
+    its own setting or finish instead of describing the requested scene."""
+    return bool(_BANNED_STYLE_RE.search(text or ""))
 
 
 # ---------------------------------------------------------------------------

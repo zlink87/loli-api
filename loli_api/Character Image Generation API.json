@@ -155,7 +155,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id\": \"asian-nurse-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 28,\n    \"hairStyle\": \"ponytail\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Estella\",\n    \"personality\": \"caregiver\",\n    \"relationship\": \"work_colleague\",\n    \"occupation\": \"nurse\",\n    \"kinks\": [\"slow_sensual\", \"cuddling\"],\n    \"voice\": null\n  },\n  \"context\": \"After a long shift, relaxing at home in comfortable clothes\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+              "raw": "{\n  \"id\": \"asian-nurse-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"asian\",\n    \"age\": 28,\n    \"hairStyle\": \"ponytail\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"average\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Estella\",\n    \"personality\": \"caregiver\",\n    \"relationship\": \"work_colleague\",\n    \"occupation\": \"nurse\",\n    \"kinks\": [\"slow_sensual\", \"cuddling\"],\n    \"voice\": null\n  },\n  \"context\": \"After a long shift, relaxing at home in comfortable clothes\",\n  \"output\": null,\n  \"providerHints\": null\n}"
             },
             "url": "{{base_url}}/v1/generate/image",
             "description": "Asian nurse character with all available options.\n\n**Persona:** Estella, 28yo Asian nurse with caregiver personality\n**Relationship:** Work colleague\n**Kinks:** slow_sensual, cuddling\n**Output:** Reproducible with seed 12345"
@@ -190,7 +190,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id\": \"arab-photographer-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"arab\",\n    \"age\": 35,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Layla\",\n    \"personality\": \"confidant\",\n    \"relationship\": \"friend\",\n    \"occupation\": \"photographer\",\n    \"kinks\": [\"roleplay\", \"playful_teasing\", \"dirty_talk\"],\n    \"voice\": null\n  },\n  \"context\": \"Professional photoshoot during golden hour\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+              "raw": "{\n  \"id\": \"arab-photographer-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"arab\",\n    \"age\": 35,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Layla\",\n    \"personality\": \"confidant\",\n    \"relationship\": \"friend\",\n    \"occupation\": \"photographer\",\n    \"kinks\": [\"roleplay\", \"playful_teasing\", \"dirty_talk\"],\n    \"voice\": null\n  },\n  \"context\": \"Professional photoshoot during golden hour\",\n  \"output\": null,\n  \"providerHints\": null\n}"
             },
             "url": "{{base_url}}/v1/generate/image",
             "description": "Arab photographer character with all available options.\n\n**Persona:** Layla, 35yo Arab photographer with confidant personality\n**Relationship:** Friend\n**Kinks:** roleplay, playful_teasing, dirty_talk\n**Output:** Reproducible with seed 23456"
@@ -224,7 +224,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id\": \"latina-dancer-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"latina\",\n    \"age\": 30,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"brunette\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Sofia\",\n    \"personality\": \"temptress\",\n    \"relationship\": \"mistress\",\n    \"occupation\": \"dancer\",\n    \"kinks\": [\"playful_teasing\", \"dirty_talk\"],\n    \"voice\": null\n  },\n  \"context\": \"Backstage after a salsa performance\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+              "raw": "{\n  \"id\": \"latina-dancer-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"latina\",\n    \"age\": 30,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"brunette\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Sofia\",\n    \"personality\": \"temptress\",\n    \"relationship\": \"mistress\",\n    \"occupation\": \"dancer\",\n    \"kinks\": [\"playful_teasing\", \"dirty_talk\"],\n    \"voice\": null\n  },\n  \"context\": \"Backstage after a salsa performance\",\n  \"output\": null,\n  \"providerHints\": null\n}"
             },
             "url": "{{base_url}}/v1/generate/image",
             "description": "Latina dancer character with all available options.\n\n**Persona:** Sofia, 30yo curvy Latina dancer with temptress personality\n**Relationship:** Mistress\n**Kinks:** playful_teasing, dirty_talk, hair_pulling\n**Output:** Reproducible with seed 45678"
@@ -258,7 +258,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id\": \"caucasian-fitness-coach-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"caucasian\",\n    \"age\": 26,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"blonde\",\n    \"eyeColor\": \"blue\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Emma\",\n    \"personality\": \"dominant\",\n    \"relationship\": \"boss\",\n    \"occupation\": \"fitness_coach\",\n    \"kinks\": [\"control\", \"obedience\"],\n    \"voice\": null\n  },\n  \"context\": \"At the gym wearing sports bra and leggings\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+              "raw": "{\n  \"id\": \"caucasian-fitness-coach-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"caucasian\",\n    \"age\": 26,\n    \"hairStyle\": \"straight\",\n    \"hairColor\": \"blonde\",\n    \"eyeColor\": \"blue\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Emma\",\n    \"personality\": \"dominant\",\n    \"relationship\": \"boss\",\n    \"occupation\": \"fitness_coach\",\n    \"kinks\": [\"control\", \"obedience\"],\n    \"voice\": null\n  },\n  \"context\": \"At the gym wearing sports bra and leggings\",\n  \"output\": null,\n  \"providerHints\": null\n}"
             },
             "url": "{{base_url}}/v1/generate/image",
             "description": "Caucasian fitness coach character with all available options.\n\n**Persona:** Emma, 26yo athletic blonde fitness coach with dominant personality\n**Relationship:** Boss\n**Kinks:** control, obedience, edging\n**Output:** Reproducible with seed 34567"
@@ -292,7 +292,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id\": \"black-model-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"black_afro\",\n    \"age\": 24,\n    \"hairStyle\": \"bun\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Zara\",\n    \"personality\": \"queen\",\n    \"relationship\": \"girlfriend\",\n    \"occupation\": \"model\",\n    \"kinks\": [\"oral_play\", \"spanking\"],\n    \"voice\": null\n  },\n  \"context\": \"High fashion photoshoot in studio\",\n  \"isEnhance\": true,\n  \"output\": null,\n  \"providerHints\": null\n}"
+              "raw": "{\n  \"id\": \"black-model-001\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"black_afro\",\n    \"age\": 24,\n    \"hairStyle\": \"bun\",\n    \"hairColor\": \"black\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Zara\",\n    \"personality\": \"queen\",\n    \"relationship\": \"girlfriend\",\n    \"occupation\": \"model\",\n    \"kinks\": [\"oral_play\", \"spanking\"],\n    \"voice\": null\n  },\n  \"context\": \"High fashion photoshoot in studio\",\n  \"output\": null,\n  \"providerHints\": null\n}"
             },
             "url": "{{base_url}}/v1/generate/image",
             "description": "Black model character with all available options.\n\n**Persona:** Zara, 24yo athletic Black model with queen personality\n**Relationship:** Girlfriend\n**Kinks:** oral_play, breeding, spanking\n**Output:** Reproducible with seed 56789"

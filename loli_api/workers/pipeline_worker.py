@@ -200,6 +200,7 @@ class PipelineBackgroundWorker:
         self, step_name: str, request, source_name: str, seed: int, job_id: str,
         pose_ref_name: Optional[str] = None,
         head_mask_name: Optional[str] = None,
+        is_final_step: bool = True,
     ) -> dict:
         """
         Build the ComfyUI workflow for a pipeline step, with source_name as input.
@@ -210,10 +211,12 @@ class PipelineBackgroundWorker:
         Both are computed once in ``_run_step`` so the same names feed the nodes
         and the base64 ``input.images[]`` entries.
         """
-        # Optional photographic-finish clause appended to every step's prompt so
-        # the look stays consistent through the chained re-renders. None (the
-        # interactive default) leaves prompts byte-identical to legacy behavior.
-        photo_style = getattr(request, "photoStyle", None)
+        # Optional photographic-finish clause. Applied ONLY on the last active
+        # step: earlier revisions applied it at every step, and 2-3 re-diffusions
+        # of the same "warm grade / bokeh" language each compounded the effect
+        # into oversaturated, plastic-looking output. One application at the end
+        # gives a consistent finish without the re-diffusion pileup.
+        photo_style = getattr(request, "photoStyle", None) if is_final_step else None
 
         if step_name == "pose":
             logger.info(f"[PIPELINE] {job_id} | pose | Reference: {pose_ref_name}")
@@ -238,12 +241,14 @@ class PipelineBackgroundWorker:
             return prepare_background_workflow(
                 self._outfit_template, source_name, prompt, seed=seed,
                 negative_prompt=request.negativePrompt,
+                nudity_level=request.nudityLevel,
             )
         raise RuntimeError(f"Unknown pipeline step: {step_name}")
 
     async def _run_step(
         self, step_name: str, request, source_bytes: bytes, seed: int, job_id: str,
         progress_start: float, progress_end: float,
+        is_final_step: bool = True,
     ) -> bytes:
         """
         Run one pipeline step on RunPod with source_bytes as the input image.
@@ -286,6 +291,7 @@ class PipelineBackgroundWorker:
         workflow = self._build_step_workflow(
             step_name, request, source_name, seed, job_id,
             pose_ref_name=pose_ref_name, head_mask_name=head_mask_name,
+            is_final_step=is_final_step,
         )
 
         outputs = await runpod_runner.run_workflow(
@@ -371,6 +377,7 @@ class PipelineBackgroundWorker:
                 current_bytes = await self._run_step(
                     step_name, request, current_bytes, seed, job.job_id,
                     progress_start=step_progress_start, progress_end=step_progress_end,
+                    is_final_step=(i == num_steps - 1),
                 )
 
                 logger.info(

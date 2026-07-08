@@ -40,7 +40,7 @@ class BackgroundWorker:
 
     Workflow:
     1. Get job from queue
-    2. Generate prompt (deterministic identity + Venice-written scene)
+    2. Generate prompt (deterministic identity + scene, from persona enums + raw hint)
     3. Prepare ComfyUI workflow with parameters
     4. Execute workflow and wait for completion
     5. Save output image and generate signed URL
@@ -64,7 +64,7 @@ class BackgroundWorker:
         Args:
             job_manager: Job queue and state manager
             comfyui_client: ComfyUI WebSocket client
-            prompt_generator: Venice-backed prompt generation service
+            prompt_generator: Deterministic prompt generation service
             storage_service: Local storage service
             workflow_path: Path to ComfyUI workflow JSON
             notification_service: Google Chat notification service (optional)
@@ -156,7 +156,7 @@ class BackgroundWorker:
 
         Steps:
         1. Update status to RUNNING
-        2. Generate prompt (deterministic identity + Venice-written scene)
+        2. Generate prompt (deterministic identity + scene, from persona enums + raw hint)
         3. Prepare workflow with parameters
         4. Execute workflow in ComfyUI
         5. Save output image
@@ -190,7 +190,6 @@ class BackgroundWorker:
 
             # Step 2: Generate prompt or use context directly
             context = job.request.context if hasattr(job.request, 'context') else None
-            is_enhance = job.request.isEnhance if hasattr(job.request, 'isEnhance') else True
 
             prompt_start = datetime.utcnow()
             logger.info(f"[PROMPT] {job.job_id} | START: {prompt_start.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -201,7 +200,6 @@ class BackgroundWorker:
                 progress=0.1
             )
 
-            # Token usage info (will be populated if Venice scene writing is used)
             token_usage = None
             negative_prompt = None
 
@@ -210,15 +208,12 @@ class BackgroundWorker:
             shot = getattr(job.request, "shot", None) or ShotOptions()
 
             # Deterministic assembly from persona enums (identity + framing +
-            # clothing always present). When is_enhance is True, Venice writes the
-            # scene clause from the user hint + persona vibe; otherwise the raw
-            # hint is used verbatim.
+            # clothing always present) plus the raw scene hint, verbatim.
             try:
-                character_prompt, negative_prompt, _locked, token_usage = (
+                character_prompt, negative_prompt, _locked = (
                     await self.prompt_gen.generate_generation_prompt(
                         persona=job.request.persona,
                         context=context,
-                        is_enhance=is_enhance,
                         shot=shot,
                         outfit=getattr(job.request, "outfit", None),
                         nudity_level=getattr(job.request, "nudityLevel", NudityLevel.LOW),

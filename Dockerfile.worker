@@ -30,6 +30,19 @@
 #   comfyui-reactor-node ..... ReActorFaceSwap (uncensored Codeberg build) (pose)
 #                              locks the hero's face onto the reposed body.
 #   ComfyUI-VideoHelperSuite . VHS_VideoCombine (mp4/webm encode)         (video / wan_i2v)
+#   ComfyUI-RMBG ............. ClothesSegment / SAM3Segment               (STAGED, not yet wired)
+#   ComfyUI-Inpaint-CropAndStitch  InpaintCropImproved / InpaintStitchImproved (STAGED, not yet wired)
+#
+# STAGED FOR STAGE-2 MASK/INPAINT UPGRADE (see docs/PROJECT_OVERVIEW.md or the
+# identity-lock plan notes): ComfyUI-RMBG adds garment-class masking
+# (ClothesSegment: Upper-clothes/Dress/Skirt/Pants/... instead of a whole-person
+# mask) and SAM3 (sharper edges than the current GroundingDINO+SAM ViT-H).
+# ComfyUI-Inpaint-CropAndStitch adds crop-to-mask/sample/stitch-back for
+# full-resolution garment detail. Both are installed + model-staged here so a
+# new workflow JSON variant can reference them, but NO live workflow wires them
+# in yet - building/verifying that graph needs a live ComfyUI session (every
+# workflow JSON in this repo was exported from the ComfyUI UI, not hand-typed;
+# a new multi-node graph should be authored the same way, not guessed offline).
 #
 # Removed (no live workflow references them anymore - dropping them shrinks the
 # image and removes churn/compile surface):
@@ -71,7 +84,11 @@ RUN git clone https://github.com/rgthree/rgthree-comfy.git && \
     git clone https://github.com/storyicon/comfyui_segment_anything.git && \
         git -C comfyui_segment_anything checkout ab6395596399d5048639cdab7e44ec9fae857a93 && \
     git clone https://codeberg.org/Gourieff/comfyui-reactor-node.git && \
-        git -C comfyui-reactor-node checkout 2add1139d491fefff2d3a60e52b6b2b6d5d09e5d
+        git -C comfyui-reactor-node checkout 2add1139d491fefff2d3a60e52b6b2b6d5d09e5d && \
+    git clone https://github.com/1038lab/ComfyUI-RMBG.git && \
+        git -C ComfyUI-RMBG checkout d7402513f23f58db7d56754b02a4f51a148b4941 && \
+    git clone https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch.git && \
+        git -C ComfyUI-Inpaint-CropAndStitch checkout 3617559bcb9d15ff60b24c6800701402eb2cd478
 
 # Install each node's Python requirements (pure-Python nodes need nothing). None
 # of these pin torch, so the base image's CUDA torch build is left untouched.
@@ -102,7 +119,9 @@ RUN printf '\n  text_encoders: models/text_encoders/\n  diffusion_models: models
 # them under /comfyui/models/<folder> (folder_paths.models_dir) or CWD-relative.
 # Symlink each to the network volume so the pre-staged weights are found. The
 # targets are created at runtime by the volume mount; dangling-at-build is fine.
-RUN for d in sams grounding-dino bert-base-uncased insightface facerestore_models facexlib ; do \
+# sam3/RMBG: verified against ComfyUI-RMBG's own path resolution (AILab_SAM3Segment.py
+# falls back to models_dir/sam3; AILab_ClothSegment.py hardcodes models_dir/RMBG/segformer_clothes).
+RUN for d in sams grounding-dino bert-base-uncased insightface facerestore_models facexlib sam3 RMBG ; do \
         ln -sfn "/runpod-volume/models/${d}" "/comfyui/models/${d}" ; \
     done
 

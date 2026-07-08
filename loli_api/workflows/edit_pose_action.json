@@ -161,34 +161,6 @@
       "title": "Edit Model Reference Method"
     }
   },
-  "157": {
-    "inputs": {
-      "lora_name": "2511-AnyPose-base-000006250.safetensors",
-      "strength_model": 0.7,
-      "model": [
-        "163",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "Load LoRA"
-    }
-  },
-  "159": {
-    "inputs": {
-      "lora_name": "2511-AnyPose-helper-00006000.safetensors",
-      "strength_model": 0.7,
-      "model": [
-        "163",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "Load LoRA"
-    }
-  },
   "163": {
     "inputs": {
       "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
@@ -208,8 +180,8 @@
       "swap_model": "inswapper_128.onnx",
       "facedetection": "retinaface_resnet50",
       "face_restore_model": "codeformer-v0.1.0.pth",
-      "face_restore_visibility": 1,
-      "codeformer_weight": 0.5,
+      "face_restore_visibility": 0.8,
+      "codeformer_weight": 0.25,
       "detect_gender_input": "no",
       "detect_gender_source": "no",
       "input_faces_index": "0",

@@ -392,7 +392,7 @@
             "header": [{"key": "Content-Type", "value": "application/json"}],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id\": \"my-custom-request-id\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"caucasian\",\n    \"age\": 32,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"redhead\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Victoria\",\n    \"personality\": \"dominant\",\n    \"relationship\": \"boss\",\n    \"occupation\": \"boss_ceo\",\n    \"kinks\": [\"control\", \"dirty_talk\", \"roleplay\"],\n    \"voice\": \"sultry\"\n  },\n  \"context\": \"Executive office with city view at sunset\",\n  \"isEnhance\": true,\n  \"output\": {\n    \"aspectRatio\": \"2:3\",\n    \"resolution\": \"944x1408\",\n    \"seed\": 42,\n    \"n\": 1\n  },\n  \"providerHints\": {\n    \"model\": \"flux\",\n    \"provider\": \"comfyui\"\n  }\n}"
+              "raw": "{\n  \"id\": \"my-custom-request-id\",\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"caucasian\",\n    \"age\": 32,\n    \"hairStyle\": \"curly\",\n    \"hairColor\": \"redhead\",\n    \"eyeColor\": \"green\",\n    \"bodyType\": \"curvy\",\n    \"breastSize\": \"large\",\n    \"name\": \"Victoria\",\n    \"personality\": \"dominant\",\n    \"relationship\": \"boss\",\n    \"occupation\": \"boss_ceo\",\n    \"kinks\": [\"control\", \"dirty_talk\", \"roleplay\"],\n    \"voice\": \"sultry\"\n  },\n  \"context\": \"Executive office with city view at sunset\",\n  \"output\": {\n    \"aspectRatio\": \"2:3\",\n    \"resolution\": \"944x1408\",\n    \"seed\": 42,\n    \"n\": 1\n  },\n  \"providerHints\": {\n    \"model\": \"flux\",\n    \"provider\": \"comfyui\"\n  }\n}"
             },
             "url": {
               "raw": "{{base_url}}/v1/generate/image",
@@ -458,7 +458,7 @@
             "header": [{"key": "Content-Type", "value": "application/json"}],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"latina\",\n    \"age\": 28,\n    \"hairStyle\": \"short\",\n    \"hairColor\": \"brunette\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Maria\",\n    \"occupation\": \"lifeguard\"\n  },\n  \"context\": \"Beach at sunset\",\n  \"isEnhance\": false\n}"
+              "raw": "{\n  \"persona\": {\n    \"style\": \"realistic\",\n    \"ethnicity\": \"latina\",\n    \"age\": 28,\n    \"hairStyle\": \"short\",\n    \"hairColor\": \"brunette\",\n    \"eyeColor\": \"brown\",\n    \"bodyType\": \"athletic\",\n    \"breastSize\": \"medium\",\n    \"name\": \"Maria\",\n    \"occupation\": \"lifeguard\"\n  },\n  \"context\": \"Beach at sunset\"\n}"
             },
             "url": {
               "raw": "{{base_url}}/v1/generate/image",

@@ -51,7 +51,7 @@ def test_source_is_always_hero_photo():
 def test_photo_style_threaded_from_controls():
     char = _character()
     req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
-    assert req.photoStyle == PhotoStyleType.POLISHED  # batch default
+    assert req.photoStyle == PhotoStyleType.NATURAL  # batch default (dressed-by-default, no glamour suffix)
     controls = BatchControls(photo_style=PhotoStyleType.CANDID_PHONE)
     req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), controls)
     assert req.photoStyle == PhotoStyleType.CANDID_PHONE

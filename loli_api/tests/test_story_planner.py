@@ -57,6 +57,15 @@ def test_vocab_has_no_ageon_language():
         assert not any(b in low for b in banned), f"age-down language in: {text}"
 
 
+# --- batch defaults (dressed-by-default) ---
+def test_batch_controls_defaults_to_low_nudity_and_natural_style():
+    from models.enums import PhotoStyleType
+
+    controls = BatchControls()
+    assert controls.max_nudity == NudityLevel.LOW
+    assert controls.photo_style == PhotoStyleType.NATURAL
+
+
 # --- deterministic planner ---
 def test_deterministic_is_reproducible():
     char = _character()
@@ -119,6 +128,55 @@ def test_validate_and_repair_clamps_nudity():
     )
     out = validate_and_repair([scene], char, 1, BatchControls(max_nudity=NudityLevel.MEDIUM, base_seed=1))
     assert out[0].nudityLevel == NudityLevel.MEDIUM
+
+
+def test_validate_and_repair_enforces_beat_pool_coherence():
+    """
+    An out-of-pool combination (e.g. an LLM planner going rogue) is repaired
+    to something from THAT beat position's own hand-authored pool, never left
+    as an incoherent pairing like a bikini in an office beat.
+    """
+    char = _character(occupation="nurse")  # (morning_home, on_the_ward, evening_unwind)
+    controls = BatchControls(base_seed=7)
+    # Beat 3 (global_index 3) is the first "on_the_ward" beat -> hospital_ward
+    # + nurse_uniform only. Feed it something from a completely different pool.
+    bad = SceneSpec(
+        arc_id="x", arc_title="X", beat_index=0, global_index=3, beat_description="b",
+        pose=PoseType.ALL_FOURS, outfit=OutfitType.BIKINI, nudityLevel=NudityLevel.LOW,
+        location=LocationType.BEACH, time_of_day=TimeOfDayType.NIGHT, lighting=LightingType.NEON,
+    )
+    filler = [
+        SceneSpec(arc_id="x", arc_title="X", beat_index=i, global_index=i, beat_description="b",
+                  location=LocationType.HOME_LIVING_ROOM)
+        for i in range(3)
+    ]
+    out = validate_and_repair(filler + [bad], char, 6, controls)
+    repaired = out[3]
+    assert repaired.location == LocationType.HOSPITAL_WARD
+    assert repaired.outfit == OutfitType.NURSE_UNIFORM
+    # Reproducible: repairing the same input twice gives the same result.
+    out2 = validate_and_repair(filler + [bad], char, 6, controls)
+    assert out2[3].outfit == repaired.outfit and out2[3].location == repaired.location
+
+
+def test_manual_scenes_are_not_coherence_repaired():
+    """
+    Manual/admin-supplied scenes are an intentional exact override, not a
+    planner guess — validate_and_repair must NOT force them into a beat's
+    hand-authored pool (enforce_beat_pool=False), even though other repairs
+    (nudity ceiling, allow/block) still apply.
+    """
+    char = _character(occupation="nurse")
+    controls = BatchControls(base_seed=1)
+    # A bikini at the beach in beat position 3 (the hospital-ward slot) would
+    # be repaired away if coherence enforcement ran — it must survive here.
+    manual_scene = SceneSpec(
+        arc_id="manual", arc_title="Manual", beat_index=0, global_index=3, beat_description="b",
+        outfit=OutfitType.BIKINI, location=LocationType.BEACH,
+    )
+    out = validate_and_repair([manual_scene], char, 1, controls, enforce_beat_pool=False)
+    assert out[0].outfit == OutfitType.BIKINI
+    assert out[0].location == LocationType.BEACH
 
 
 # --- LLM output repair (offline) ---

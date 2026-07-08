@@ -142,4 +142,15 @@ download_file "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/mod
 download_file "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth" "facexlib"
 download_file "https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth" "facexlib"
 
+# 9. STAGE-2 MASK UPGRADE — ComfyUI-RMBG (garment-class masks + SAM3). Staged
+# for a future workflow variant; no live workflow references these yet (see
+# Dockerfile.worker). Folder names MUST match the Dockerfile.worker symlinks
+# (sam3, RMBG) and were verified against ComfyUI-RMBG's own path resolution:
+#   AILab_SAM3Segment.py  -> falls back to <models_dir>/sam3/sam3.pt
+#   AILab_ClothSegment.py -> hardcodes <models_dir>/RMBG/segformer_clothes/
+download_file "https://huggingface.co/1038lab/sam3/resolve/main/sam3.pt" "sam3"
+download_file "https://huggingface.co/1038lab/segformer_clothes/resolve/main/config.json" "RMBG/segformer_clothes"
+download_file "https://huggingface.co/1038lab/segformer_clothes/resolve/main/model.safetensors" "RMBG/segformer_clothes"
+download_file "https://huggingface.co/1038lab/segformer_clothes/resolve/main/preprocessor_config.json" "RMBG/segformer_clothes"
+
 echo -e "${GREEN}All downloads finished!${NC}"

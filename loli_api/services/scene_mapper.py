@@ -16,6 +16,7 @@ from models.scene import SceneSpec
 from models.requests import PipelineEditRequest
 from services import scene_vocab as sv
 from services import attribute_phrases as ap
+from services import prompt_constants as pc
 
 _NUDITY_LADDER = [NudityLevel.LOW, NudityLevel.MEDIUM, NudityLevel.HIGH]
 
@@ -48,6 +49,25 @@ def _effective_outfit(scene: SceneSpec, controls: BatchControls) -> Optional[Out
     return outfit
 
 
+def _narrative_free_text(scene: SceneSpec) -> Optional[str]:
+    """
+    The beat's narrative caption (beat_description), folded into the
+    background prompt so the planned scene actually reaches the render
+    instead of being silently discarded down to bare location/time/lighting
+    phrases — previously beat_description was only ever used as a gallery
+    caption. Rejected (not appended) if it contains generic glamour/stock-
+    photo filler (see prompt_constants.has_banned_style_words): that filler
+    fights the scene's own location/lighting attributes rather than
+    describing it, and stripping individual words out of an already-written
+    sentence tends to leave broken grammar, so the safer move is to skip it
+    entirely and keep the vocab-only background text.
+    """
+    text = (scene.beat_description or "").strip()
+    if not text or pc.has_banned_style_words(text):
+        return None
+    return text
+
+
 def resolve_seed(controls: BatchControls, scene_index: int) -> Optional[int]:
     """Per-item seed from the batch seed strategy."""
     strategy = _val(controls.seed_strategy)
@@ -76,6 +96,7 @@ def scene_to_pipeline_request(
         lighting=scene.lighting,
         mood_kinks=scene.mood_kinks,
         mood_personality=scene.mood_personality,
+        free_text=_narrative_free_text(scene),
     )
 
     # Guarantee at least one active step (PipelineEditRequest requires >=1).

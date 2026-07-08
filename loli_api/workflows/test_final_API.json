@@ -202,7 +202,7 @@
   },
   "121": {
     "inputs": {
-      "noise_mask": false,
+      "noise_mask": true,
       "positive": [
         "41",
         0
@@ -299,7 +299,7 @@
   "116": {
     "inputs": {
       "images": [
-        "210",
+        "220",
         0
       ],
       "filename_prefix": "edit_out"
@@ -307,6 +307,29 @@
     "class_type": "SaveImage",
     "_meta": {
       "title": "Save Image"
+    }
+  },
+  "220": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "resize_source": true,
+      "destination": [
+        "108",
+        0
+      ],
+      "source": [
+        "118",
+        0
+      ],
+      "mask": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "ImageCompositeMasked",
+    "_meta": {
+      "title": "Composite-back (edited pixels only inside mask)"
     }
   },
   "205": {
@@ -330,7 +353,7 @@
   },
   "210": {
     "inputs": {
-      "enabled": true,
+      "enabled": false,
       "input_image": [
         "118",
         0

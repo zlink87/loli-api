@@ -152,28 +152,34 @@ def prepare_outfit_workflow(
     """
     Prepare the outfit workflow with injected parameters.
 
-    Identity is preserved in layers (all evidence-verified on the worker):
-      1. Node 202 segments the PERSON — the edit-guidance region (green overlay).
-         The person mask (not garment terms) is deliberate: it is the only config
-         that works BOTH for undressing and for dressing a nude source.
+    Identity is preserved in layers:
+      1. Node 202 segments the PERSON — the edit region. The person mask (not
+         garment terms) is deliberate: it is the only config that works BOTH
+         for undressing and for dressing a nude source.
       2. The SERVER-COMPUTED head-protect mask (``head_mask_name`` -> node 211,
          see services/head_mask.py) is subtracted (205) so the head is never in
          the edit region. Computed with YuNet server-side because on-worker face
          detection (GroundingDINO grounding, insightface) fails on stylized hero
          renders — the failure that repainted whole identities in production.
-      3. InpaintModelConditioning (121) runs with noise_mask=false: the mask is
-         GUIDANCE via the green overlay, not a hard latent wall — the wall
-         produced visible halo seams; identity outside the green region is held
-         by Qwen-Image-Edit's reference-following (the original proven behavior).
-      4. ReActorFaceSwap (210) re-stamps the ORIGINAL face for photoreal sources
-         (no-ops silently on stylized faces it cannot detect).
+      3. InpaintModelConditioning (121) runs with noise_mask=true: the sampler
+         only denoises the masked latent region. Node 220 (ImageCompositeMasked)
+         then pastes the sampled pixels back onto the ORIGINAL source image using
+         the same mask, so every pixel outside the (feathered) mask — including
+         the face — is byte-identical to the source. This replaced an earlier
+         noise_mask=false config where the mask was merely a green-overlay hint
+         and the sampler silently re-diffused the entire frame.
+      4. ReActorFaceSwap (210) is disabled on this path: with a real
+         composite-back the face is never touched by the sampler, so a face-swap
+         pass is redundant and was the source of a "waxy"/over-restored look.
 
     Key nodes in test_final_API.json:
         108    LoadImage             -> inputs.image   (source image filename)
         211    LoadImage             -> inputs.image   (head-protect mask filename)
         16     easy positive         -> inputs.positive (clothing change prompt)
         106    KSampler              -> inputs.seed
+        117    easy negative         -> inputs.negative (quality/adult/identity/nudity)
         119    GrowMaskWithBlur      -> inputs.expand/blur_radius (mask feathering)
+        220    ImageCompositeMasked  -> pastes sampled pixels back onto the source
 
     Args:
         template: Base workflow template
@@ -200,10 +206,10 @@ def prepare_outfit_workflow(
         wf["16"]["inputs"]["positive"] = prompt
         logger.debug(f"Set node 16 prompt: {prompt[:50]}...")
 
-    # Node 117: Negative prompt (quality + adult + identity preservation + user override)
+    # Node 117: Negative prompt (quality + adult + identity + nudity suppression + user override)
     if "117" in wf:
-        wf["117"]["inputs"]["negative"] = pc.edit_negative(negative_prompt)
-        logger.debug("Set node 117 negative (quality + adult + identity)")
+        wf["117"]["inputs"]["negative"] = pc.edit_negative(negative_prompt, nudity_level=nudity_level)
+        logger.debug("Set node 117 negative (quality + adult + identity + nudity)")
 
     # Node 106: Seed
     if seed is not None and "106" in wf:
@@ -225,17 +231,20 @@ def prepare_outfit_workflow(
             logger.debug("No head mask staged; using raw person mask")
 
     # Mask target: the template's node 202 segments "person" for EVERY direction —
-    # evidence-verified as the only config that handles both undressing (garments
-    # are on the body) and dressing a nude source (garment-term masks find nothing
-    # and produce patchy garbage). The head is protected by the subtracted
-    # server-computed mask (node 211/212/205), and ReActorFaceSwap (210) re-stamps
-    # the original face on photoreal sources.
-    if nudity_level == NudityLevel.LOW:
-        # Dressing transitions blend smoother with a wider, softer mask edge.
-        if "119" in wf:
-            wf["119"]["inputs"]["expand"] = 10
-            wf["119"]["inputs"]["blur_radius"] = 8
-            logger.debug("Increased mask grow for dressing transition")
+    # the only config that handles both undressing (garments are on the body) and
+    # dressing a nude source (garment-term masks find nothing and produce patchy
+    # garbage). The head is protected by the subtracted server-computed mask
+    # (node 211/212/205).
+    #
+    # Widen the mask edge so new garment silhouettes (collars, straps, hemlines,
+    # sleeves) have room to render without being clipped at the mask boundary.
+    # Safe at any nudity level now that node 121 does a real masked edit with
+    # pixel-exact composite-back (node 220) — over-masking no longer risks
+    # unmasked drift the way it did under the old green-overlay-only config.
+    if "119" in wf:
+        wf["119"]["inputs"]["expand"] = 20
+        wf["119"]["inputs"]["blur_radius"] = 10
+        logger.debug("Increased mask grow/blur for outfit silhouette headroom")
 
     return wf
 

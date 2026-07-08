@@ -88,8 +88,8 @@ async def create_generate_job(
     Create a new image generation job.
 
     The job is queued immediately and processed asynchronously by the background worker.
-    The identity/framing prompt is assembled deterministically from the persona; when
-    isEnhance is True, Venice (LLM) writes the scene from the context hint.
+    The prompt (identity, framing, clothing, and scene) is assembled deterministically
+    from the persona and the `context` hint, used verbatim.
 
     **Request Body:**
     - `persona` (required): Character persona configuration

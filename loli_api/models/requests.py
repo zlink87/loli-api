@@ -267,9 +267,8 @@ class GenerateImageRequest(BaseModel):
     context: Optional[str] = Field(
         default=None,
         max_length=2000,
-        description="Optional scene hint (e.g., 'After a long shift, relaxing at home'). "
-                    "When isEnhance is True, Venice writes a full scene from this hint + "
-                    "the persona; when False it is used verbatim."
+        description="Optional scene hint (e.g., 'After a long shift, relaxing at home'), "
+                    "used verbatim in the assembled prompt."
     )
     outfit: Optional[OutfitType] = Field(
         default=None,
@@ -286,11 +285,6 @@ class GenerateImageRequest(BaseModel):
         default=None,
         max_length=5,
         description="List of accessories to add (max 5)"
-    )
-    isEnhance: bool = Field(
-        default=True,
-        description="If True, Venice writes the scene from the context hint + persona. "
-                    "If False, the context hint is sent verbatim (deterministic assembly)."
     )
     output: Optional[OutputOptions] = Field(
         default=None,
@@ -324,7 +318,6 @@ class GenerateImageRequest(BaseModel):
                     "occupation": "nurse"
                 },
                 "context": "After a long shift, relaxing at home",
-                "isEnhance": True,
                 "shot": {
                     "framing": "waist_up",
                     "angle": "eye_level",

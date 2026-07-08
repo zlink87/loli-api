@@ -6,7 +6,7 @@ Base URL: discovered by frontends from Supabase `app_config.api_base_url`
 Interactive Swagger docs: `GET /docs` · OpenAPI JSON: `GET /openapi.json`
 
 All request/response field casing below is **exact** — the API mixes `snake_case`
-(`source_image`, `pipeline_order`) and `camelCase` (`nudityLevel`, `isEnhance`,
+(`source_image`, `pipeline_order`) and `camelCase` (`nudityLevel`,
 `negativePrompt`). Send them verbatim.
 
 ---
@@ -81,8 +81,7 @@ Generate a new character image from persona attributes. **202** on accept.
 |---|---|---|---|
 | `id` | string | No | Client tracking id |
 | `persona` | PersonaOptions | **Yes** | See below |
-| `context` | string | No | Free-text scene context (≤2000) |
-| `isEnhance` | bool | No | Default **true** — polish prompt with xAI Grok (falls back to deterministic assembler if no key) |
+| `context` | string | No | Free-text scene context (≤2000), used verbatim in the assembled prompt |
 | `output` | OutputOptions | No | `{ seed?, n? (1–4, default 1), aspectRatio?, resolution? }` |
 
 **PersonaOptions:**

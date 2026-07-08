@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth.dependencies import get_current_user
-from models.enums import JobStatus
+from models.enums import JobStatus, NudityLevel
 from models.requests import BackgroundEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
@@ -99,14 +99,19 @@ def prepare_background_workflow(
     prompt: str,
     seed: Optional[int] = None,
     negative_prompt: Optional[str] = None,
+    nudity_level: Optional[NudityLevel] = None,
 ) -> dict:
     """
     Prepare the environment/scene workflow with injected parameters.
 
     Uses the same template as outfit (test_final_API.json), but masks the
-    *person* and inverts it so the inpaint region is the BACKGROUND. The person
-    (face, hair, body, outfit) is composited back untouched from the original
-    encode, so identity cannot drift while the scene changes.
+    *person* and inverts it so the inpaint region is the BACKGROUND. Node 121
+    runs with noise_mask=true (sampler only touches the inverted/background
+    region) and node 220 composites the sampled pixels back onto the original
+    source using that same mask, so the person (face, hair, body, outfit) is
+    byte-identical to the source and cannot drift while the scene changes.
+    ReActorFaceSwap (210) is disabled — redundant once composite-back holds
+    the face pixels exactly, and was a source of over-restored/waxy skin.
 
     Rewiring vs. the outfit default:
         202  GroundingDinoSAMSegment -> prompt = the PERSON (segment the subject)
@@ -117,6 +122,7 @@ def prepare_background_workflow(
         108  LoadImage         -> inputs.image    (source image filename)
         16   easy positive     -> inputs.positive (scene change prompt)
         106  KSampler          -> inputs.seed
+        117  easy negative     -> inputs.negative (quality/adult/identity/nudity)
         119  GrowMaskWithBlur  -> expand/blur_radius (mask feathering)
 
     Args:
@@ -125,6 +131,8 @@ def prepare_background_workflow(
         prompt: Positive prompt (already built via build_background_prompt)
         seed: Optional seed value
         negative_prompt: Optional negative prompt override
+        nudity_level: Optional nudity level (keeps exposure from creeping up
+            across a chained outfit->background->pose batch item)
 
     Returns:
         Prepared workflow dict
@@ -141,10 +149,10 @@ def prepare_background_workflow(
         wf["16"]["inputs"]["positive"] = prompt
         logger.debug(f"Set node 16 prompt: {prompt[:50]}...")
 
-    # Node 117: Negative prompt (quality + identity preservation + user override)
+    # Node 117: Negative prompt (quality + identity preservation + nudity + user override)
     if "117" in wf:
-        wf["117"]["inputs"]["negative"] = pc.edit_negative(negative_prompt)
-        logger.debug("Set node 117 negative (quality + identity)")
+        wf["117"]["inputs"]["negative"] = pc.edit_negative(negative_prompt, nudity_level=nudity_level)
+        logger.debug("Set node 117 negative (quality + identity + nudity)")
 
     # Node 106: Seed
     if seed is not None and "106" in wf:

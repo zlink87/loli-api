@@ -127,6 +127,42 @@ class StoryPlanner(ABC):
 
 
 # ---------------------------------------------------------------------------
+# Beat-pool filtering — shared by the deterministic planner (picks from these
+# pools) and the Venice planner (must pick from these SAME pools). Keeping one
+# copy of the filter logic is what guarantees both providers can only ever
+# produce combinations that already appear together in a hand-authored
+# BeatTemplate (services/story_templates.py) — an outfit can never be paired
+# with a location/pose it wasn't authored alongside.
+# ---------------------------------------------------------------------------
+def _allowed_pose_pool(tmpl, controls: BatchControls) -> List[PoseType]:
+    return [p for p in tmpl.pose_pool if p not in (controls.blocked_poses or [])]
+
+
+def _allowed_outfit_pool(tmpl, controls: BatchControls) -> List[OutfitType]:
+    pool = []
+    for o in tmpl.outfit_pool:
+        if controls.sfw_only and o == OutfitType.NAKED:
+            continue
+        if o in (controls.blocked_outfits or []):
+            continue
+        if controls.allowed_outfits and o not in controls.allowed_outfits:
+            continue
+        pool.append(o)
+    return pool
+
+
+def _allowed_location_pool(tmpl, controls: BatchControls) -> List[LocationType]:
+    pool = []
+    for loc in tmpl.location_pool:
+        if loc in (controls.blocked_locations or []):
+            continue
+        if controls.allowed_locations and loc not in controls.allowed_locations:
+            continue
+        pool.append(loc)
+    return pool
+
+
+# ---------------------------------------------------------------------------
 # Deterministic planner (always available, seedable, NSFW-safe)
 # ---------------------------------------------------------------------------
 class DeterministicScenePlanner(StoryPlanner):
@@ -192,33 +228,19 @@ class DeterministicScenePlanner(StoryPlanner):
         return [(arc, size) for arc, size in zip(chosen, sizes) if size > 0]
 
     def _pick_pose(self, tmpl, rng, like_kw, dislike_kw, controls):
-        pool = [p for p in tmpl.pose_pool if p not in (controls.blocked_poses or [])]
+        pool = _allowed_pose_pool(tmpl, controls)
         if not pool:
             return None
         return _weighted_pick(pool, rng, like_kw, dislike_kw, {})
 
     def _pick_outfit(self, tmpl, rng, like_kw, dislike_kw, controls):
-        pool = []
-        for o in tmpl.outfit_pool:
-            if controls.sfw_only and o == OutfitType.NAKED:
-                continue
-            if o in (controls.blocked_outfits or []):
-                continue
-            if controls.allowed_outfits and o not in controls.allowed_outfits:
-                continue
-            pool.append(o)
+        pool = _allowed_outfit_pool(tmpl, controls)
         if not pool:
             return None  # skip outfit step for this scene
         return _weighted_pick(pool, rng, like_kw, dislike_kw, {})
 
     def _pick_location(self, tmpl, rng, like_kw, dislike_kw, controls):
-        pool = []
-        for loc in tmpl.location_pool:
-            if loc in (controls.blocked_locations or []):
-                continue
-            if controls.allowed_locations and loc not in controls.allowed_locations:
-                continue
-            pool.append(loc)
+        pool = _allowed_location_pool(tmpl, controls)
         if not pool:
             # Location is required — fall back to an allowed/neutral location.
             if controls.allowed_locations:
@@ -230,6 +252,36 @@ class DeterministicScenePlanner(StoryPlanner):
                     if loc not in (controls.blocked_locations or [])
                 ] or [LocationType.HOME_LIVING_ROOM]
         return _weighted_pick(pool, rng, like_kw, dislike_kw, sv.LOCATION_PHRASES)
+
+
+@dataclass(frozen=True)
+class _BeatSlot:
+    """One position in the beat sequence: which arc it belongs to, and the
+    hand-authored BeatTemplate (pools) that position must draw from."""
+    arc_id: str
+    arc_title: str
+    beat_in_arc: int
+    tmpl: "st.BeatTemplate"
+
+
+def _beat_slots(character: Character, count: int, controls: BatchControls) -> List[_BeatSlot]:
+    """
+    The ordered sequence of beat slots (one per global beat index, 0..count-1)
+    that the deterministic planner would use for this character/count/controls
+    — same arc selection, same sizing, same occupation lookup. Shared by the
+    Venice prompt builder (presents each beat's own allowed pools) and
+    validate_and_repair (enforces every provider's picks stay inside them), so
+    "which combinations are possible" is defined in exactly one place
+    (services/story_templates.py) regardless of which planner ran.
+    """
+    occ = _val(character.persona.occupation)
+    arcs = st.ARC_TEMPLATES.get(occ, st.GENERIC_ARCS)
+    sized = DeterministicScenePlanner._select_and_size_arcs(arcs, count, controls.arc_count)
+    slots: List[_BeatSlot] = []
+    for arc, beat_count in sized:
+        for b in range(beat_count):
+            slots.append(_BeatSlot(arc.arc_id, arc.arc_title, b, arc.beats[b % len(arc.beats)]))
+    return slots
 
 
 def _auto_arc_count(count: int) -> int:
@@ -306,7 +358,13 @@ class ManualScenePlanner(StoryPlanner):
 # Venice planner (primary)
 # ---------------------------------------------------------------------------
 PLANNER_SYSTEM_PROMPT = """You are a story director for a photorealistic NSFW image series of ONE fixed character.
-You plan a sequence of image "beats" grouped into a few narrative ARCS (e.g. a day in the life, or an escalation).
+The user message lists the exact sequence of ARCS and BEATS to fill in. Each beat gives
+you a short "vibe" hint and that beat's OWN allowed pose/outfit/location/time_of_day/
+lighting options — these lists differ per beat because they were hand-authored to be
+scene-coherent (e.g. a nurse uniform only appears in a hospital-ward beat, a bikini only
+in a beach/pool/golden-hour beat). This is what keeps the batch from pairing e.g. a
+cocktail dress with a gym beat, or a bodycon dress with an "eating dinner" beat that
+would make no sense together.
 
 You must output ONLY valid JSON of the form:
 {"arcs":[{"arc_id":"snake_case_id","arc_title":"Short title","beats":[BEAT, ...]}, ...]}
@@ -318,9 +376,12 @@ Each BEAT is:
  "mood_kinks":[<kink>...]|null,"mood_personality":<personality>|null}
 
 HARD RULES:
-- Choose values ONLY from the allowed lists provided. Do NOT invent values.
+- Output the SAME arcs and the SAME number of beats per arc, in the SAME order, as given in the user message.
+- For each beat, choose pose/outfit/location/time_of_day/lighting ONLY from THAT beat's own allowed lists in the user message. Never borrow a value from a different beat's list, never invent a value outside any list. If a beat's list is empty/"(none allowed)", output null for that field (pose/outfit only — location/time_of_day/lighting always have at least one option).
+- accessories/mood_kinks/mood_personality are chosen from the shared lists at the end of the user message (not beat-specific).
+- Write beat_description as a concrete, vivid sentence that matches the attributes YOU picked for that beat — freely rephrase the beat's "vibe" hint in your own words, but never contradict your own location/outfit/pose choice.
 - Do NOT describe the person's face, age, ethnicity, hair, eyes, body, or breasts anywhere. Only scene attributes.
-- Make the sequence feel organic and coherent for THIS character's profession, personality, likes and dislikes.
+- Make the sequence feel organic for THIS character's personality, likes and dislikes within the given options.
 - Avoid anything matching the character's dislikes.
 - nudityLevel must never exceed the stated maximum.
 - Output the requested number of beats total across all arcs. No prose, no markdown, only the JSON object.
@@ -356,32 +417,52 @@ class VeniceScenePlanner(StoryPlanner):
             f"likes: {', '.join(character.likes) or 'none given'}",
             f"dislikes: {', '.join(character.dislikes) or 'none given'}",
         ]
-        allowed = {
-            "pose": _allowed_values(PoseType, blocked=controls.blocked_poses),
-            "outfit": _allowed_values(
-                OutfitType,
-                allowed=controls.allowed_outfits,
-                blocked=(controls.blocked_outfits or [])
-                + ([OutfitType.NAKED] if controls.sfw_only else []),
-            ),
+        max_nudity = "low" if controls.sfw_only else _val(controls.max_nudity)
+
+        # Per-beat menus from the SAME hand-authored pools + filtering the
+        # deterministic planner draws from (see _beat_slots/_allowed_*_pool) —
+        # Venice picks WITHIN a beat's own pools instead of freely combining
+        # any outfit with any location/pose from the full enum.
+        slots = _beat_slots(character, count, controls)
+        n_arcs = len({slot.arc_id for slot in slots}) or (controls.arc_count or _auto_arc_count(count))
+
+        beat_lines: List[str] = []
+        current_arc: Optional[str] = None
+        for i, slot in enumerate(slots):
+            if slot.arc_id != current_arc:
+                current_arc = slot.arc_id
+                beat_lines.append(f'\nARC "{slot.arc_id}" ("{slot.arc_title}"):')
+            pose_pool = [_val(p) for p in _allowed_pose_pool(slot.tmpl, controls)]
+            outfit_pool = [_val(o) for o in _allowed_outfit_pool(slot.tmpl, controls)]
+            location_pool = [_val(loc) for loc in _allowed_location_pool(slot.tmpl, controls)]
+            if not location_pool:
+                fallback = controls.allowed_locations[0] if controls.allowed_locations else LocationType.HOME_LIVING_ROOM
+                location_pool = [_val(fallback)]
+            time_pool = [_val(t) for t in slot.tmpl.time_pool]
+            lighting_pool = [_val(li) for li in slot.tmpl.lighting_pool]
+            beat_lines.append(
+                f'  BEAT {i + 1} (vibe: "{slot.tmpl.beat_description}"):\n'
+                f'    pose: {", ".join(pose_pool) or "(none allowed - output null)"}\n'
+                f'    outfit: {", ".join(outfit_pool) or "(none allowed - output null)"}\n'
+                f'    location: {", ".join(location_pool)}\n'
+                f'    time_of_day: {", ".join(time_pool)}\n'
+                f'    lighting: {", ".join(lighting_pool)}'
+            )
+
+        shared = {
             "accessory": _allowed_values(AccessoryType),
-            "location": _allowed_values(
-                LocationType, allowed=controls.allowed_locations, blocked=controls.blocked_locations
-            ),
-            "time_of_day": _allowed_values(TimeOfDayType),
-            "lighting": _allowed_values(LightingType),
             "kink": _allowed_values(KinkType),
             "personality": _allowed_values(PersonalityType),
         }
-        max_nudity = "low" if controls.sfw_only else _val(controls.max_nudity)
-        n_arcs = controls.arc_count or _auto_arc_count(count)
         return (
             f"CHARACTER:\n" + "\n".join(summary_parts) + "\n\n"
-            f"PLAN: {count} beats total, grouped into about {n_arcs} arcs, "
+            f"PLAN: {count} beats total, grouped into {n_arcs} arcs, "
             f"escalation style '{_val(controls.escalation)}'.\n"
             f"Maximum nudityLevel allowed: {max_nudity}.\n\n"
-            f"ALLOWED VALUES (choose only from these):\n"
-            + "\n".join(f"{k}: {', '.join(v)}" for k, v in allowed.items())
+            f"BEATS (fill in exactly these, in this order — see HARD RULES):"
+            + "\n".join(beat_lines) + "\n\n"
+            f"SHARED ALLOWED VALUES (any beat, not beat-specific):\n"
+            + "\n".join(f"{k}: {', '.join(v)}" for k, v in shared.items())
         )
 
     async def _call_venice(self, user_prompt: str) -> Optional[str]:
@@ -513,16 +594,62 @@ for _m in (ap.ETHNICITY_PHRASES, ap.HAIR_COLOR_PHRASES, ap.HAIR_STYLE_PHRASES, a
         _IDENTITY_TOKENS.add(_k.replace("_", " "))
 
 
+def _enforce_beat_pool(s: SceneSpec, slot: _BeatSlot, controls: BatchControls, seed: int) -> SceneSpec:
+    """
+    Repair `s` (already a copy) so pose/outfit/location/time_of_day/lighting
+    stay within `slot`'s own allowed pools. Off-pool values are re-picked with
+    a seeded RNG (reproducible across repeated repairs of the same beat)
+    rather than cleared, since a concrete in-pool scene is always preferable
+    to a missing one. pose/outfit are only checked when non-None — the
+    planner may legitimately skip either step for a beat.
+    """
+    rng = random.Random(seed)
+
+    pose_pool = _allowed_pose_pool(slot.tmpl, controls)
+    if s.pose is not None and s.pose not in pose_pool:
+        s.pose = rng.choice(pose_pool) if pose_pool else None
+
+    outfit_pool = _allowed_outfit_pool(slot.tmpl, controls)
+    if s.outfit is not None and s.outfit not in outfit_pool:
+        s.outfit = rng.choice(outfit_pool) if outfit_pool else None
+
+    location_pool = _allowed_location_pool(slot.tmpl, controls)
+    if location_pool and s.location not in location_pool:
+        s.location = rng.choice(location_pool)
+
+    if s.time_of_day not in slot.tmpl.time_pool:
+        s.time_of_day = rng.choice(list(slot.tmpl.time_pool))
+    if s.lighting not in slot.tmpl.lighting_pool:
+        s.lighting = rng.choice(list(slot.tmpl.lighting_pool))
+
+    return s
+
+
 def validate_and_repair(
     scenes: List[SceneSpec],
     character: Character,
     count: int,
     controls: BatchControls,
+    *,
+    enforce_beat_pool: bool = True,
 ) -> List[SceneSpec]:
-    """Coerce/repair enums, clamp nudity, enforce allow/block, guarantee exactly `count`."""
+    """
+    Coerce/repair enums, clamp nudity, enforce allow/block, enforce beat-pool
+    coherence (pose/outfit/location stay within the hand-authored combination
+    for that beat position), and guarantee exactly `count`.
+
+    ``enforce_beat_pool`` gates only the coherence repair. Set False for
+    admin-supplied manual scenes: those are an intentional exact override
+    (the admin picked this outfit for this location on purpose), not a
+    planner's guess that needs sanity-checking against the hand-authored
+    pools. The other repairs (nudity ceiling, allow/block, identity scrub,
+    count guarantee) still apply — manual mode overrides planner choices, not
+    safety controls.
+    """
     max_idx = _nudity_index(controls.max_nudity)
+    slots = _beat_slots(character, count, controls) if enforce_beat_pool else []
     repaired: List[SceneSpec] = []
-    for scene in scenes[:count]:
+    for i, scene in enumerate(scenes[:count]):
         s = scene.model_copy(deep=True)
 
         # Nudity ceiling (hard clamp) + sfw.
@@ -555,6 +682,16 @@ def validate_and_repair(
                     (loc for loc in LocationType if loc not in (controls.blocked_locations or [])),
                     LocationType.HOME_LIVING_ROOM,
                 )
+
+        # Coherence: pose/outfit/location/time/lighting must stay within THIS
+        # beat position's own hand-authored pool — the same pool the
+        # deterministic planner draws from — so no provider can pair e.g. a
+        # bikini with an office beat, or "eating dinner" with a bodycon dress
+        # at a location that pool never includes. Out-of-pool picks are
+        # re-picked deterministically (seeded, reproducible) rather than
+        # dropped, since a concrete in-pool scene beats a missing one.
+        if i < len(slots):
+            s = _enforce_beat_pool(s, slots[i], controls, seed=(controls.base_seed or 0) + i)
 
         # Scrub identity tokens from free-text (defense-in-depth).
         if s.background_text:
@@ -652,7 +789,10 @@ async def plan_scenes(
     if manual_scenes or provider_override == "manual":
         planner = ManualScenePlanner(manual_scenes or [])
         scenes = await planner.plan_scenes(character, count, controls)
-        return validate_and_repair(scenes, character, count, controls), "manual"
+        return (
+            validate_and_repair(scenes, character, count, controls, enforce_beat_pool=False),
+            "manual",
+        )
 
     # Build the provider order.
     configured = provider_override or getattr(settings, "STORY_PLANNER_PROVIDER", "") or ""

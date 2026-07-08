@@ -2,7 +2,7 @@
 Character Image Generation API - Main Application Entry Point
 
 A FastAPI service for generating character images using:
-- Venice (LLM) for scene writing in prompt generation
+- Venice (LLM) for story-batch scene planning
 - ComfyUI for image generation
 - JWT authentication
 - Local storage with signed URLs
@@ -88,11 +88,7 @@ runpod_client = RunPodServerlessClient(
 )
 job_manager.attach_runpod_client(runpod_client)
 
-prompt_generator = PromptGenerator(
-    api_key=settings.VENICE_API_KEY,
-    base_url=settings.VENICE_BASE_URL,
-    model=settings.VENICE_MODEL
-)
+prompt_generator = PromptGenerator()
 
 storage_service = StorageService(
     storage_dir=settings.STORAGE_DIR,

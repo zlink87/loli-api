@@ -82,27 +82,36 @@ def test_outfit_template_protects_head_via_server_mask():
     assert "203" not in wf and "206" not in wf
 
 
-def test_outfit_template_mask_is_guidance_not_a_wall():
+def test_outfit_template_mask_is_a_real_wall():
     """
-    noise_mask MUST stay false: the mask guides the edit via the green overlay
-    (reference conditioning holds identity, the original proven behavior); a
-    hard latent boundary (true) produced visible halo seams around the person.
+    noise_mask MUST be true: the sampler only denoises the masked latent
+    region. An earlier config (noise_mask=false) reduced the mask to a mere
+    green-overlay hint and let the sampler re-diffuse the ENTIRE frame at
+    denoise 0.8, which is what let outfit/background edits silently drift
+    the face and change the whole image.
     """
     wf = _load("test_final_API.json")
-    assert wf["121"]["inputs"]["noise_mask"] is False
+    assert wf["121"]["inputs"]["noise_mask"] is True
 
 
-def test_outfit_template_stamps_original_face_before_save():
+def test_outfit_template_composites_back_onto_original_source():
     """
-    ReActor (210) puts the ORIGINAL face (108) back on the decoded result (118)
-    before SaveImage — the unconditional identity guard for full-body shots
-    whose small heads the DINO face segment misses (evidence runs H/K).
+    Node 220 (ImageCompositeMasked) pastes the sampled decode (118) back onto
+    the ORIGINAL source (108) using the same mask (119) that gated the
+    sampler — so every pixel outside the feathered mask, including the face,
+    is byte-identical to the source. This is the real identity guarantee now;
+    ReActorFaceSwap (210) is kept in the graph but disabled, since a
+    redundant face-swap on top of an exact composite only reintroduced a
+    waxy, over-restored look.
     """
     wf = _load("test_final_API.json")
     assert wf["210"]["class_type"] == "ReActorFaceSwap"
-    assert wf["210"]["inputs"]["input_image"] == ["118", 0]
-    assert wf["210"]["inputs"]["source_image"] == ["108", 0]
-    assert wf["116"]["inputs"]["images"] == ["210", 0]
+    assert wf["210"]["inputs"]["enabled"] is False
+    assert wf["220"]["class_type"] == "ImageCompositeMasked"
+    assert wf["220"]["inputs"]["destination"] == ["108", 0]  # ORIGINAL pixels
+    assert wf["220"]["inputs"]["source"] == ["118", 0]       # sampled/decoded pixels
+    assert wf["220"]["inputs"]["mask"] == ["119", 0]         # same mask that gated the sampler
+    assert wf["116"]["inputs"]["images"] == ["220", 0]       # SaveImage reads the composite
 
 
 def test_prepare_background_inverts_person_mask():

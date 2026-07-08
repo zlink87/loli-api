@@ -387,6 +387,7 @@ class ExpressionType(str, Enum):
 
 class PhotoStyleType(str, Enum):
     """Photographic finish applied by the workflow-side style wrapper."""
-    POLISHED = "polished"          # new default: retouched editorial/glamour
+    NATURAL = "natural"            # batch/edit default: realistic photo, nothing synthetic
+    POLISHED = "polished"          # generation default: retouched editorial finish
     STUDIO = "studio"
     CANDID_PHONE = "candid_phone"  # legacy raw/candid phone-cam look

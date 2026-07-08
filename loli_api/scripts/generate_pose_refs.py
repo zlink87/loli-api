@@ -111,7 +111,6 @@ def submit_generation(session, api_base: str, token: str, pose: PoseType) -> str
     payload = {
         "persona": BASE_PERSONA,
         "context": build_context(pose),
-        "isEnhance": True,
     }
     resp = session.post(
         f"{api_base}/v1/generate/image",

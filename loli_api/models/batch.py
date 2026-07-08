@@ -22,8 +22,11 @@ class BatchControls(BaseModel):
     """Admin-facing knobs the planner + orchestrator honor for a batch."""
 
     max_nudity: NudityLevel = Field(
-        default=NudityLevel.MEDIUM,
-        description="Hard ceiling; planner output is clamped so nudity never exceeds this",
+        default=NudityLevel.LOW,
+        description=(
+            "Hard ceiling; planner output is clamped so nudity never exceeds this. "
+            "Dressed-by-default: explicit batches are opt-in via medium/high."
+        ),
     )
     sfw_only: bool = Field(default=False, description="Force nudity=LOW and drop the 'naked' outfit")
     content_rating: str = Field(
@@ -58,10 +61,11 @@ class BatchControls(BaseModel):
         default=None, description="Override pipeline step order forwarded to each item"
     )
     photo_style: PhotoStyleType = Field(
-        default=PhotoStyleType.POLISHED,
+        default=PhotoStyleType.NATURAL,
         description=(
-            "Photographic finish applied to every edit step of every item: "
-            "polished (retouched editorial), studio, or candid_phone (legacy raw look)"
+            "Photographic finish applied once (final edit step) to every item: "
+            "natural (realistic photo, default), polished (retouched), studio, "
+            "or candid_phone (legacy raw look)"
         ),
     )
 

@@ -13,14 +13,21 @@ Covers:
       surrounding pose sentences.
   c5  background build_background_prompt still contains identity terms (regression).
   c6  the dead edit-prompt assembler was deleted (not hasattr on the module).
-  c7  has_contradiction: true case (hairColor=black persona vs "blonde" text),
-      false case (lighting-only text), shared-"black" non-flag case.
-  c8  MAX_SCENE_WORDS rejection predicate (word-count logic).
   c9  KINK_PHRASES covers all 23 KinkType and RELATIONSHIP_PHRASES all 19
       RelationshipType with non-empty phrases; "dominant" removed from kinks;
       no phrase in either map contains "youthful".
   c10 prepare_outfit_workflow with negative_prompt="test_negative_xyz" puts it
       into node 117 inputs.
+  c12 edit_negative() nudity suppression is leveled and defaults to low.
+  c13 has_banned_style_words flags glamour/stock-photo filler.
+  c14 every non-NAKED outfit's LOW tier is a real, non-exposing garment.
+  c16 every selected generation option lands in the assembled prompt, and the
+      scene clause (used verbatim; Venice generation-scene-writing was removed
+      2026-07-08) sits before persona flavor, not buried at the tail.
+
+(c7, c8, c15 covered `has_contradiction`/`MAX_SCENE_WORDS`/`scene_preserves_hint`
+— all removed with the Venice generation-scene-writer on 2026-07-08. c11 is the
+"Bonus regression" test below, unrelated to Venice — kept.)
 
 Runs under pytest AND under plain ``python tests/test_prompt_assembly.py`` (the
 __main__ block invokes each test function; pytest is not required).
@@ -156,67 +163,6 @@ def test_dead_edit_assembler_removed():
 
 
 # ---------------------------------------------------------------------------
-# c7 — has_contradiction true / false / shared-"black" cases
-# ---------------------------------------------------------------------------
-def _persona(**overrides) -> PersonaOptions:
-    base = dict(
-        ethnicity="caucasian",
-        age=30,
-        hairStyle="straight",
-        hairColor="black",
-        eyeColor="brown",
-        name="Tester",
-    )
-    base.update(overrides)
-    return PersonaOptions(**base)
-
-
-def test_has_contradiction_true_false_and_shared_black():
-    persona = _persona(hairColor="black")  # black hair, caucasian, brown eyes
-
-    # TRUE: a sibling hair color the admin did not request appears.
-    assert pg.has_contradiction(
-        "soft warm lighting, blonde waves catching the light", persona
-    ) is True
-
-    # FALSE: lighting/composition-only embellishment, no physical attribute.
-    assert pg.has_contradiction(
-        "soft warm cinematic lighting, shallow depth of field, golden hour, elegant composition",
-        persona,
-    ) is False
-
-    # SHARED-"black" non-flag: persona requested black hair, so "black hair" in
-    # text is legitimate and must NOT be flagged as a contradiction.
-    assert pg.has_contradiction("black hair, gentle rim lighting", persona) is False
-
-    # And a black-ethnicity persona also makes "black" legitimate.
-    persona_afro = _persona(hairColor="brunette", ethnicity="black_afro")
-    assert pg.has_contradiction("black hair, studio lighting", persona_afro) is False
-
-    # A contradicting eye color is caught (searched with the noun to be safe).
-    assert pg.has_contradiction("striking green eyes, moody light", persona) is True
-    print("c7 OK: has_contradiction true/false/shared-black cases pass")
-
-
-# ---------------------------------------------------------------------------
-# c8 — MAX_SCENE_WORDS rejection predicate
-# ---------------------------------------------------------------------------
-def test_max_scene_words_predicate():
-    cap = pg.MAX_SCENE_WORDS
-    assert cap == 90
-
-    # The rejection predicate used in _write_scene is: len(content.split()) > cap.
-    over = " ".join(["word"] * (cap + 5))
-    under = " ".join(["word"] * (cap - 5))
-    at = " ".join(["word"] * cap)
-
-    assert len(over.split()) > cap  # rejected
-    assert not (len(under.split()) > cap)  # accepted
-    assert not (len(at.split()) > cap)  # exactly at cap is accepted
-    print(f"c8 OK: MAX_SCENE_WORDS={cap} rejection predicate correct")
-
-
-# ---------------------------------------------------------------------------
 # c9 — full KinkType/RelationshipType coverage; no stale key; no "youthful"
 # ---------------------------------------------------------------------------
 def test_kink_and_relationship_phrase_coverage():
@@ -281,6 +227,129 @@ def test_requests_accept_negative_prompt():
 
 
 # ---------------------------------------------------------------------------
+# c12 — edit_negative() carries nudity suppression, leveled + defaulted to low
+# ---------------------------------------------------------------------------
+def test_edit_negative_nudity_suppression_levels():
+    low = pc.edit_negative(nudity_level=NudityLevel.LOW)
+    medium = pc.edit_negative(nudity_level=NudityLevel.MEDIUM)
+    high = pc.edit_negative(nudity_level=NudityLevel.HIGH)
+    default = pc.edit_negative()  # None -> treated as low
+
+    assert "exposed breasts" in low and "topless" in low
+    assert "full frontal nudity" in medium
+    assert medium == pc.edit_negative(nudity_level="medium")  # string value accepted
+    # HIGH suppresses nothing extra, but quality/adult/identity still present.
+    assert "child" in high and "different face" in high
+    assert default == low  # dressed-by-default: no level == low, never silently more exposed
+    print("c12 OK: edit_negative() nudity suppression is leveled and defaults to low")
+
+
+# ---------------------------------------------------------------------------
+# c13 — banned style/glamour-filler word scrubber
+# ---------------------------------------------------------------------------
+def test_has_banned_style_words():
+    assert pc.has_banned_style_words("posing in a professional photography studio with soft bokeh")
+    assert pc.has_banned_style_words("an 8k cinematic masterpiece")
+    assert not pc.has_banned_style_words(
+        "cutting vegetables at the kitchen counter while music plays softly"
+    )
+    print("c13 OK: has_banned_style_words flags glamour/stock-photo filler, not plain scenes")
+
+
+# ---------------------------------------------------------------------------
+# c14 — outfit vocab LOW tier is a real garment, never exposing (NAKED excluded
+# by design: selecting the "naked" outfit is itself a deliberate undress request)
+# ---------------------------------------------------------------------------
+def test_outfit_low_tier_has_no_exposure_language():
+    from services.outfit_vocab import OUTFIT_DESCRIPTIONS
+
+    banned = [
+        "cleavage", "nipple", "breast", "sideboob", "underboob", "bare ass",
+        "ass cheek", "pussy", "labia", "areola", "topless", "bare skin",
+        "exposed", "exposing",
+    ]
+    for outfit, levels in OUTFIT_DESCRIPTIONS.items():
+        if outfit == OutfitType.NAKED:
+            continue
+        low_text = levels[NudityLevel.LOW].lower()
+        for term in banned:
+            assert term not in low_text, f"{outfit.value} LOW contains '{term}': {low_text}"
+        # MEDIUM/HIGH must still exist and differ from LOW (tiers still graded).
+        assert levels[NudityLevel.MEDIUM] != low_text
+        assert levels[NudityLevel.HIGH] != levels[NudityLevel.MEDIUM]
+    print("c14 OK: every non-NAKED outfit's LOW tier is a real, non-exposing garment")
+
+
+# ---------------------------------------------------------------------------
+# c16 — every selected generation option verifiably lands in the final prompt,
+# and the scene clause sits before persona flavor (not buried at the tail)
+# ---------------------------------------------------------------------------
+def test_generation_prompt_option_fidelity():
+    from models.requests import ShotOptions
+    from models.enums import AccessoryType, ExpressionType
+
+    persona = PersonaOptions(
+        name="Addison", ethnicity="caucasian", age=24, hairStyle="straight", hairColor="blonde",
+        eyeColor="blue", bodyType="skinny", breastSize="medium",
+        personality="nympho", relationship="girlfriend", occupation="student",
+        kinks=["bondage", "creampie", "cuddling"],
+    )
+    shot = ShotOptions(expression=ExpressionType.CONFIDENT)
+    positive, negative, locked = pg.assemble_generation_prompt(
+        persona,
+        free_text="School dance",
+        shot=shot,
+        outfit=OutfitType.LITTLE_BLACK_DRESS,
+        nudity_level=NudityLevel.MEDIUM,
+        accessories=[AccessoryType.EARRINGS],
+    )
+
+    # Locked identity present verbatim.
+    for tok in locked.split(", "):
+        assert tok in positive, f"locked identity token missing from prompt: {tok}"
+    # Outfit selection present (MEDIUM tier text).
+    from services.outfit_vocab import OUTFIT_DESCRIPTIONS
+    assert OUTFIT_DESCRIPTIONS[OutfitType.LITTLE_BLACK_DRESS][NudityLevel.MEDIUM] in positive
+    # Accessory present.
+    assert "earrings" in positive
+    # User scene hint present, and positioned BEFORE the persona flavor
+    # (occupation/kinks) rather than buried after it — a turbo model weights
+    # earlier tokens more heavily, so the requested scene must not be diluted.
+    assert "School dance" in positive
+    flavor_marker = ap.phrase(ap.OCCUPATION_PHRASES, persona.occupation)
+    assert positive.index("School dance") < positive.index(flavor_marker)
+    # Nudity suppression on the negative side matches the requested level.
+    assert negative == pc.generation_negative(nudity_level=NudityLevel.MEDIUM)
+    print("c16 OK: every selected option lands in the prompt; scene clause precedes flavor")
+
+
+# ---------------------------------------------------------------------------
+# c17 — Venice generation-scene-writing was fully removed (regression guard):
+# no isEnhance field, no is_enhance param, context always used verbatim.
+# ---------------------------------------------------------------------------
+def test_venice_generation_enhancement_removed():
+    from models.requests import GenerateImageRequest
+    import inspect
+    from services.prompt_generator import PromptGenerator
+
+    assert "isEnhance" not in GenerateImageRequest.model_fields
+
+    sig = inspect.signature(PromptGenerator.generate_generation_prompt)
+    assert "is_enhance" not in sig.parameters
+
+    persona = PersonaOptions(
+        name="Riley", ethnicity="caucasian", age=25, hairStyle="straight", hairColor="black",
+        eyeColor="brown", bodyType="average", breastSize="medium",
+        personality="shy", relationship="stranger", occupation="student",
+    )
+    positive, _negative, _locked = pg.assemble_generation_prompt(
+        persona, free_text="a weird hint xyzzy123 that no LLM would invent",
+    )
+    assert "xyzzy123" in positive  # always verbatim, nothing can rewrite/drop it
+    print("c17 OK: isEnhance/is_enhance gone; context is always used verbatim")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -291,11 +360,14 @@ def _run_all():
         test_pose_prompt_identity_and_framing,
         test_background_prompt_identity_regression,
         test_dead_edit_assembler_removed,
-        test_has_contradiction_true_false_and_shared_black,
-        test_max_scene_words_predicate,
         test_kink_and_relationship_phrase_coverage,
         test_prepare_outfit_workflow_negative_prompt_reaches_node_117,
         test_requests_accept_negative_prompt,
+        test_edit_negative_nudity_suppression_levels,
+        test_has_banned_style_words,
+        test_outfit_low_tier_has_no_exposure_language,
+        test_generation_prompt_option_fidelity,
+        test_venice_generation_enhancement_removed,
     ]
     failures = 0
     for fn in tests:

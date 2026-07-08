@@ -109,6 +109,7 @@ class BatchPipelineWorker:
                 current_bytes = await self.engine._run_step(
                     step_name, request, current_bytes, seed, job.job_id,
                     progress_start=p_start, progress_end=p_end,
+                    is_final_step=(i == num_steps - 1),
                 )
 
             await self.job_manager.update_job_status(
