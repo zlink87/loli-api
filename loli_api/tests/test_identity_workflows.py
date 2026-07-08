@@ -178,16 +178,22 @@ def test_prepare_background_keeps_node_211_valid():
 
 
 def test_head_mask_service():
-    """Black mask when no face; white feathered region when a face is found."""
+    """Fail-closed fallback box when no face; white feathered region when found."""
     import numpy as np
     import cv2
     from services import head_mask
 
-    # Synthetic no-face image -> all-black mask, found=False.
+    # Synthetic no-face image -> FAIL CLOSED: a conservative top-center fallback
+    # box protects the head region (NOT an all-black mask, which would leave the
+    # face editable and let the inpaint destroy it). found is still False so logs
+    # stay accurate.
     blank = cv2.imencode(".png", np.full((240, 180, 3), 128, np.uint8))[1].tobytes()
     png, found = head_mask.build_head_mask(blank)
     m = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
-    assert not found and m.shape == (240, 180) and int(m.max()) == 0
+    assert not found and m.shape == (240, 180)
+    assert int(m.max()) == 255                     # fallback box is present, not black
+    assert 0.05 < (m > 127).mean() < 0.35          # a top-center head region, not the whole frame
+    assert int(m[160:, :].max()) == 0              # ...and nothing protected in the bottom third
 
     # A real face (original pose ref backup, if present) -> white region.
     ref = Path(__file__).resolve().parent.parent / "assets" / "poses" / "pose_ref_standing_leaning.orig.png"
@@ -210,3 +216,87 @@ def test_pose_template_face_swaps_before_save():
     # The SAVED image is the face-locked one, not the raw repose.
     assert wf["164"]["class_type"] == "SaveImage"
     assert wf["164"]["inputs"]["images"] == ["200", 0]
+
+
+# ---------------------------------------------------------------------------
+# Outfit V2 crop-and-stitch template (outfit_cropstitch_API.json)
+# ---------------------------------------------------------------------------
+from api.v1.endpoints import outfit as _outfit_mod
+from api.v1.endpoints.outfit import _is_cropstitch_template, GARMENT_MODE_OUTFITS
+from models.enums import OutfitType
+
+
+def test_v2_template_is_crop_and_stitch():
+    wf = _load("outfit_cropstitch_API.json")
+    assert _is_cropstitch_template(wf)
+    assert wf["235"]["class_type"] == "InpaintCropImproved"
+    assert wf["238"]["class_type"] == "InpaintStitchImproved"
+
+
+def test_v2_identity_is_stitched_back_pixel_exact():
+    wf = _load("outfit_cropstitch_API.json")
+    # The ONLY SaveImage reads the stitched image (crop pasted back onto original).
+    saves = [k for k, n in wf.items() if n["class_type"] == "SaveImage"]
+    assert saves == ["116"]
+    assert wf["116"]["inputs"]["images"] == ["238", 0]
+    # Stitch consumes the crop's stitcher (byte-exact outside the mask) + the decode.
+    assert wf["238"]["inputs"]["stitcher"] == ["235", 0]
+    assert wf["238"]["inputs"]["inpainted_image"] == ["118", 0]
+    # No whole-frame re-diffusion escape hatches survive from V1.
+    classes = {n["class_type"] for n in wf.values()}
+    assert "ImageCompositeMasked" not in classes  # replaced by the stitch node
+    assert "EmptyLatentImage" not in classes        # sampler works on the crop latent
+    assert "DrawMaskOnImage" not in classes         # clean crop reference, no green hint
+
+
+def test_v2_edit_is_confined_to_crop_minus_head():
+    wf = _load("outfit_cropstitch_API.json")
+    # Crop region = base mask MINUS the server head mask.
+    assert wf["233"]["class_type"] == "MaskComposite"
+    assert wf["233"]["inputs"]["operation"] == "subtract"
+    assert wf["233"]["inputs"]["source"] == ["212", 0]      # head mask
+    assert wf["212"]["inputs"]["image"] == ["211", 0]        # server-computed PNG
+    assert wf["235"]["inputs"]["mask"] == ["233", 0]         # crop uses head-subtracted mask
+    # Masked inpaint over the CROPPED pixels, soft edge via differential diffusion.
+    assert wf["121"]["class_type"] == "InpaintModelConditioning"
+    assert wf["121"]["inputs"]["noise_mask"] is True
+    assert wf["121"]["inputs"]["pixels"] == ["235", 1]       # cropped_image, not full frame
+    assert wf["237"]["class_type"] == "DifferentialDiffusion"
+    assert wf["106"]["inputs"]["model"] == ["237", 0]
+
+
+def test_v2_prepare_defaults_to_body_mode():
+    wf = prepare_outfit_workflow(
+        _load("outfit_cropstitch_API.json"), "src.png", "a red dress",
+        seed=7, outfit=OutfitType.CROP_TOP_CARGO, head_mask_name="hm.png",
+    )
+    # BODY mode by default (GARMENT_MODE_OUTFITS is opt-in and starts empty).
+    assert GARMENT_MODE_OUTFITS == set()
+    assert wf["233"]["inputs"]["destination"] == ["213", 0]  # person base, not garment
+    assert wf["211"]["inputs"]["image"] == "hm.png"
+    assert wf["108"]["inputs"]["image"] == "src.png"
+    assert wf["106"]["inputs"]["seed"] == 7
+
+
+def test_v2_garment_mode_selects_clothes_mask():
+    saved = set(_outfit_mod.GARMENT_MODE_OUTFITS)
+    _outfit_mod.GARMENT_MODE_OUTFITS = {OutfitType.CROP_TOP_CARGO}
+    try:
+        wf = prepare_outfit_workflow(
+            _load("outfit_cropstitch_API.json"), "src.png", "cargo set",
+            seed=1, outfit=OutfitType.CROP_TOP_CARGO, head_mask_name="hm.png",
+        )
+        assert wf["233"]["inputs"]["destination"] == ["230", 1]  # ClothesSegment mask
+        assert wf["230"]["class_type"] == "ClothesSegment"
+    finally:
+        _outfit_mod.GARMENT_MODE_OUTFITS = saved
+
+
+def test_v2_no_head_mask_bypasses_subtraction():
+    wf = prepare_outfit_workflow(
+        _load("outfit_cropstitch_API.json"), "src.png", "x",
+        seed=1, outfit=OutfitType.NAKED, head_mask_name=None,
+    )
+    # With no staged head mask, the crop reads the base mask directly (no bad subtract).
+    assert wf["235"]["inputs"]["mask"] == ["213", 0]
+    assert wf["211"]["inputs"]["image"] == "src.png"  # LoadImage stays valid

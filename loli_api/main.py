@@ -32,6 +32,7 @@ from services.storage_service import StorageService
 from services.notification_service import NotificationService
 from services.supabase_storage_service import SupabaseStorageService
 from services.image_cache_service import ImageCacheService
+from services.keep_warm_service import KeepWarmService
 from services.base_url_service import upload_base_url
 from services import pose_assets
 from workers.background_worker import BackgroundWorker, CleanupWorker
@@ -127,6 +128,17 @@ logger.info(
     f"cleanup_interval={settings.IMAGE_CACHE_CLEANUP_INTERVAL_SECONDS}s"
 )
 
+# Optional keep-warm pinger (OFF by default) — holds a RunPod worker warm during
+# active sessions so real requests skip the cold start. Complements the RunPod
+# dashboard idle-timeout/FlashBoot settings (the primary, free mitigation).
+keep_warm_service = KeepWarmService(
+    runpod_client,
+    enabled=settings.WARMUP_ENABLED,
+    interval_seconds=settings.WARMUP_INTERVAL_SECONDS,
+    window_minutes=settings.WARMUP_WINDOW_MINUTES,
+    workflow_path=settings.WARMUP_WORKFLOW_PATH or settings.COMFYUI_WORKFLOW_PATH,
+)
+
 # Initialize workers
 background_worker = BackgroundWorker(
     job_manager=job_manager,
@@ -148,7 +160,9 @@ outfit_worker = OutfitBackgroundWorker(
     job_manager=job_manager,
     comfyui_client=comfyui_client,
     storage_service=storage_service,
-    workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+    # V2 crop-and-stitch graph when COMFYUI_OUTFIT_WORKFLOW_PATH_V2 is set, else V1.
+    # Only the interactive outfit path cuts over; background/batch stay on V1.
+    workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
@@ -350,6 +364,7 @@ async def lifespan(app: FastAPI):
         await video_worker.start()
         # await cleanup_worker.start()
         await image_cache_service.start_cleanup_worker()
+        await keep_warm_service.start()
         for w in batch_workers:
             await w.start()
         if batch_reconciler:
@@ -374,6 +389,7 @@ async def lifespan(app: FastAPI):
     if batch_reconciler:
         await batch_reconciler.stop()
     await cleanup_worker.stop()
+    await keep_warm_service.stop()
     await image_cache_service.stop_cleanup_worker()
     logger.info("Shutdown complete")
 

@@ -14,9 +14,11 @@ No on-worker face detection required.
 
 Mask semantics: WHITE = protected head region (face box, padded generously and
 extended upward to cover the hair/scalp, feathered), BLACK = editable. When no
-face is found the mask is all-black (nothing subtracted) — the model's
-reference-following plus the identity prompt clauses remain the guard, exactly
-like the pre-SAM3-era behavior.
+face is found we FAIL CLOSED: a conservative top-center fallback box protects the
+head region anyway. The old all-black behavior was wrong — with the real masked
+inpaint (noise_mask=true), an unprotected head lands inside the editable region
+and the face is destroyed (observed in production). Over-protecting a little
+background is harmless; leaving the face editable is not.
 """
 import io
 import logging
@@ -36,6 +38,13 @@ _PAD_X = 0.45        # sideways: ears + hair sides
 _PAD_TOP = 1.50      # upward: full scalp + voluminous hair (clears the silhouette top)
 _PAD_BOTTOM = 0.35   # downward: chin + jawline
 _FEATHER = 31        # Gaussian kernel for soft mask edges (odd)
+
+# Fail-closed fallback box (fractions of W/H), used when YuNet finds no face.
+# Heroes are portrait / waist-up, so the head is reliably top-center. Protecting
+# this region is far safer than an all-black mask that leaves the face editable.
+_FALLBACK_X0 = 0.20
+_FALLBACK_X1 = 0.80
+_FALLBACK_Y1 = 0.30
 
 _lock = threading.Lock()
 _detector = None
@@ -82,8 +91,15 @@ def build_head_mask(image_bytes: bytes) -> Tuple[bytes, bool]:
         x1 = min(w, int(x + fw * (1 + _PAD_X)))
         y0 = max(0, int(y - fh * _PAD_TOP))
         y1 = min(h, int(y + fh * (1 + _PAD_BOTTOM)))
-        mask[y0:y1, x0:x1] = 255
-        mask = cv2.GaussianBlur(mask, (_FEATHER, _FEATHER), 0)
+    else:
+        # FAIL CLOSED: detection missed, so protect a conservative top-center
+        # region rather than returning an all-black (fully-editable) mask that
+        # would let the inpaint destroy the face.
+        x0, x1 = int(w * _FALLBACK_X0), int(w * _FALLBACK_X1)
+        y0, y1 = 0, int(h * _FALLBACK_Y1)
+
+    mask[y0:y1, x0:x1] = 255
+    mask = cv2.GaussianBlur(mask, (_FEATHER, _FEATHER), 0)
 
     ok, buf = cv2.imencode(".png", mask)
     if not ok:

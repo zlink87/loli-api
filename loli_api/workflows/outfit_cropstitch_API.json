@@ -1,0 +1,387 @@
+{
+  "108": {
+    "inputs": {
+      "image": "outfit_source.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Image1 (source)"
+    }
+  },
+  "101": {
+    "inputs": {
+      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "200": {
+    "inputs": {
+      "model_name": "sam_vit_h (2.56GB)"
+    },
+    "class_type": "SAMModelLoader (segment anything)",
+    "_meta": {
+      "title": "SAM Model Loader"
+    }
+  },
+  "201": {
+    "inputs": {
+      "model_name": "GroundingDINO_SwinT_OGC (694MB)"
+    },
+    "class_type": "GroundingDinoModelLoader (segment anything)",
+    "_meta": {
+      "title": "GroundingDINO Model Loader"
+    }
+  },
+  "202": {
+    "inputs": {
+      "sam_model": [
+        "200",
+        0
+      ],
+      "grounding_dino_model": [
+        "201",
+        0
+      ],
+      "image": [
+        "108",
+        0
+      ],
+      "prompt": "person",
+      "threshold": 0.3
+    },
+    "class_type": "GroundingDinoSAMSegment (segment anything)",
+    "_meta": {
+      "title": "BODY base mask: segment person"
+    }
+  },
+  "213": {
+    "inputs": {
+      "expand": 0,
+      "incremental_expandrate": 0,
+      "tapered_corners": true,
+      "flip_input": false,
+      "blur_radius": 0,
+      "lerp_alpha": 1,
+      "decay_factor": 1,
+      "fill_holes": true,
+      "mask": [
+        "202",
+        1
+      ]
+    },
+    "class_type": "GrowMaskWithBlur",
+    "_meta": {
+      "title": "BODY base: fill raw person-mask holes"
+    }
+  },
+  "230": {
+    "inputs": {
+      "images": [
+        "108",
+        0
+      ],
+      "Upper-clothes": true,
+      "Skirt": true,
+      "Dress": true,
+      "Pants": true,
+      "Belt": true,
+      "Scarf": true,
+      "process_res": 512,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "background": "Alpha",
+      "background_color": "#222222"
+    },
+    "class_type": "ClothesSegment",
+    "_meta": {
+      "title": "GARMENT base mask: segment clothing classes"
+    }
+  },
+  "211": {
+    "inputs": {
+      "image": "head_mask.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Head-protect mask (server-computed YuNet)"
+    }
+  },
+  "212": {
+    "inputs": {
+      "image": [
+        "211",
+        0
+      ],
+      "channel": "red"
+    },
+    "class_type": "ImageToMask",
+    "_meta": {
+      "title": "Head mask -> MASK"
+    }
+  },
+  "233": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "operation": "subtract",
+      "destination": [
+        "213",
+        0
+      ],
+      "source": [
+        "212",
+        0
+      ]
+    },
+    "class_type": "MaskComposite",
+    "_meta": {
+      "title": "Editable region = base mask MINUS head (base selected by preparer)"
+    }
+  },
+  "235": {
+    "inputs": {
+      "image": [
+        "108",
+        0
+      ],
+      "mask": [
+        "233",
+        0
+      ],
+      "downscale_algorithm": "bilinear",
+      "upscale_algorithm": "bicubic",
+      "preresize": false,
+      "preresize_mode": "ensure minimum resolution",
+      "preresize_min_width": 1024,
+      "preresize_min_height": 1024,
+      "preresize_max_width": 16384,
+      "preresize_max_height": 16384,
+      "mask_fill_holes": true,
+      "mask_expand_pixels": 6,
+      "mask_invert": false,
+      "mask_blend_pixels": 16,
+      "mask_hipass_filter": 0.1,
+      "extend_for_outpainting": false,
+      "extend_up_factor": 1.0,
+      "extend_down_factor": 1.0,
+      "extend_left_factor": 1.0,
+      "extend_right_factor": 1.0,
+      "context_from_mask_extend_factor": 1.2,
+      "output_resize_to_target_size": true,
+      "output_target_width": 1024,
+      "output_target_height": 1024,
+      "output_padding": "32",
+      "device_mode": "gpu (much faster)"
+    },
+    "class_type": "InpaintCropImproved",
+    "_meta": {
+      "title": "Crop to garment/body region at full res"
+    }
+  },
+  "236": {
+    "inputs": {
+      "expand": 0,
+      "incremental_expandrate": 0,
+      "tapered_corners": true,
+      "flip_input": false,
+      "blur_radius": 6,
+      "lerp_alpha": 1,
+      "decay_factor": 1,
+      "fill_holes": false,
+      "mask": [
+        "235",
+        2
+      ]
+    },
+    "class_type": "GrowMaskWithBlur",
+    "_meta": {
+      "title": "Soften cropped mask edge (for differential diffusion)"
+    }
+  },
+  "16": {
+    "inputs": {
+      "positive": "Change the masking part to full naked, keep body proportion, change nothing else"
+    },
+    "class_type": "easy positive",
+    "_meta": {
+      "title": "easy positive"
+    }
+  },
+  "117": {
+    "inputs": {
+      "negative": "blurry, low resolution, deformed hands, deformed fingers, fused fingers, extra fingers, missing fingers, malformed nails, ugly toenails, deformed toes, extra toes, fused toes, poorly drawn lips, asymmetrical eyes, blurry eyes, deformed hairline, bad anatomy, imperfect body proportions, unnatural curves, cartoonish, artifacts, watermark, text, logos, mutated hands, mutated feet, extra limbs, poorly detailed skin, plastic skin, shiny skin, low detail nails, distorted pose, unnatural flexibility artifacts, flat lighting, low contrast, elderly or childish"
+    },
+    "class_type": "easy negative",
+    "_meta": {
+      "title": "easy negative"
+    }
+  },
+  "41": {
+    "inputs": {
+      "prompt": [
+        "16",
+        0
+      ],
+      "clip": [
+        "101",
+        1
+      ],
+      "vae": [
+        "101",
+        2
+      ],
+      "image1": [
+        "235",
+        1
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Positive (clean cropped ref)"
+    }
+  },
+  "40": {
+    "inputs": {
+      "prompt": [
+        "117",
+        0
+      ],
+      "clip": [
+        "101",
+        1
+      ],
+      "vae": [
+        "101",
+        2
+      ],
+      "image1": [
+        "235",
+        1
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Negative (clean cropped ref)"
+    }
+  },
+  "121": {
+    "inputs": {
+      "noise_mask": true,
+      "positive": [
+        "41",
+        0
+      ],
+      "negative": [
+        "40",
+        0
+      ],
+      "vae": [
+        "101",
+        2
+      ],
+      "pixels": [
+        "235",
+        1
+      ],
+      "mask": [
+        "236",
+        0
+      ]
+    },
+    "class_type": "InpaintModelConditioning",
+    "_meta": {
+      "title": "InpaintModelConditioning (cropped, masked)"
+    }
+  },
+  "237": {
+    "inputs": {
+      "model": [
+        "101",
+        0
+      ]
+    },
+    "class_type": "DifferentialDiffusion",
+    "_meta": {
+      "title": "Differential Diffusion (soft-edge denoise)"
+    }
+  },
+  "106": {
+    "inputs": {
+      "seed": 301651179604540,
+      "steps": 8,
+      "cfg": 1.5,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "beta",
+      "denoise": 0.9,
+      "model": [
+        "237",
+        0
+      ],
+      "positive": [
+        "41",
+        0
+      ],
+      "negative": [
+        "40",
+        0
+      ],
+      "latent_image": [
+        "121",
+        2
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler (cropped region)"
+    }
+  },
+  "118": {
+    "inputs": {
+      "samples": [
+        "106",
+        0
+      ],
+      "vae": [
+        "101",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode (cropped)"
+    }
+  },
+  "238": {
+    "inputs": {
+      "stitcher": [
+        "235",
+        0
+      ],
+      "inpainted_image": [
+        "118",
+        0
+      ]
+    },
+    "class_type": "InpaintStitchImproved",
+    "_meta": {
+      "title": "Stitch cropped edit back onto original (pixel-exact outside mask)"
+    }
+  },
+  "116": {
+    "inputs": {
+      "images": [
+        "238",
+        0
+      ],
+      "filename_prefix": "edit_out"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

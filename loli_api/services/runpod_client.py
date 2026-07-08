@@ -21,6 +21,7 @@ worker-comfyui input/output contract:
 """
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -62,6 +63,9 @@ class RunPodServerlessClient:
                 "Content-Type": "application/json",
             },
         )
+        # Timestamp of the last REAL (non-warm-up) job submission. Read by the
+        # optional keep-warm service to decide whether a session is still active.
+        self.last_activity: Optional[datetime] = None
 
     @property
     def _endpoint_url(self) -> str:
@@ -105,6 +109,7 @@ class RunPodServerlessClient:
         execution_timeout_ms: Optional[int] = None,
         ttl_ms: Optional[int] = None,
         extra_input: Optional[dict] = None,
+        track_activity: bool = True,
     ) -> str:
         """
         Submit a workflow to the endpoint (async /run). Returns the RunPod job id.
@@ -116,9 +121,15 @@ class RunPodServerlessClient:
             execution_timeout_ms: Per-job active-runtime cap (policy.executionTimeout).
             ttl_ms: Total job lifespan from submission (policy.ttl).
             extra_input: Extra keys to merge into ``input`` (e.g. comfy_org_api_key).
+            track_activity: When True (default) record this as real activity for the
+                keep-warm service. The keep-warm pinger passes False so its own
+                warm-up jobs don't perpetuate the warm window forever.
         """
         if not self.is_configured():
             raise RunPodError("RunPod client is not configured (missing API key or endpoint id)")
+
+        if track_activity:
+            self.last_activity = datetime.utcnow()
 
         job_input: Dict[str, Any] = {"workflow": workflow}
         if images:
