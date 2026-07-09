@@ -30,7 +30,7 @@ from models.scene import SceneSpec
 from services.nude_base_store import NudeBaseStore
 from services.batch_orchestrator import BatchReconciler
 from api.v1.endpoints import nude_base as ep
-from api.v1.endpoints import outfit as outfit_ep
+from api.v1.endpoints import pipeline as pipeline_ep
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +221,8 @@ class _FakeNudeStore:
 
 
 def _wire(job_manager, char_store, nude_store):
-    outfit_ep.set_job_manager(job_manager)
-    outfit_ep.set_notification_service(None)  # no webhook in tests
+    pipeline_ep.set_job_manager(job_manager)
+    pipeline_ep.set_notification_service(None)  # no webhook in tests
     ep.set_job_manager(job_manager)
     ep.set_character_store(char_store)
     ep.set_nude_base_store(nude_store)
@@ -238,14 +238,19 @@ def test_post_builds_naked_high_nudity_outfit_job():
 
     resp = asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}))
 
-    # exactly one outfit_edit job, NAKED at high nudity, sourced from the hero
+    # exactly one pipeline_edit job: NAKED at high nudity, pushed hard (denoise +
+    # replace-mode) so the source garment is actually removed, plus a background
+    # step (via `prompt`) clearing the scene to a plain backdrop — all in one job.
     assert len(jm.created) == 1
     request, user_id, job_type = jm.created[0]
-    assert job_type == "outfit_edit"
+    assert job_type == "pipeline_edit"
     assert request.outfit == OutfitType.NAKED
     assert request.nudityLevel == NudityLevel.HIGH
     assert request.source_image == "https://x.supabase.co/hero.png"
-    assert request.sourceDressed is True
+    assert request.sourceDressed is False  # NAKED is never a GARMENT_MODE_OUTFITS target
+    assert request.outfitDenoise == 0.92
+    assert request.outfitPromptMode == "replace"
+    assert request.prompt and "plain" in request.prompt and "grey studio" in request.prompt
 
     # a pending base row was recorded against that job
     assert nude.created == [{

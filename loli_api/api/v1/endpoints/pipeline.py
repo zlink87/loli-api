@@ -47,6 +47,47 @@ def get_notification_service() -> Optional[NotificationService]:
 
 
 # ---------------------------------------------------------------------------
+# Shared job submission (used by POST /v1/edit AND internal callers, e.g. the
+# nude-base generator in api/v1/endpoints/nude_base.py)
+# ---------------------------------------------------------------------------
+async def submit_pipeline_edit_job(request: PipelineEditRequest, user_id: str):
+    """
+    Enqueue a pipeline_edit job the exact way ``pipeline_edit`` does — validate
+    the pose reference (if a pose step is requested), enforce the pipeline
+    queue cap (429), mirror the request to the notification webhook, then
+    ``job_manager.create_job(..., job_type="pipeline_edit")``. Returns the
+    created Job; the caller shapes its own HTTP response.
+
+    Factored so a non-request-bound internal caller (nude-base generation)
+    reuses the identical submission path — same queue, same worker, same
+    outfitDenoise/outfitPromptMode/lighting plumbing — rather than duplicating it.
+    """
+    job_manager = get_job_manager()
+
+    if request.pose is not None and not pose_assets.asset_path(request.pose).exists():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Pose reference not installed for pose '{request.pose.value}'. "
+                f"Run scripts/generate_pose_refs.py."
+            ),
+        )
+
+    if job_manager.is_queue_full(job_type="pipeline_edit"):
+        logger.warning(f"Pipeline queue full, rejecting request from user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Pipeline edit queue is full. Please try again later.",
+        )
+
+    notification_service = get_notification_service()
+    if notification_service:
+        await notification_service.send_request_received(user_id, request.model_dump(mode="json"))
+
+    return await job_manager.create_job(request, user_id, job_type="pipeline_edit")
+
+
+# ---------------------------------------------------------------------------
 # API Endpoint
 # ---------------------------------------------------------------------------
 @router.post(
@@ -86,42 +127,10 @@ async def pipeline_edit(
     The job is queued immediately and processed asynchronously by the
     pipeline background worker, which chains the requested steps.
     """
-    job_manager = get_job_manager()
     user_id = current_user.get("sub", "anonymous")
 
     try:
-        # Check queue capacity
-        if job_manager.is_queue_full(job_type="pipeline_edit"):
-            logger.warning(
-                f"Pipeline queue full, rejecting request from user {user_id}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Pipeline edit queue is full. Please try again later.",
-            )
-
-        # If a pose step is requested, its reference asset must be installed.
-        # Fail fast with a clear 422 before any step runs (references ship
-        # per-request as base64; a missing PNG means the generator has not run).
-        if request.pose is not None and not pose_assets.asset_path(request.pose).exists():
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"Pose reference not installed for pose '{request.pose.value}'. "
-                    f"Run scripts/generate_pose_refs.py."
-                ),
-            )
-
-        # Log payload
-        notification_service = get_notification_service()
-        if notification_service:
-            payload_dict = request.model_dump(mode="json")
-            await notification_service.send_request_received(user_id, payload_dict)
-
-        # Create job
-        job = await job_manager.create_job(
-            request, user_id, job_type="pipeline_edit"
-        )
+        job = await submit_pipeline_edit_job(request, user_id)
 
         # Build summary of active steps
         active = []

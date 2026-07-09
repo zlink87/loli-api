@@ -1,10 +1,28 @@
 """
 Nude-base generation endpoints — ADMIN ONLY.
 
-A nude base is ONE identity-locked nude/underwear render per character, generated
-from the clothed hero photo via the EXISTING outfit-edit machinery (outfit=NAKED at
-high nudity). The head/face stays byte-locked exactly as on every other outfit edit
-(server YuNet head mask + crop-stitch composite-back — nothing new is invented here).
+A nude base is ONE identity-locked nude render per character, generated from the
+clothed hero photo via the pipeline edit machinery: an outfit step (outfit=NAKED
+at high nudity, pushed hard — see _NUDE_BASE_OUTFIT_DENOISE/_NUDE_BASE_PROMPT_MODE
+below) chained with a background step that clears the scene to a plain neutral
+backdrop. The head/face stays byte-locked exactly as on every other edit (server
+YuNet head mask + crop-stitch composite-back — nothing new is invented here).
+
+WHY THE PIPELINE PATH (not the plain outfit-edit endpoint): a nude conversion needs
+to fully REMOVE the source garment, not blend a new one over it — the standard
+"change the outfit to X" phrasing at the engine's default denoise tends to let the
+source clothing ghost through (the same failure mode that made batch outfit swaps
+unreliable — see outfit_denoise/outfit_prompt_mode on BatchControls). The plain
+/v1/edit/outfit path has no way to ask for that extra strength, so this endpoint
+goes through /v1/edit's PipelineEditRequest instead, which already carries
+outfitDenoise/outfitPromptMode end to end, and additionally gets a background step
+in the SAME job by setting `prompt` (a plain-backdrop instruction) alongside outfit.
+
+KNOWN LIMITATION: HEAD accessories (glasses, earrings, hat, sunglasses) cannot be
+removed here — they sit on the identity-locked head region (YuNet head mask), which
+every edit step deliberately never touches. A character wearing glasses in her hero
+photo will keep them in her nude base. This is the same, deliberate identity-lock
+tradeoff documented for batches (see docs/ADMIN_STORY_BATCHES_V2_WORKORDER.md §7).
 
 Once a character has a nude base, story batches automatically start each scene's edit
 chain from it instead of the clothed hero, so dressing is ADDITIVE (clothes onto bare
@@ -23,6 +41,8 @@ character. Only run it for characters where that is intended and permitted.
 The async contract matches every other edit endpoint: POST returns a job_id (202); poll
 GET /v1/jobs/{jobId} as usual. GET here additionally finalizes the base into permanent
 storage the moment that job has succeeded (reconcile-on-read — no background task).
+Calling POST again after a `failed` (or to regenerate after `succeeded`) status is a
+normal retry — it is only short-circuited while a job is still genuinely in flight.
 """
 import logging
 from typing import Any, Dict, Optional
@@ -30,10 +50,10 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth.admin import require_admin
-from api.v1.endpoints.outfit import submit_outfit_edit_job
+from api.v1.endpoints.pipeline import submit_pipeline_edit_job
 from models.enums import JobStatus, NudityLevel, OutfitType
 from models.nude_base import NudeBaseRead, NudeBaseStatusResponse
-from models.requests import OutfitEditRequest
+from models.requests import PipelineEditRequest
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +61,20 @@ router = APIRouter(prefix="/characters", tags=["Nude Base"])
 
 # Nudity target for the base render: fully undressed so scenes dress additively.
 _NUDE_BASE_NUDITY = NudityLevel.HIGH
+# Pushed well above the batch default (0.85) — this needs a full strip, not a
+# garment swap, so it errs toward maximum removal strength. Bounded at 0.95 by
+# PipelineEditRequest.outfitDenoise; identity is unaffected regardless of this
+# value (the head sits outside the edit mask on every tier).
+_NUDE_BASE_OUTFIT_DENOISE = 0.92
+# "replace" = explicit remove-then-apply lead-in, instead of the default
+# "change the outfit to X" phrasing that lets the source garment ghost through.
+_NUDE_BASE_OUTFIT_PROMPT_MODE = "replace"
+# Clears the hero's original scene to a plain, neutral backdrop — an internal
+# asset shouldn't carry a specific location/prop into every scene built from it.
+_NUDE_BASE_BACKGROUND_PROMPT = (
+    "a plain seamless light grey studio backdrop, soft even lighting, "
+    "no furniture, props, or distracting objects"
+)
 
 # ---------------------------------------------------------------------------
 # Global service instances (set from main.py via router.configure_services)
@@ -94,7 +128,7 @@ def _status_response(nb: NudeBaseRead) -> NudeBaseStatusResponse:
 
 async def _finalize_if_ready(nb: NudeBaseRead) -> NudeBaseRead:
     """
-    Reconcile-on-read: if the base is still 'pending', poll its outfit_edit job and
+    Reconcile-on-read: if the base is still 'pending', poll its pipeline_edit job and
     persist the result — succeeded -> store the stable URL + flip to succeeded;
     failed -> record the error; a vanished job (in-memory registry cleaned after
     ~24h) -> mark failed so the admin can regenerate rather than being stuck pending.
@@ -164,23 +198,32 @@ async def generate_nude_base(
         if job is not None and job.status not in (JobStatus.SUCCEEDED, JobStatus.FAILED):
             return _status_response(existing)
 
-    # Reuse the EXACT outfit-edit path: outfit=NAKED at high nudity. Identity lock is
-    # automatic (the outfit worker always stages the YuNet head mask + composite-back);
-    # sourceDressed=True truthfully flags the clothed hero (inert for NAKED, which uses
-    # the whole-body mask regardless, but accurate).
-    request = OutfitEditRequest(
+    # Pipeline job: outfit=NAKED at high nudity, pushed hard (denoise + replace-mode)
+    # so the source garment is actually removed rather than blended over, PLUS a
+    # background step (via `prompt`) in the same job so the base isn't stuck in the
+    # hero's original scene. Identity lock is automatic (the pipeline worker always
+    # stages the YuNet head mask + composite-back on both steps) — nothing here can
+    # touch the head/face regardless of denoise. sourceDressed is left at its default
+    # (False): NAKED is never a GARMENT_MODE_OUTFITS target, so it always uses the
+    # whole-body mask either way — sourceDressed=True would be a no-op here, not a
+    # correctness issue, but leaving it unset keeps the request's meaning honest.
+    request = PipelineEditRequest(
         source_image=character.hero_image_url,
         outfit=OutfitType.NAKED,
         nudityLevel=_NUDE_BASE_NUDITY,
-        sourceDressed=True,
+        outfitDenoise=_NUDE_BASE_OUTFIT_DENOISE,
+        outfitPromptMode=_NUDE_BASE_OUTFIT_PROMPT_MODE,
+        prompt=_NUDE_BASE_BACKGROUND_PROMPT,
     )
-    job = await submit_outfit_edit_job(request, user_id)
+    job = await submit_pipeline_edit_job(request, user_id)
 
     nb = await nude_base_store.create(
         character_id, job_id=job.job_id, source_image_url=character.hero_image_url
     )
     logger.info(
-        f"[NUDE-BASE] character {character_id} -> job {job.job_id} (outfit=naked, nudity=high)"
+        f"[NUDE-BASE] character {character_id} -> job {job.job_id} "
+        f"(outfit=naked, nudity=high, denoise={_NUDE_BASE_OUTFIT_DENOISE}, "
+        f"mode={_NUDE_BASE_OUTFIT_PROMPT_MODE}, background=plain)"
     )
     return _status_response(nb)
 
