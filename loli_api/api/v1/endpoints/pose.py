@@ -93,24 +93,43 @@ def get_notification_service() -> Optional[NotificationService]:
 # ---------------------------------------------------------------------------
 # Helper functions (used by PoseBackgroundWorker via import)
 # ---------------------------------------------------------------------------
-def build_pose_prompt(pose: PoseType) -> str:
+def build_pose_prompt(
+    pose: PoseType,
+    activity: Optional[str] = None,
+    expression: Optional[str] = None,
+) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
 
     Args:
         pose: The pose type
+        activity: Optional identity-free action phrase (e.g. SceneSpec.activity,
+            routed here by scene_mapper when a pose step is active) appended as
+            ", while {activity}". None = unchanged base prompt (interactive
+            /v1/edit/pose never sets this).
+        expression: Optional facial expression/mood (e.g. SceneSpec.expression)
+            appended as ", {expression} expression". Expression/mood ONLY — never
+            facial features. Has no effect on non-posed items: the face there is
+            byte-locked by the composite-back in prepare_outfit_workflow, so
+            there is nothing for a prompted expression to act on outside a pose
+            step. None = unchanged base prompt.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
     """
     desc = POSE_DESCRIPTIONS.get(pose, "natural pose")
     clause = pc.pose_identity_clause()
-    return (
+    prompt = (
         f"Make the person in image 1 do the exact same pose of the person in image 2. "
         f"The target pose is: {desc}. {clause}. "
         f"The new pose should match image 2 accurately. "
         f"Adapt the background and environment to suit the pose naturally."
     )
+    if activity and activity.strip():
+        prompt += f", while {activity.strip()}"
+    if expression and expression.strip():
+        prompt += f", {expression.strip()} expression"
+    return prompt
 
 
 def get_pose_reference(pose: PoseType) -> str:
@@ -151,15 +170,23 @@ def prepare_pose_workflow(
     reference_image: str,
     prompt: Optional[str] = None,
     seed: Optional[int] = None,
+    debug_save_pre_reactor: bool = False,
+    reactor_restore_visibility: float = -1.0,
+    reactor_codeformer_weight: float = -1.0,
 ) -> dict:
     """
     Prepare the pose workflow with injected parameters.
 
     Workflow nodes:
-        109  LoadImage  -> inputs.image  (source character image = image1)
-        170  LoadImage  -> inputs.image  (reference pose image = image2)
+        109  LoadImage        -> inputs.image  (source character image = image1)
+        170  LoadImage        -> inputs.image  (reference pose image = image2)
         114  CLIPTextEncode (or similar) -> inputs.prompt  (text prompt)
-        3    KSampler   -> inputs.seed
+        3    KSampler         -> inputs.seed
+        8    VAEDecode        -> the PRE-ReActor frame (raw pose regen)
+        200  ReActorFaceSwap  -> inputs.face_restore_visibility / codeformer_weight
+        164  SaveImage        -> the POST-ReActor final output (images=["200",0])
+        300  SaveImage        -> WS4.1 debug-only node, injected when
+                                  debug_save_pre_reactor=True (images=["8",0])
 
     Args:
         template: Base workflow template
@@ -167,6 +194,19 @@ def prepare_pose_workflow(
         reference_image: ComfyUI filename for reference pose image
         prompt: Optional text prompt to inject into node 114
         seed: Optional seed value
+        debug_save_pre_reactor: WS4.1 diagnostic flag (default OFF). When
+            True, injects a second SaveImage node ("300") reading node 8
+            (VAEDecode) directly — the pose regen BEFORE the ReActor
+            face-swap runs — so it can be compared against the normal node
+            164 (post-swap) output to classify face-misalignment causes.
+            False (default) leaves the workflow byte-identical to before
+            this param existed.
+        reactor_restore_visibility: WS4.2 tuning knob (default -1.0 = no
+            override). When >= 0, overrides node 200's
+            ``face_restore_visibility`` (template default 0.8).
+        reactor_codeformer_weight: WS4.2 tuning knob (default -1.0 = no
+            override). When >= 0, overrides node 200's ``codeformer_weight``
+            (template default 0.25).
 
     Returns:
         Prepared workflow dict
@@ -204,6 +244,44 @@ def prepare_pose_workflow(
                 logger.debug("Bumped pose KSampler steps to 8")
         except (TypeError, ValueError):
             pass
+
+    # WS4.1: optional pre-ReActor debug capture. Injects a second SaveImage
+    # reading directly off node 8 (VAEDecode, the raw pose regen BEFORE the
+    # ReActor face-swap) so it can be compared against the normal node 164
+    # output (post-swap) when classifying face-misalignment causes (inswapper
+    # low-res paste / codeformer over-restoration / blend-seam / head-angle
+    # mismatch). Node id "300" is free (see module's verified node map).
+    # Mirrors node 164's exact dict shape (inputs/class_type/_meta). Guarded
+    # on "8" being present so an unexpected/future template shape degrades to
+    # a no-op instead of a KeyError; default False -> no node 300 at all, so
+    # the workflow is byte-identical to before this param existed.
+    if debug_save_pre_reactor and "8" in wf:
+        wf["300"] = {
+            "inputs": {
+                "images": ["8", 0],
+                "filename_prefix": "pose_preface",
+            },
+            "class_type": "SaveImage",
+            "_meta": {"title": "Save Image (pre-ReActor debug)"},
+        }
+        logger.debug("Injected debug SaveImage node 300 (pre-ReActor frame, prefix=pose_preface)")
+
+    # WS4.2: optional ReActor tuning knobs (node 200). >= 0 overrides the
+    # template's baked face_restore_visibility (0.8) / codeformer_weight
+    # (0.25); the default -1.0 sentinel leaves them untouched (0.0 is itself
+    # a valid override, so it can't double as "no override" here). Guarded on
+    # "200" being present for the same reason as the debug node above.
+    if "200" in wf:
+        if reactor_restore_visibility >= 0:
+            wf["200"]["inputs"]["face_restore_visibility"] = reactor_restore_visibility
+            logger.debug(
+                f"Overrode node 200 face_restore_visibility: {reactor_restore_visibility}"
+            )
+        if reactor_codeformer_weight >= 0:
+            wf["200"]["inputs"]["codeformer_weight"] = reactor_codeformer_weight
+            logger.debug(
+                f"Overrode node 200 codeformer_weight: {reactor_codeformer_weight}"
+            )
 
     return wf
 

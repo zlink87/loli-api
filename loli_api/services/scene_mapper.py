@@ -49,7 +49,7 @@ def _effective_outfit(scene: SceneSpec, controls: BatchControls) -> Optional[Out
     return outfit
 
 
-def _render_free_text(scene: SceneSpec) -> Optional[str]:
+def _render_free_text(scene: SceneSpec, include_activity: bool) -> Optional[str]:
     """
     The AI-authored, identity-free scene text folded into the background prompt so the
     planned "day" actually reaches the render instead of collapsing to bare
@@ -61,11 +61,22 @@ def _render_free_text(scene: SceneSpec) -> Optional[str]:
     it, and word-surgery on an already-written sentence leaves broken grammar, so the safer
     move is to skip a bad part entirely and keep the rest.
 
+    ``include_activity``: False when a pose step is active for this scene — the
+    activity phrase then rides the pose step's own prompt instead (see
+    api.v1.endpoints.pose.build_pose_prompt), so folding it into the background text
+    too would say the same thing on two separate render channels. True (today's
+    behavior) when there's no pose step, so the activity isn't lost entirely.
+
     NOTE: ``scene.narrative`` (free story prose) is deliberately NOT read here — it stays
     gallery-only so it can never leak identity/style into a render.
     """
+    parts = (
+        (scene.activity, scene.setting, scene.beat_description)
+        if include_activity
+        else (scene.setting, scene.beat_description)
+    )
     kept: list[str] = []
-    for part in (scene.activity, scene.setting, scene.beat_description):
+    for part in parts:
         text = (part or "").strip()
         if not text or pc.has_banned_style_words(text):
             continue
@@ -96,13 +107,22 @@ def scene_to_pipeline_request(
     outfit = _effective_outfit(scene, controls)
     nudity = _clamp_nudity(scene.nudityLevel, controls)
 
+    # Outfit-step-only knob (WS3.2): dead weight when there's no outfit step (outfit
+    # is None) or nothing to strengthen against (NAKED has no "current clothing" to
+    # override — build_prompt's NAKED branch doesn't consult it), so it's gated on a
+    # non-NAKED effective outfit. Batch avatars are dressed-by-default, so this is a
+    # dressed-source -> dressed-target heuristic.
+    outfit_denoise = (
+        controls.outfit_denoise if (outfit is not None and outfit != OutfitType.NAKED) else None
+    )
+
     background_text = scene.background_text or sv.build_scene_background_text(
         location=scene.location,
         time_of_day=scene.time_of_day,
         lighting=scene.lighting,
         mood_kinks=scene.mood_kinks,
         mood_personality=scene.mood_personality,
-        free_text=_render_free_text(scene),
+        free_text=_render_free_text(scene, include_activity=(pose is None)),
     )
 
     # Guarantee at least one active step (PipelineEditRequest requires >=1).
@@ -126,6 +146,19 @@ def scene_to_pipeline_request(
         source_image=character.hero_photo_url,
         pose=pose,
         outfit=outfit,
+        # WS2 structured description channels: outfit_detail/expression are
+        # identity-free and single-consumer (read only by the outfit/pose step
+        # builders respectively, which simply don't run when their step is absent),
+        # so they pass straight through unconditionally — same treatment as
+        # accessories/background_text below.
+        outfitDetail=scene.outfit_detail,
+        expression=scene.expression,
+        # activity is dual-routed (background text vs the pose step — see
+        # _render_free_text above): only set here when the pose step will actually
+        # consume it, so it's never duplicated-but-unread on the request.
+        activity=(scene.activity if pose is not None else None),
+        outfitDenoise=outfit_denoise,
+        outfitPromptMode=controls.outfit_prompt_mode,
         nudityLevel=nudity,
         accessories=scene.accessories,
         prompt=background_text or None,

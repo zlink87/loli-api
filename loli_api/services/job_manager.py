@@ -40,6 +40,12 @@ class Job:
     prompt_generated_at: Optional[datetime] = None
     image_generated_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    # WS3.1 observability: free-form per-job debug info, populated live during
+    # execution (e.g. PipelineBackgroundWorker._process_job /
+    # BatchPipelineWorker._process_job append {"steps": [{"step", "workflow_path",
+    # "tier", "seed"}, ...]}). Not persisted independently — batch_orchestrator
+    # copies it into character_images.metadata["workflow_meta"] on publish.
+    debug_meta: Dict[str, Any] = field(default_factory=dict)
 
 
 class JobManager:

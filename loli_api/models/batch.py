@@ -24,8 +24,16 @@ class BatchControls(BaseModel):
     max_nudity: NudityLevel = Field(
         default=NudityLevel.LOW,
         description=(
-            "Hard ceiling; planner output is clamped so nudity never exceeds this. "
+            "Hard ceiling; planner output is clamped so nudity never exceeds this, "
+            "and the finish level of the nudity arc. "
             "Dressed-by-default: explicit batches are opt-in via medium/high."
+        ),
+    )
+    start_nudity: Optional[NudityLevel] = Field(
+        default=None,
+        description=(
+            "Nudity of photo 1; ramps up to max_nudity (the finish + ceiling). "
+            "None = derive from escalation: building -> low, flat -> max_nudity."
         ),
     )
     sfw_only: bool = Field(default=False, description="Force nudity=LOW and drop the 'naked' outfit")
@@ -43,6 +51,22 @@ class BatchControls(BaseModel):
     blocked_outfits: List[OutfitType] = Field(
         default_factory=lambda: [OutfitType.NAKED],
         description="Blocklist (wins over allowlist); defaults to blocking 'naked'",
+    )
+    outfit_denoise: Optional[float] = Field(
+        default=None,
+        ge=0.5,
+        le=0.95,
+        description=(
+            "Outfit-step denoise for the crop-stitch edit (0.5-0.95); None = engine default (~0.80). "
+            "Higher = the new garment overrides the source clothing more strongly."
+        ),
+    )
+    outfit_prompt_mode: str = Field(
+        default="standard",
+        description=(
+            "'standard' (append the outfit description) | 'replace' (explicitly remove the "
+            "current clothing first, then describe the new outfit)"
+        ),
     )
     blocked_poses: List[PoseType] = Field(default_factory=list)
     allowed_locations: Optional[List[LocationType]] = None
@@ -101,6 +125,7 @@ class BatchCreate(BaseModel):
                 "count": 24,
                 "controls": {
                     "max_nudity": "medium",
+                    "start_nudity": "low",
                     "content_rating": "nsfw",
                     "escalation": "building",
                     "arc_count": 4,

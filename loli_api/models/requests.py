@@ -577,6 +577,34 @@ class PipelineEditRequest(BaseModel):
         default=None,
         description="Outfit type to apply. If set, outfit step runs."
     )
+    outfitDetail: Optional[str] = Field(
+        default=None,
+        max_length=160,
+        description=(
+            "Optional identity-free concrete garment description (colors/fabric/fit; "
+            "e.g. from SceneSpec.outfit_detail) appended after the outfit's tier prose "
+            "to sharpen it. Clothing ONLY. None = tier prose only (unchanged behavior)."
+        ),
+    )
+    outfitDenoise: Optional[float] = Field(
+        default=None,
+        ge=0.5,
+        le=0.95,
+        description=(
+            "Optional outfit-step denoise override for the crop-and-stitch graph "
+            "(node 106). Higher = the new garment overrides the source clothing more "
+            "strongly. None = engine default (~0.80). No effect on the legacy V1 "
+            "whole-frame graph."
+        ),
+    )
+    outfitPromptMode: Optional[str] = Field(
+        default=None,
+        description=(
+            "'standard' (default behavior: append outfit/outfitDetail) | 'replace' "
+            "(explicit remove-then-replace lead-in — use when a dressed source keeps "
+            "reconstructing its original garment). None behaves like 'standard'."
+        ),
+    )
     nudityLevel: NudityLevel = Field(
         default=NudityLevel.LOW,
         description="Nudity level for outfit step: low, medium, high"
@@ -585,6 +613,25 @@ class PipelineEditRequest(BaseModel):
         default=None,
         max_length=5,
         description="List of accessories to add during outfit step (max 5)"
+    )
+    activity: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional identity-free action phrase (e.g. from SceneSpec.activity) "
+            "routed to the pose step as ', while {activity}'. Only has an effect when "
+            "a pose step is active; ignored otherwise."
+        ),
+    )
+    expression: Optional[str] = Field(
+        default=None,
+        max_length=80,
+        description=(
+            "Optional facial expression/mood (e.g. from SceneSpec.expression) routed "
+            "to the pose step as ', {expression} expression'. Expression/mood ONLY — "
+            "never facial features. Only has an effect when a pose step is active "
+            "(non-posed items keep the hero's face byte-locked)."
+        ),
     )
     prompt: Optional[str] = Field(
         default=None,

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import requests as http_requests
 
+from config import settings
 from services.job_manager import JobManager, Job
 from services.comfyui_client import ComfyUIClient
 from services.runpod_client import RunPodServerlessClient
@@ -34,6 +35,7 @@ from api.v1.endpoints.background import build_background_prompt, prepare_backgro
 from services import head_mask as head_mask_service
 from services import pose_assets
 from services.prompt_constants import apply_edit_photo_style
+from services.workflow_meta import describe_template
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,39 @@ def _stage_image(image_bytes: bytes, prefix: str) -> tuple:
     name = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
     b64 = base64.b64encode(image_bytes).decode("ascii")
     return name, [{"name": name, "image": f"data:image/png;base64,{b64}"}]
+
+
+def _select_primary_output(
+    outputs: List[Dict[str, Optional[str]]], primary_prefix: str = "pose_edit"
+) -> Optional[Dict[str, Optional[str]]]:
+    """
+    Pick the PRIMARY output entry from a worker-comfyui ``outputs`` list (the
+    normalized shape ``RunPodServerlessClient.parse_output`` returns: dicts
+    carrying at least ``filename``/``type``/``url``/``data``).
+
+    Normally a step's workflow has exactly one SaveImage node, so ``outputs``
+    has one entry and picking ``outputs[0]`` (the old behavior) is fine. WS4.1
+    adds a SECOND SaveImage to the pose workflow (node "300", filename prefix
+    "pose_preface") for pre-ReActor debugging alongside the real one (node
+    164, prefix "pose_edit") when ``settings.POSE_DEBUG_SAVE_PRE_REACTOR`` is
+    on — and RunPod does not guarantee output list ordering, so blindly taking
+    ``outputs[0]`` could hand the PRE-swap debug frame to the next pipeline
+    step instead of the real post-ReActor one. This matches by filename
+    PREFIX (worker-comfyui appends a counter/suffix to ``filename_prefix``,
+    e.g. ``pose_edit_00001_.png``), so it's independent of list order.
+
+    Falls back to ``outputs[0]`` when nothing matches the prefix (the normal
+    single-SaveImage steps — outfit/background use prefix "edit_out", and
+    pose with the debug flag off only ever produces the one "pose_edit"
+    entry), so existing behavior is unchanged whenever there's nothing to
+    disambiguate. Returns None on an empty list rather than raising, so
+    callers keep control of the "no images" error message.
+    """
+    for entry in outputs:
+        filename = entry.get("filename") or ""
+        if filename.startswith(primary_prefix):
+            return entry
+    return outputs[0] if outputs else None
 
 
 class PipelineBackgroundWorker:
@@ -122,6 +157,10 @@ class PipelineBackgroundWorker:
         self._pose_template: Optional[dict] = None
         self._outfit_template: Optional[dict] = None
         self._background_template: Optional[dict] = None
+        # WS3.1 observability: per-step resolved workflow info, keyed by step
+        # label ("pose"/"outfit"/"background"), populated by _load_workflows().
+        # {"path": <resolved abs path str>, "tier": ..., "sampler": {...}}
+        self.workflow_meta: Dict[str, dict] = {}
 
     async def start(self) -> None:
         """Start the pipeline background worker."""
@@ -153,8 +192,23 @@ class PipelineBackgroundWorker:
                 if not workflow_file.exists():
                     raise FileNotFoundError(f"{label} workflow not found: {path}")
                 with open(workflow_file, "r", encoding="utf-8") as f:
-                    setattr(self, attr, json.load(f))
+                    template = json.load(f)
+                setattr(self, attr, template)
                 logger.info(f"Loaded {label} workflow template: {path}")
+
+                # WS3.1 observability: record which tier actually loaded (as opposed
+                # to which env var was configured) so a mis-deployed environment that
+                # silently degrades to V1 shows up in logs/debug endpoints instead of
+                # only in the rendered image quality. Tagged uniquely
+                # ([WORKFLOW-RESOLVED]) so it doesn't collide with the identically
+                # worded "Loaded ... workflow template:" line above, which several
+                # engines (interactive outfit worker, pipeline, batch) all emit.
+                resolved_path = str(workflow_file.resolve())
+                meta = describe_template(template)
+                self.workflow_meta[label] = {"path": resolved_path, **meta}
+                logger.info(
+                    f"[WORKFLOW-RESOLVED] {label} -> {resolved_path} tier={meta['tier']}"
+                )
             except Exception as e:
                 logger.error(f"Failed to load {label} workflow: {e}")
                 raise
@@ -220,6 +274,13 @@ class PipelineBackgroundWorker:
         flat filename of the staged server-computed head-protect mask (node 211).
         Both are computed once in ``_run_step`` so the same names feed the nodes
         and the base64 ``input.images[]`` entries.
+
+        WS2/WS3.2: ``request.activity``/``expression`` (pose step) and
+        ``request.outfitDetail``/``outfitDenoise``/``outfitPromptMode`` (outfit
+        step) are read via ``getattr(..., None)``/defensive defaults so any
+        request object missing them (e.g. a hand-built test stand-in, or the
+        legacy interactive endpoints' own request models, which don't carry
+        these fields at all) degrades to the pre-WS2/WS3.2 behavior exactly.
         """
         # Optional photographic-finish clause. Applied ONLY on the last active
         # step: earlier revisions applied it at every step, and 2-3 re-diffusions
@@ -230,13 +291,27 @@ class PipelineBackgroundWorker:
 
         if step_name == "pose":
             logger.info(f"[PIPELINE] {job_id} | pose | Reference: {pose_ref_name}")
-            prompt = apply_edit_photo_style(build_pose_prompt(request.pose), photo_style)
+            prompt = apply_edit_photo_style(
+                build_pose_prompt(
+                    request.pose,
+                    activity=getattr(request, "activity", None),
+                    expression=getattr(request, "expression", None),
+                ),
+                photo_style,
+            )
             return prepare_pose_workflow(
-                self._pose_template, source_name, pose_ref_name, prompt=prompt, seed=seed
+                self._pose_template, source_name, pose_ref_name, prompt=prompt, seed=seed,
+                debug_save_pre_reactor=settings.POSE_DEBUG_SAVE_PRE_REACTOR,
+                reactor_restore_visibility=settings.POSE_REACTOR_RESTORE_VISIBILITY,
+                reactor_codeformer_weight=settings.POSE_REACTOR_CODEFORMER_WEIGHT,
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(
-                build_prompt(request.outfit, request.accessories, request.nudityLevel),
+                build_prompt(
+                    request.outfit, request.accessories, request.nudityLevel,
+                    outfit_detail=getattr(request, "outfitDetail", None),
+                    replace_mode=(getattr(request, "outfitPromptMode", "standard") == "replace"),
+                ),
                 photo_style,
             )
             logger.info(f"[PIPELINE] {job_id} | outfit | Prompt: {prompt[:80]}...")
@@ -245,6 +320,7 @@ class PipelineBackgroundWorker:
                 nudity_level=request.nudityLevel, outfit=request.outfit,
                 head_mask_name=head_mask_name,
                 source_dressed=getattr(request, "sourceDressed", False),
+                denoise=getattr(request, "outfitDenoise", None),
             )
         if step_name == "background":
             prompt = apply_edit_photo_style(build_background_prompt(request.prompt), photo_style)
@@ -265,6 +341,13 @@ class PipelineBackgroundWorker:
         Run one pipeline step on RunPod with source_bytes as the input image.
         Returns the output image bytes (downloading the worker's S3 URL if needed).
         """
+        step_meta = self.workflow_meta.get(step_name, {})
+        step_path = step_meta.get("path")
+        logger.info(
+            f"[PIPELINE] {job_id} | {step_name} | workflow tier={step_meta.get('tier', 'unknown')} "
+            f"path={Path(step_path).name if step_path else 'unknown'}"
+        )
+
         source_name, images = _stage_image(source_bytes, f"pipe_{step_name}")
 
         # Pose steps need the reference PNG shipped alongside the source image as a
@@ -311,13 +394,85 @@ class PipelineBackgroundWorker:
         )
         if not outputs:
             raise RuntimeError(f"No images returned from {step_name} step")
-        first = outputs[0]
-        if first.get("url"):
-            return await asyncio.to_thread(_download_image, first["url"])
-        data = first.get("data")
+
+        # WS4.1: with the pre-ReActor debug SaveImage active, the pose step's
+        # outputs list carries TWO entries and RunPod does not guarantee
+        # ordering — always continue the pipeline on the real post-ReActor
+        # "pose_edit" one, never the debug "pose_preface" frame.
+        primary = _select_primary_output(outputs, primary_prefix="pose_edit")
+        if primary is None:
+            raise RuntimeError(f"No images returned from {step_name} step")
+
+        if step_name == "pose" and settings.POSE_DEBUG_SAVE_PRE_REACTOR:
+            await self._capture_pose_debug_frame(outputs, primary, job_id)
+
+        if primary.get("url"):
+            return await asyncio.to_thread(_download_image, primary["url"])
+        data = primary.get("data")
         if not data:
             raise RuntimeError(f"No image data from {step_name} step")
         return base64.b64decode(data)
+
+    async def _capture_pose_debug_frame(
+        self,
+        outputs: List[Dict[str, Optional[str]]],
+        primary: Dict[str, Optional[str]],
+        job_id: str,
+    ) -> None:
+        """
+        WS4.1: when POSE_DEBUG_SAVE_PRE_REACTOR is on, the pose workflow's
+        outputs list carries a second entry (filename prefix "pose_preface")
+        alongside the primary "pose_edit" one — the raw pose regen BEFORE the
+        ReActor face-swap (node 8, VAEDecode; see prepare_pose_workflow).
+        Persist it to the same storage backend the pipeline already uses for
+        real output images (Supabase when configured, else local disk), under
+        a debug_frames/{job_id}_pre_reactor key, so it can be pulled up next
+        to the final face-swapped output when classifying misalignment causes
+        (inswapper low-res paste / codeformer over-restoration / blend-seam /
+        head-angle mismatch). Always logs the resolved URL too
+        (``[POSE-DEBUG] {job_id} pre_reactor frame: {url}``) so the frame is
+        retrievable even if persistence itself fails.
+
+        Best-effort by design: a failure here must never fail the pipeline
+        job — it only means the diagnostic artifact is lost, not the batch
+        item — so every failure path is caught and logged, never raised.
+        """
+        debug_entry = next(
+            (
+                o for o in outputs
+                if o is not primary and (o.get("filename") or "").startswith("pose_preface")
+            ),
+            None,
+        )
+        if debug_entry is None:
+            logger.debug(f"[POSE-DEBUG] {job_id} | no pose_preface frame in outputs")
+            return
+
+        try:
+            if debug_entry.get("url"):
+                debug_bytes = await asyncio.to_thread(_download_image, debug_entry["url"])
+            else:
+                data = debug_entry.get("data")
+                if not data:
+                    logger.warning(f"[POSE-DEBUG] {job_id} | pre_reactor entry has no url/data")
+                    return
+                debug_bytes = base64.b64decode(data)
+
+            debug_id = f"{job_id}_pre_reactor"
+            if self.supabase_storage:
+                debug_url, _ = await asyncio.to_thread(
+                    self.supabase_storage.upload_image,
+                    image=debug_bytes,
+                    image_id=debug_id,
+                    folder="debug_frames",
+                )
+            else:
+                relative_path, _ = self.storage.save_image(debug_bytes, debug_id)
+                debug_url, _ = self.storage.generate_signed_url(relative_path)
+
+            logger.info(f"[POSE-DEBUG] {job_id} pre_reactor frame: {debug_url}")
+        except Exception as e:  # noqa: BLE001 — diagnostic capture must never fail the job
+            logger.warning(f"[POSE-DEBUG] {job_id} | failed to persist pre_reactor frame: {e}")
 
     async def _process_job(self, job: Job) -> None:
         """
@@ -390,6 +545,17 @@ class PipelineBackgroundWorker:
                     progress_start=step_progress_start, progress_end=step_progress_end,
                     is_final_step=(i == num_steps - 1),
                 )
+
+                # WS3.1 observability: record which workflow tier/path actually ran
+                # this step, live, on the Job itself — surfaced later in
+                # character_images.metadata by batch_orchestrator._publish_image.
+                step_meta = self.workflow_meta.get(step_name, {})
+                job.debug_meta.setdefault("steps", []).append({
+                    "step": step_name,
+                    "workflow_path": step_meta.get("path"),
+                    "tier": step_meta.get("tier"),
+                    "seed": seed,
+                })
 
                 logger.info(
                     f"[PIPELINE] {job.job_id} | {step_name} complete, "

@@ -661,3 +661,109 @@ the same `shot` values (defaults) and at most ~2 kinks per persona (the prompt
 layer now caps kink mood phrases at 2). Outfit texts that emphasize skirts/legs
 will pull the crop wider than waist_up — pick `framing: "three_quarter"` for
 those instead of fighting it.
+
+---
+
+## Addendum (2026-07-09): nudity arc, structured description channels, outfit strength
+
+### `start_nudity` + the nudity arc
+
+`controls.start_nudity` (optional `NudityLevel`) sets photo 1's nudity target; the
+server ramps it up to `max_nudity` (the finish level) across the batch. Derivation
+when `start_nudity` is omitted (`null`):
+
+- `escalation: "building"` → starts **low**, rises to `max_nudity` (a real rising
+  ceiling, not just a flat cap).
+- `escalation: "flat"` → constant at `max_nudity` for every photo (today's
+  ceiling-only behavior — unchanged back-compat default).
+- An **explicit `start_nudity` always wins** over either derivation.
+
+```jsonc
+"controls": {
+  "max_nudity": "high",
+  "start_nudity": "low",     // NEW — photo 1 starts low, ramps toward "high" by the end
+  "escalation": "building"
+}
+```
+
+**Semantics — a guided ceiling, not a strict override.** The server computes a
+per-photo nudity *target* (a monotonically non-decreasing ceiling walking from
+`start_nudity` to `max_nudity` across the batch) and enforces it server-side: a
+planned photo can never exceed its target, but it MAY stay lower when the scene
+calls for it (e.g. a hospital-shift scene mid-batch stays modest) — so the sequence
+never de-escalates once it has risen, without being forced onto a rigid per-photo
+schedule either. In a dry-run storyboard (`dry_run: true`), each item's
+`scene_spec.nudityLevel` already reflects this enforcement — read it directly, there
+is no separate "target" field to inspect.
+
+### Structured description channels: `outfit_detail` + `expression`
+
+Each item's `scene_spec` can now carry two additional identity-free fields, alongside
+the existing `beat_description` / `setting` / `activity`:
+
+```jsonc
+"scene_spec": {
+  ...
+  "outfit_detail": "champagne silk pajama set, camisole and shorts",  // NEW, nullable
+  "expression": "sleepy soft smile",                                  // NEW, nullable
+  ...
+}
+```
+
+- `outfit_detail` (≤160 chars) — a concrete garment description (colors/fabric/fit)
+  that sharpens the chosen `outfit` enum's generic tier prose for that photo's
+  render. Clothing only.
+- `expression` (≤80 chars) — that photo's facial expression/mood only (never facial
+  features like eyes/lips/face shape). Only has a visible effect on photos that also
+  have a `pose` planned — non-posed photos keep the hero's face byte-locked, so
+  there's nothing for a prompted expression to change there.
+
+Both are populated only when the story director (Venice provider) authored the
+batch — they are `null` on the deterministic fallback planner. Nothing new to build
+in the admin UI beyond optionally surfacing them on a storyboard card.
+
+### Outfit application strength: `outfit_denoise` + `outfit_prompt_mode`
+
+Two new `controls` knobs tune how strongly the outfit step overrides the hero's
+current clothing — useful when a dressed avatar keeps "showing through" a planned
+outfit change:
+
+```jsonc
+"controls": {
+  "outfit_denoise": 0.85,          // optional float 0.5-0.95; null = engine default (~0.80)
+  "outfit_prompt_mode": "replace"  // "standard" (default) | "replace"
+}
+```
+
+- `outfit_denoise` — raises the outfit step's regeneration strength within the
+  crop-and-stitch edit region. Higher = the new garment overrides the source
+  clothing more strongly (small tradeoff: a bit more regeneration drift). Only takes
+  effect on the crop-and-stitch outfit tiers (see below); inert on the legacy V1
+  whole-frame graph.
+- `outfit_prompt_mode: "replace"` — swaps the outfit step's instruction to an
+  explicit "remove the current clothing completely, then apply: {description}"
+  lead-in, instead of the default "change the outfit to: {description}" phrasing.
+  Reach for this when dressed-avatar → dressed-target swaps keep reconstructing the
+  original garment.
+
+Both default to today's behavior (`null` / `"standard"`) — treat them as an
+"advanced" batch-launch option, not a required field.
+
+### Likes/dislikes are batch-level and NOT persisted (reminder)
+
+Calling this out explicitly since it trips people up: `likes` / `dislikes` on
+`BatchCreate` only bias *that one batch's* planning — they are not saved onto the
+character or carried into the next batch. **The admin UI must (re)send them on every
+batch launch**, including a relaunch for the same character, if it wants consistent
+likes/dislikes-driven scenes; there is nothing server-side to prefill from a prior
+batch.
+
+### Outfit rendering tiers (context for `outfit_denoise`/`outfit_prompt_mode`)
+
+The outfit step resolves through a 3-tier chain, strongest first: Tier-A full 2511
+(`2511full`) → Rapid crop-and-stitch (`rapid_cropstitch`) → legacy whole-frame
+(`v1`, weakest — only reachable via a mis-deployed environment). This is backend
+config, not an admin-panel input, but if outfit changes look weak or absent across a
+batch, ask backend ops to check `GET /debug/workflow-config` (debug builds only)
+before reaching for `outfit_denoise` / `outfit_prompt_mode` — a batch stuck on the
+`v1` tier needs a deployment fix, not a stronger prompt.

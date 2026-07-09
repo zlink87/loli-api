@@ -390,6 +390,18 @@ class BatchReconciler:
                 # Story text surfaced for cheap reads (also inside scene_spec).
                 "narrative": narrative,
                 "story_title": story_title,
+                # WS3.1 observability: per-step workflow tier/path/seed, captured
+                # LIVE during execution (BatchPipelineWorker._process_job appends to
+                # job.debug_meta via the shared engine's workflow_meta — see
+                # workers/batch_pipeline_worker.py and services/workflow_meta.py).
+                # `job` here is the actual in-memory Job object handed to us by
+                # _handle_succeeded (job_manager.get_job(item.job_id)), so
+                # debug_meta is cheaply reachable directly off it; BatchReconciler
+                # holds no reference to the batch engine to fall back to, and none
+                # is needed since this is the load-bearing, already-populated
+                # signal. getattr guards test doubles / older in-memory jobs that
+                # predate this field.
+                "workflow_meta": getattr(job, "debug_meta", None) or {},
             },
         )
         await self.character_image_store.create_action(

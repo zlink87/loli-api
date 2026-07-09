@@ -24,6 +24,16 @@ Covers:
   c16 every selected generation option lands in the assembled prompt, and the
       scene clause (used verbatim; Venice generation-scene-writing was removed
       2026-07-08) sits before persona flavor, not buried at the tail.
+  c17 Venice generation-scene-writing fully removed (regression guard).
+  c18 outfit build_prompt: outfit_detail appended after the tier prose, before
+      the identity clause; omitted -> byte-identical to the pre-WS2 prompt.
+  c19 outfit build_prompt: outfit_detail also appended on the NAKED branch.
+  c20 outfit build_prompt: replace_mode swaps the dressed-branch lead-in to the
+      remove-then-replace instruction; NAKED branch is unaffected (it already
+      reads as a removal).
+  c21 build_pose_prompt: activity/expression appended (", while {activity}" /
+      ", {expression} expression"); base prompt is byte-identical when both are
+      omitted/None (back-compat for /v1/edit/pose, which never sets them).
 
 (c7, c8, c15 covered `has_contradiction`/`MAX_SCENE_WORDS`/`scene_preserves_hint`
 — all removed with the Venice generation-scene-writer on 2026-07-08. c11 is the
@@ -350,6 +360,83 @@ def test_venice_generation_enhancement_removed():
 
 
 # ---------------------------------------------------------------------------
+# c18 — outfit build_prompt: outfit_detail appended after the tier prose
+# ---------------------------------------------------------------------------
+def test_outfit_detail_appended_after_tier_prose():
+    base = outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW)
+    detailed = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW,
+        outfit_detail="charcoal pinstripe, fitted blazer",
+    )
+    assert "charcoal pinstripe, fitted blazer" in detailed
+    assert "charcoal pinstripe, fitted blazer" not in base
+    # It sharpens the lead sentence: sits before the identity clause.
+    identity = pc.identity_clause("the outfit and clothing")
+    assert identity in detailed
+    assert detailed.index("charcoal pinstripe") < detailed.index(identity)
+    # Omitting it reproduces the exact unchanged prompt (back-compat).
+    assert outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW) == base
+    print("c18 OK: outfit_detail appended after the tier prose, before the identity clause")
+
+
+# ---------------------------------------------------------------------------
+# c19 — outfit build_prompt: outfit_detail also appended on the NAKED branch
+# ---------------------------------------------------------------------------
+def test_outfit_detail_appended_on_naked_branch_too():
+    detailed = outfit_ep.build_prompt(
+        OutfitType.NAKED, None, NudityLevel.HIGH, outfit_detail="a thin gold anklet only",
+    )
+    assert detailed.startswith("Remove all clothing")
+    assert "a thin gold anklet only" in detailed
+    print("c19 OK: outfit_detail also appended on the NAKED branch")
+
+
+# ---------------------------------------------------------------------------
+# c20 — outfit build_prompt: replace_mode swaps the dressed-branch lead-in
+# ---------------------------------------------------------------------------
+def test_outfit_replace_mode_swaps_lead_in():
+    standard = outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW)
+    replaced = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, replace_mode=True,
+    )
+    assert "Change the person's outfit to:" in standard
+    assert "Remove the person's current clothing completely and replace it with:" in replaced
+    assert "no piece of the previous outfit may remain visible" in replaced
+    assert "Change the person's outfit to:" not in replaced
+    # Rest of the prompt (identity clause, "only change" instruction) is unaffected.
+    assert "only change the clothing, nothing else" in replaced
+
+    # replace_mode is a no-op on the NAKED branch: it already reads as a removal.
+    naked_standard = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH)
+    naked_replace = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH, replace_mode=True)
+    assert naked_standard == naked_replace
+    print("c20 OK: replace_mode swaps the dressed-branch lead-in; NAKED branch unaffected")
+
+
+# ---------------------------------------------------------------------------
+# c21 — build_pose_prompt: activity/expression appended; base unchanged when
+# both are None (back-compat: /v1/edit/pose never sets them)
+# ---------------------------------------------------------------------------
+def test_pose_prompt_activity_and_expression_appended():
+    base = pose_ep.build_pose_prompt(PoseType.SITTING)
+    with_both = pose_ep.build_pose_prompt(
+        PoseType.SITTING, activity="pouring coffee", expression="sleepy soft smile",
+    )
+    assert with_both == base + ", while pouring coffee, sleepy soft smile expression"
+
+    only_activity = pose_ep.build_pose_prompt(PoseType.SITTING, activity="pouring coffee")
+    assert only_activity == base + ", while pouring coffee"
+
+    only_expression = pose_ep.build_pose_prompt(PoseType.SITTING, expression="sleepy soft smile")
+    assert only_expression == base + ", sleepy soft smile expression"
+
+    # Base prompt is byte-identical when both are omitted, or explicitly None.
+    explicit_none = pose_ep.build_pose_prompt(PoseType.SITTING, activity=None, expression=None)
+    assert explicit_none == base
+    print("c21 OK: activity/expression appended when given; base unchanged when both None")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -368,6 +455,10 @@ def _run_all():
         test_outfit_low_tier_has_no_exposure_language,
         test_generation_prompt_option_fidelity,
         test_venice_generation_enhancement_removed,
+        test_outfit_detail_appended_after_tier_prose,
+        test_outfit_detail_appended_on_naked_branch_too,
+        test_outfit_replace_mode_swaps_lead_in,
+        test_pose_prompt_activity_and_expression_appended,
     ]
     failures = 0
     for fn in tests:

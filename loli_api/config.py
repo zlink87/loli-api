@@ -41,9 +41,32 @@ class Settings(BaseSettings):
     # on the fast path for cost. REQUIRES the worker image to stage the 2511 model +
     # LoRA files first (see download2.sh Tier-A section) — redeploy before enabling.
     COMFYUI_OUTFIT_WORKFLOW_PATH_2511: str = ""
+    # WS3.2: batch-ONLY outfit workflow path override, independent of the interactive
+    # /v1/edit/outfit and /v1/edit pipeline engines' own tier-precedence chain above.
+    # EMPTY (default) -> the batch engine follows that SAME chain (_2511 or _V2 or V1;
+    # see main.py). Set this only when the batch engine specifically needs a different
+    # template than the interactive engines (e.g. a staged rollout to batches first).
+    COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH: str = ""
     COMFYUI_POSE_WORKFLOW_PATH: str = "workflows/edit_pose_action.json"
     COMFYUI_VIDEO_WORKFLOW_PATH: str = "workflows/wan_i2v.json"
     COMFYUI_INPUT_DIR: str = "../ComfyUI/input"
+
+    # WS4.1/4.2 — pose face-alignment diagnostics (flag-gated, default OFF).
+    # Root-causing small face misalignments on posed batch items: every posed
+    # item's face comes from this step (full-frame regen + ReActorFaceSwap,
+    # node 200), so it's the final word on the face. WS4.1 captures the
+    # pre-ReActor frame (node 8 VAEDecode) alongside the normal post-swap
+    # SaveImage (node 164) so the two can be A/B'd to classify the cause
+    # (inswapper low-res paste / codeformer over-restoration / blend-seam /
+    # head-angle mismatch). WS4.2 exposes the ReActor restore-visibility /
+    # codeformer-weight knobs (node 200) without a code change, once 4.1's
+    # data suggests they're the lever to pull. -1.0 sentinel on the float
+    # knobs means "leave the template's baked 0.8 / 0.25 alone" (0.0 is
+    # itself a valid override, so unlike the request-model fields elsewhere,
+    # None can't double as the "no override" marker on a typed float setting).
+    POSE_DEBUG_SAVE_PRE_REACTOR: bool = False
+    POSE_REACTOR_RESTORE_VISIBILITY: float = -1.0
+    POSE_REACTOR_CODEFORMER_WEIGHT: float = -1.0
 
     # GPU execution backend: "runpod" (serverless) or "local" (legacy WebSocket)
     GPU_BACKEND: str = "runpod"
@@ -114,6 +137,15 @@ class Settings(BaseSettings):
     BATCH_MAX_INFLIGHT: int = 3
     # Per-item retry attempts before an item is marked failed.
     BATCH_ITEM_MAX_ATTEMPTS: int = 2
+    # WS3.2: fail fast at batch-worker startup if the batch engine's RESOLVED outfit
+    # template is NOT a crop-and-stitch graph (workflow_meta tier "v1") — guards
+    # against a mis-deployed environment (e.g. a CI-built image missing the
+    # gitignored .env, so COMFYUI_OUTFIT_WORKFLOW_PATH_2511/_V2 read empty and the
+    # chain silently lands on the weak V1 whole-frame graph) shipping degraded batch
+    # outfit quality with no visible error. False (default) preserves today's
+    # silent-fallback-to-V1 behavior for back-compat; flip true once Phase 0
+    # diagnostics confirm the deployment resolves a crop-stitch tier.
+    BATCH_REQUIRE_CROPSTITCH_OUTFIT: bool = False
     # Rough per-step wall-clock estimate (seconds) used only for BatchEstimate.
     RUNPOD_AVG_STEP_SECONDS: int = 60
     # Optional GPU cost rate (USD/second) for BatchEstimate.est_cost_usd. 0 -> omit.

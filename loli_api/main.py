@@ -250,11 +250,20 @@ if supabase_db.is_configured():
         comfyui_client=comfyui_client,
         storage_service=storage_service,
         pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
-        # Batch outfit step follows the same tier precedence as the interactive/pipeline
-        # workers (Tier A full-2511 -> Rapid V2 -> V1; auto-detected by
-        # prepare_outfit_workflow). Enabling _V2 / _2511 requires the worker image +
-        # volume models staged first (see docs/RUNBOOK_masking_v2.md).
-        outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+        # Batch outfit step normally follows the same tier precedence as the
+        # interactive/pipeline workers (Tier A full-2511 -> Rapid V2 -> V1;
+        # auto-detected by prepare_outfit_workflow). WS3.2:
+        # COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH is a batch-ONLY override (e.g. staging a
+        # new template on batches before cutting the interactive engines over) that
+        # takes precedence when set; empty (default) falls through to that same
+        # chain. Enabling _V2 / _2511 requires the worker image + volume models
+        # staged first (see docs/RUNBOOK_masking_v2.md).
+        outfit_workflow_path=(
+            settings.COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH
+            or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511
+            or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2
+            or settings.COMFYUI_OUTFIT_WORKFLOW_PATH
+        ),
         # Background step stays on V1 (see pipeline_worker note above).
         background_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
         image_cache_service=image_cache_service,
@@ -337,7 +346,12 @@ async def lifespan(app: FastAPI):
     logger.info(f"ComfyUI Server: {settings.COMFYUI_SERVER_ADDRESS}")
     logger.info(f"Storage Dir: {settings.STORAGE_DIR}")
     logger.info(f"Supabase Storage: {'Enabled' if settings.USE_SUPABASE_STORAGE else 'Disabled'}")
-    logger.info(f"Outfit Workflow: {settings.COMFYUI_OUTFIT_WORKFLOW_PATH}")
+    # NOTE: this is only the static V1 FALLBACK config value, not what any engine
+    # actually resolved (outfit follows a _2511 -> _V2 -> V1 precedence chain, and
+    # a mis-deployed environment can silently degrade to V1 here regardless). See
+    # the [WORKFLOW-RESOLVED] lines emitted after workers start, and
+    # GET /debug/workflow-config, for the ground truth per engine.
+    logger.info(f"Outfit Workflow (V1 fallback default): {settings.COMFYUI_OUTFIT_WORKFLOW_PATH}")
     logger.info(f"Pose Workflow: {settings.COMFYUI_POSE_WORKFLOW_PATH}")
     logger.info(f"Edit Workflow: {settings.COMFYUI_EDIT_WORKFLOW_PATH}")
     logger.info(f"Image Cache TTL: {settings.IMAGE_CACHE_TTL_SECONDS}s")
@@ -397,6 +411,17 @@ async def lifespan(app: FastAPI):
             await w.start()
         if batch_reconciler:
             await batch_reconciler.start()
+
+        # WS3.1 observability: log the REAL resolved workflow (path + tier) per
+        # engine now that _load_workflows() has run (pipeline_worker.start() above;
+        # batch_engine's templates load inside the first batch_workers[i].start()).
+        # This is the trustworthy replacement for the "Outfit Workflow (V1 fallback
+        # default)" line printed earlier, which only ever showed the static config
+        # default regardless of which tier actually loaded.
+        logger.info(f"[WORKFLOW-RESOLVED] pipeline engine: {pipeline_worker.workflow_meta}")
+        if batch_engine is not None:
+            logger.info(f"[WORKFLOW-RESOLVED] batch engine: {batch_engine.workflow_meta}")
+
         logger.info("Background workers started successfully")
     except Exception as e:
         logger.error(f"Failed to start background workers: {e}")
@@ -601,6 +626,20 @@ if settings.DEBUG:
     async def get_image_cache_stats():
         """Get image cache statistics (DEBUG MODE ONLY)."""
         return image_cache_service.get_stats()
+
+    @app.get("/debug/workflow-config", tags=["Debug"])
+    async def get_workflow_config():
+        """
+        Resolved workflow path+tier per engine (DEBUG MODE ONLY).
+
+        Ground truth for "what did we actually load", as opposed to the static
+        settings.COMFYUI_OUTFIT_WORKFLOW_PATH config default — see
+        services/workflow_meta.py and the [WORKFLOW-RESOLVED] startup log lines.
+        """
+        return {
+            "pipeline": pipeline_worker.workflow_meta,
+            "batch": batch_engine.workflow_meta if batch_engine is not None else None,
+        }
 
 
 if __name__ == "__main__":

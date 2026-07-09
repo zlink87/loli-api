@@ -97,7 +97,30 @@ def _outfit_change_lead(outfit: OutfitType, outfit_desc: str) -> str:
     return f"Change the person's outfit to: {outfit_desc}"
 
 
-def build_prompt(outfit: OutfitType, accessories: Optional[List[AccessoryType]], nudity_level: NudityLevel = NudityLevel.LOW) -> str:
+def _outfit_replace_lead(outfit: OutfitType, outfit_desc: str) -> str:
+    """
+    Lead sentence for a (dressed) outfit change in REPLACE mode (WS3.2).
+
+    Dressed-source -> dressed-target swaps sometimes reconstruct the SOURCE
+    garment (the edit model tends to use whatever is already on the body as its
+    own reference), especially at the default denoise. This lead explicitly
+    instructs removal of the current clothing before describing the new one,
+    for callers that opt in via ``outfit_prompt_mode="replace"``. ``outfit`` is
+    accepted for signature stability, mirroring ``_outfit_change_lead``.
+    """
+    return (
+        f"Remove the person's current clothing completely and replace it with: "
+        f"{outfit_desc}; no piece of the previous outfit may remain visible"
+    )
+
+
+def build_prompt(
+    outfit: OutfitType,
+    accessories: Optional[List[AccessoryType]],
+    nudity_level: NudityLevel = NudityLevel.LOW,
+    outfit_detail: Optional[str] = None,
+    replace_mode: bool = False,
+) -> str:
     """
     Build the positive prompt from outfit and accessories.
     Ensures the person's face, hair, and physical features are never altered.
@@ -106,6 +129,15 @@ def build_prompt(outfit: OutfitType, accessories: Optional[List[AccessoryType]],
         outfit: The outfit type
         accessories: Optional list of accessories
         nudity_level: Nudity level (low, medium, high)
+        outfit_detail: Optional identity-free concrete garment description
+            (colors/fabric/fit — e.g. SceneSpec.outfit_detail from the story
+            director) appended onto the lead sentence, right after the generic
+            OUTFIT_DESCRIPTIONS tier prose it sharpens. None = tier prose only
+            (unchanged interactive-endpoint behavior).
+        replace_mode: WS3.2. When True (dressed branch only), swaps the lead-in
+            for an explicit remove-then-replace instruction (see
+            ``_outfit_replace_lead``). The NAKED branch already reads as a
+            removal instruction, so this has no effect there.
 
     Returns:
         Complete prompt string
@@ -117,14 +149,24 @@ def build_prompt(outfit: OutfitType, accessories: Optional[List[AccessoryType]],
         outfit_desc = str(outfit.value)
 
     if outfit == OutfitType.NAKED:
+        lead = f"Remove all clothing, the person should be {outfit_desc}"
+        if outfit_detail and outfit_detail.strip():
+            lead += f", {outfit_detail.strip()}"
         prompt_parts = [
-            f"Remove all clothing, the person should be {outfit_desc}",
+            lead,
             pc.identity_clause("the clothing and covering"),
             "only change the clothing and covering, nothing else",
         ]
     else:
+        lead = (
+            _outfit_replace_lead(outfit, outfit_desc)
+            if replace_mode
+            else _outfit_change_lead(outfit, outfit_desc)
+        )
+        if outfit_detail and outfit_detail.strip():
+            lead += f", {outfit_detail.strip()}"
         prompt_parts = [
-            _outfit_change_lead(outfit, outfit_desc),
+            lead,
             pc.identity_clause("the outfit and clothing"),
             "only change the clothing, nothing else",
         ]
@@ -177,6 +219,7 @@ def prepare_outfit_cropstitch_workflow(
     negative_prompt: Optional[str] = None,
     head_mask_name: Optional[str] = None,
     source_dressed: bool = False,
+    denoise: Optional[float] = None,
 ) -> dict:
     """
     Prepare the V2 crop-and-stitch outfit graph (``outfit_cropstitch_API.json``).
@@ -241,7 +284,11 @@ def prepare_outfit_cropstitch_workflow(
     # (the whole-torso re-diffuse was wiping out clothing detail); a full dress-up over
     # bare skin still applies at 0.80. GARMENT (opt-in, dressed source) shares the value
     # for now — split the ternary back out if the two modes need independent tuning.
-    wf["106"]["inputs"]["denoise"] = 0.80
+    # WS3.2: caller override (BatchControls.outfit_denoise -> PipelineEditRequest.
+    # outfitDenoise, 0.5-0.95) — a dressed source -> dressed target swap sometimes
+    # needs a stronger denoise than 0.80 to stop the source garment reconstructing
+    # itself. None (default / interactive callers) keeps the 0.80 baseline.
+    wf["106"]["inputs"]["denoise"] = denoise or 0.80
 
     logger.debug(
         f"V2 outfit graph prepared: mode={'GARMENT' if use_garment else 'BODY'}, "
@@ -260,9 +307,17 @@ def prepare_outfit_workflow(
     negative_prompt: Optional[str] = None,
     head_mask_name: Optional[str] = None,
     source_dressed: bool = False,
+    denoise: Optional[float] = None,
 ) -> dict:
     """
     Prepare the outfit workflow with injected parameters.
+
+    ``denoise`` (WS3.2, 0.5-0.95, None = engine default) only applies on the V2
+    crop-and-stitch graph — forwarded to ``prepare_outfit_cropstitch_workflow``
+    below. The legacy V1 whole-frame graph deliberately leaves node 106 denoise at
+    the template's baked value regardless of this argument (see the NOTE on the
+    mask-feather block further down: aggressive denoise is only safe once
+    regeneration is crop-confined, which V1 is not).
 
     Identity is preserved in layers:
       1. Node 202 segments the PERSON — the edit region. The person mask (not
@@ -309,6 +364,8 @@ def prepare_outfit_workflow(
         outfit: Optional outfit type for direction detection
         negative_prompt: Optional extra negative prompt terms (appended to
             quality + adult + identity negatives on node 117)
+        denoise: Optional outfit-step denoise override (0.5-0.95), V2-only — see
+            the WS3.2 note above.
 
     Returns:
         Prepared workflow dict
@@ -320,7 +377,7 @@ def prepare_outfit_workflow(
         return prepare_outfit_cropstitch_workflow(
             template, image_name, prompt, seed=seed, nudity_level=nudity_level,
             outfit=outfit, negative_prompt=negative_prompt, head_mask_name=head_mask_name,
-            source_dressed=source_dressed,
+            source_dressed=source_dressed, denoise=denoise,
         )
 
     wf = copy.deepcopy(template)

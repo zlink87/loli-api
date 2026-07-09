@@ -17,7 +17,7 @@ from services import scene_vocab as sv
 from services import story_planner as sp
 from services.story_planner import (
     Character, DeterministicScenePlanner, validate_and_repair, plan_scenes,
-    _parse_arcs_json, _coerce_enum, _nudity_index,
+    _parse_arcs_json, _coerce_enum, _nudity_index, _nudity_ramp,
 )
 
 
@@ -296,6 +296,195 @@ def test_scrub_identity_preserves_scene_language():
     from services.story_planner import _scrub_identity
     clean = "a sunlit cafe terrace with wicker chairs, warm golden hour light, soft bokeh"
     assert _scrub_identity(clean) == clean
+
+
+# --- legacy controls jsonb back-compat (new fields default cleanly) ---
+def test_legacy_controls_jsonb_parses_with_new_fields_defaulted():
+    # An old `controls` jsonb row (no new keys) must still parse; new knobs default.
+    controls = BatchControls(**{"max_nudity": "medium", "escalation": "building"})
+    assert controls.start_nudity is None
+    assert controls.outfit_denoise is None
+    assert controls.outfit_prompt_mode == "standard"
+
+
+# --- nudity ramp derivation ---
+def test_nudity_ramp_building_rises_from_low():
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building")
+    ramp = _nudity_ramp(8, controls)
+    assert ramp[0] == NudityLevel.LOW
+    assert ramp[-1] == NudityLevel.HIGH
+    idxs = [_nudity_index(x) for x in ramp]
+    assert idxs == sorted(idxs)  # monotonic non-decreasing
+
+
+def test_nudity_ramp_flat_is_constant_max_backcompat():
+    # flat + no start_nudity == the old max-only ceiling behavior (constant at max).
+    controls = BatchControls(max_nudity=NudityLevel.MEDIUM, escalation="flat")
+    assert _nudity_ramp(6, controls) == [NudityLevel.MEDIUM] * 6
+
+
+def test_nudity_ramp_explicit_start_overrides_escalation():
+    controls = BatchControls(
+        start_nudity=NudityLevel.MEDIUM, max_nudity=NudityLevel.HIGH, escalation="building"
+    )
+    ramp = _nudity_ramp(6, controls)
+    assert ramp[0] == NudityLevel.MEDIUM
+    assert ramp[-1] == NudityLevel.HIGH
+
+
+def test_nudity_ramp_start_clamped_to_ceiling():
+    controls = BatchControls(start_nudity=NudityLevel.HIGH, max_nudity=NudityLevel.LOW)
+    assert _nudity_ramp(5, controls) == [NudityLevel.LOW] * 5
+
+
+def test_nudity_ramp_sfw_all_low():
+    controls = BatchControls(sfw_only=True, max_nudity=NudityLevel.HIGH)
+    assert _nudity_ramp(6, controls) == [NudityLevel.LOW] * 6
+
+
+def test_nudity_ramp_count_one_is_finish_level():
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building")
+    assert _nudity_ramp(1, controls) == [NudityLevel.HIGH]
+
+
+def test_deterministic_planner_honors_start_nudity():
+    controls = BatchControls(
+        start_nudity=NudityLevel.MEDIUM, max_nudity=NudityLevel.HIGH, base_seed=1
+    )
+    scenes = DeterministicScenePlanner().plan_scenes_sync(_character(), 8, controls)
+    idxs = [_nudity_index(s.nudityLevel) for s in scenes]
+    assert idxs[0] == _nudity_index(NudityLevel.MEDIUM)  # photo 1 starts at medium
+    assert idxs == sorted(idxs)                           # non-decreasing
+    assert idxs[-1] == _nudity_index(NudityLevel.HIGH)    # reaches the finish level
+
+
+# --- guided-ceiling clamp (per-photo ceiling; never forces up) ---
+def _flat_scenes(n, nudity, location=LocationType.HOME_BEDROOM):
+    return [
+        SceneSpec(arc_id="a", arc_title="A", beat_index=i, global_index=i, beat_description="b",
+                  location=location, nudityLevel=nudity)
+        for i in range(n)
+    ]
+
+
+def test_guided_ceiling_clamps_high_early_down_to_ramp():
+    # LLM emits HIGH on every photo; the rising ramp clamps the early ones DOWN.
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=1)
+    out = validate_and_repair(
+        _flat_scenes(8, NudityLevel.HIGH), _character(), 8, controls, enforce_beat_pool=False
+    )
+    assert out[0].nudityLevel == NudityLevel.LOW    # early photo clamped down to the ramp
+    assert out[-1].nudityLevel == NudityLevel.HIGH  # final photo reaches the finish
+
+
+def test_guided_ceiling_keeps_low_mid_batch():
+    # LLM emits LOW everywhere though the ramp ceiling rises — LOW is KEPT (never forced up).
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=1)
+    out = validate_and_repair(
+        _flat_scenes(8, NudityLevel.LOW), _character(), 8, controls, enforce_beat_pool=False
+    )
+    assert all(s.nudityLevel == NudityLevel.LOW for s in out)
+
+
+# --- outfit-fill (medium/high scene with no outfit gets a safe garment) ---
+def test_outfit_fill_never_naked_or_blocked():
+    controls = BatchControls(
+        max_nudity=NudityLevel.HIGH, start_nudity=NudityLevel.MEDIUM,
+        blocked_outfits=[OutfitType.NAKED, OutfitType.BIKINI], base_seed=9,
+    )
+    out = validate_and_repair(
+        _flat_scenes(6, NudityLevel.MEDIUM), _character(), 6, controls, enforce_beat_pool=False
+    )
+    for s in out:
+        assert s.outfit is not None                 # filled (medium + no outfit)
+        assert s.outfit != OutfitType.NAKED         # never NAKED
+        assert s.outfit != OutfitType.BIKINI        # blocked respected
+
+
+def test_outfit_fill_empty_pool_leaves_none():
+    # Only NAKED allowed -> nothing safe to fill -> outfit stays None.
+    controls = BatchControls(
+        max_nudity=NudityLevel.HIGH, start_nudity=NudityLevel.HIGH,
+        allowed_outfits=[OutfitType.NAKED], blocked_outfits=[], base_seed=1,
+    )
+    out = validate_and_repair(
+        _flat_scenes(1, NudityLevel.HIGH), _character(), 1, controls, enforce_beat_pool=False
+    )
+    assert out[0].outfit is None
+
+
+# --- variety repair ---
+def test_variety_repairs_duplicate_pair_pose_first_and_deterministically():
+    controls = BatchControls(base_seed=123)
+    dup = [
+        SceneSpec(arc_id="a", arc_title="A", beat_index=0, global_index=0, beat_description="b",
+                  outfit=OutfitType.WHITE_SUMMER_DRESS, pose=PoseType.STANDING_LEANING,
+                  location=LocationType.PARK, nudityLevel=NudityLevel.LOW),
+        SceneSpec(arc_id="a", arc_title="A", beat_index=1, global_index=1, beat_description="b",
+                  outfit=OutfitType.WHITE_SUMMER_DRESS, pose=PoseType.STANDING_LEANING,
+                  location=LocationType.CAFE, nudityLevel=NudityLevel.LOW),
+    ]
+    out = validate_and_repair([s.model_copy(deep=True) for s in dup], _character(), 2, controls,
+                              enforce_beat_pool=False)
+    assert (out[0].outfit, out[0].pose) != (out[1].outfit, out[1].pose)  # dup broken
+    # pose-before-outfit: the outfit is kept, only the pose changes.
+    assert out[1].outfit == OutfitType.WHITE_SUMMER_DRESS
+    assert out[1].pose != PoseType.STANDING_LEANING
+    # deterministic: same input + seed -> same repair.
+    out2 = validate_and_repair([s.model_copy(deep=True) for s in dup], _character(), 2, controls,
+                               enforce_beat_pool=False)
+    assert (out2[1].outfit, out2[1].pose) == (out[1].outfit, out[1].pose)
+
+
+def test_variety_repair_respects_blocked_lists():
+    controls = BatchControls(
+        base_seed=5, blocked_poses=[PoseType.SITTING],
+        blocked_outfits=[OutfitType.NAKED, OutfitType.BIKINI, OutfitType.COCKTAIL_DRESS],
+    )
+    # 3x identical (outfit,pose) at distinct locations -> dups + overused outfit fire repairs.
+    same = [
+        SceneSpec(arc_id="a", arc_title="A", beat_index=i, global_index=i, beat_description="b",
+                  outfit=OutfitType.WHITE_SUMMER_DRESS, pose=PoseType.STANDING_LEANING,
+                  location=loc, nudityLevel=NudityLevel.LOW)
+        for i, loc in enumerate((LocationType.PARK, LocationType.CAFE, LocationType.GARDEN))
+    ]
+    out = validate_and_repair([s.model_copy(deep=True) for s in same], _character(), 3, controls,
+                              enforce_beat_pool=False)
+    for s in out:
+        assert s.pose != PoseType.SITTING  # blocked pose never introduced
+        assert s.outfit not in (OutfitType.NAKED, OutfitType.BIKINI, OutfitType.COCKTAIL_DRESS)
+
+
+def test_variety_exempts_single_uniform_work_chapter():
+    # A nurse's work chapter wears the one nurse_uniform across many beats — the
+    # >=3-uses cap must NOT strip it (single-uniform slot exemption).
+    char = _character(occupation="nurse")
+    controls = BatchControls(base_seed=1, max_nudity=NudityLevel.LOW)
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 12, controls)
+    before = sum(1 for s in scenes if s.outfit == OutfitType.NURSE_UNIFORM)
+    out = validate_and_repair([s.model_copy(deep=True) for s in scenes], char, 12, controls)
+    after = sum(1 for s in out if s.outfit == OutfitType.NURSE_UNIFORM)
+    assert before >= 3           # the plan really does repeat the uniform
+    assert after == before       # and variety leaves the work uniform intact
+
+
+def test_manual_path_bypasses_ramp_and_variety():
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, base_seed=1)
+    manual = [
+        SceneSpec(arc_id="m", arc_title="M", beat_index=0, global_index=0, beat_description="b",
+                  outfit=None, pose=PoseType.STANDING_LEANING, location=LocationType.HOME_BEDROOM,
+                  nudityLevel=NudityLevel.HIGH),
+        SceneSpec(arc_id="m", arc_title="M", beat_index=1, global_index=1, beat_description="b",
+                  outfit=None, pose=PoseType.STANDING_LEANING, location=LocationType.HOME_BEDROOM,
+                  nudityLevel=NudityLevel.HIGH),
+    ]
+    out = validate_and_repair(
+        manual, _character(), 2, controls,
+        enforce_beat_pool=False, enforce_nudity_ramp=False, enforce_variety=False,
+    )
+    assert out[0].nudityLevel == NudityLevel.HIGH        # ramp bypassed (photo 1 stays HIGH)
+    assert out[0].outfit is None                          # outfit-fill bypassed
+    assert out[0].pose == out[1].pose == PoseType.STANDING_LEANING  # variety bypassed
 
 
 if __name__ == "__main__":

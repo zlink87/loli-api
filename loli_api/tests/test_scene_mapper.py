@@ -127,6 +127,133 @@ def test_seed_strategy_random_is_none():
     assert resolve_seed(controls, 0) is None
 
 
+# ---------------------------------------------------------------------------
+# WS2 routing: activity is dual-channel (background text vs the pose step)
+# ---------------------------------------------------------------------------
+def test_activity_excluded_from_background_when_pose_present():
+    char = _character()
+    scene = _scene(
+        pose=PoseType.SITTING,
+        activity="pouring her first coffee",
+        setting="a sunlit small kitchen",
+    )
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert "pouring her first coffee" not in (req.prompt or "")
+    assert req.activity == "pouring her first coffee"  # rides the pose step instead
+
+
+def test_activity_included_in_background_when_pose_absent():
+    char = _character()
+    scene = _scene(
+        pose=None,
+        activity="pouring her first coffee",
+        setting="a sunlit small kitchen",
+    )
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert "pouring her first coffee" in req.prompt
+    assert req.activity is None  # no pose step to consume it
+
+
+def test_activity_rides_background_when_pose_is_blocked():
+    # A pose the batch controls block behaves like "no pose" for routing purposes —
+    # activity must still land somewhere (the background text), never vanish.
+    char = _character()
+    controls = BatchControls(blocked_poses=[PoseType.SITTING])
+    scene = _scene(pose=PoseType.SITTING, activity="stretching after a nap")
+    req = scene_to_pipeline_request(char, scene, controls)
+    assert req.pose is None
+    assert "stretching after a nap" in req.prompt
+    assert req.activity is None  # pose step won't run, so nothing to route it to
+
+
+# ---------------------------------------------------------------------------
+# WS2 routing: outfit_detail / expression pass straight through to the request
+# ---------------------------------------------------------------------------
+def test_outfit_detail_and_expression_mapped_onto_request():
+    char = _character()
+    scene = _scene(
+        outfit=OutfitType.BUSINESS_SUIT,
+        outfit_detail="charcoal wool pantsuit, fitted blazer",
+        expression="confident subtle smirk",
+    )
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert req.outfitDetail == "charcoal wool pantsuit, fitted blazer"
+    assert req.expression == "confident subtle smirk"
+
+
+def test_outfit_detail_and_expression_none_when_scene_omits_them():
+    char = _character()
+    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
+    assert req.outfitDetail is None
+    assert req.expression is None
+
+
+# ---------------------------------------------------------------------------
+# WS2 firewall: narrative (gallery-only prose) must never reach a request field
+# ---------------------------------------------------------------------------
+def test_narrative_never_reaches_any_request_text_field():
+    char = _character()
+    marker = "NARRATIVE_ONLY_MARKER_do_not_leak_9f3a"
+    scene = _scene(
+        pose=PoseType.SITTING,
+        outfit=OutfitType.BUSINESS_SUIT,
+        outfit_detail="a tailored charcoal suit",
+        expression="soft smile",
+        activity="reviewing paperwork",
+        setting="a quiet office",
+        narrative=marker,
+    )
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    for field in (req.prompt, req.outfitDetail, req.expression, req.activity, req.negativePrompt):
+        assert field is None or marker not in field, f"narrative leaked into: {field}"
+
+
+# ---------------------------------------------------------------------------
+# WS3.2: outfit_denoise / outfit_prompt_mode threading
+# ---------------------------------------------------------------------------
+def test_outfit_denoise_set_for_non_naked_outfit():
+    char = _character()
+    controls = BatchControls(outfit_denoise=0.85)
+    req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), controls)
+    assert req.outfitDenoise == 0.85
+
+
+def test_outfit_denoise_none_when_no_outfit_step():
+    char = _character()
+    controls = BatchControls(outfit_denoise=0.85)
+    req = scene_to_pipeline_request(char, _scene(outfit=None), controls)
+    assert req.outfit is None
+    assert req.outfitDenoise is None
+
+
+def test_outfit_denoise_none_for_naked_outfit():
+    char = _character()
+    # blocked_outfits defaults to [NAKED]; clear it so NAKED survives to the request.
+    controls = BatchControls(outfit_denoise=0.85, blocked_outfits=[])
+    req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.NAKED), controls)
+    assert req.outfit == OutfitType.NAKED
+    assert req.outfitDenoise is None
+
+
+def test_outfit_denoise_none_by_default():
+    char = _character()
+    req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
+    assert req.outfitDenoise is None  # BatchControls.outfit_denoise defaults to None
+
+
+def test_outfit_prompt_mode_threaded_from_controls():
+    char = _character()
+    controls = BatchControls(outfit_prompt_mode="replace")
+    req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), controls)
+    assert req.outfitPromptMode == "replace"
+
+
+def test_outfit_prompt_mode_defaults_to_standard():
+    char = _character()
+    req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
+    assert req.outfitPromptMode == "standard"
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

@@ -75,6 +75,22 @@ class SceneSpec(BaseModel):
         max_length=200,
         description="Identity-free short action phrase (what she is doing); folded into the background prompt",
     )
+    outfit_detail: Optional[str] = Field(
+        default=None,
+        max_length=160,
+        description=(
+            "Identity-free concrete garment description (colors/fabric/fit) matching outfit + "
+            "nudityLevel; sharpens the outfit step. Clothing ONLY — never facial features."
+        ),
+    )
+    expression: Optional[str] = Field(
+        default=None,
+        max_length=80,
+        description=(
+            "Facial expression/mood for this photo (e.g. 'soft sleepy smile'), routed to the pose "
+            "step. Expression/mood ONLY — never facial features (eyes, lips, face shape)."
+        ),
+    )
 
     # --- optional per-scene mood overrides (do NOT change identity) ---
     mood_kinks: Optional[List[KinkType]] = Field(

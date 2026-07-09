@@ -335,6 +335,70 @@ ARC_TEMPLATES: Dict[str, Tuple[ArcTemplate, ...]] = {
 
 
 # ---------------------------------------------------------------------------
+# Occupation -> workplace locations (story director "DAY SHAPE" block)
+# ---------------------------------------------------------------------------
+# Where THIS occupation actually works, so the director can anchor the one "work
+# chapter" of her day in a coherent place. Keyed by OccupationType.value; every
+# value is a REAL LocationType member (models/enums.py). Occupations without a
+# natural workplace fall back to (OFFICE, CITY_STREET).
+OCCUPATION_WORK_LOCATIONS: Dict[str, Tuple[L, ...]] = {
+    "student": (L.CLASSROOM, L.LIBRARY),
+    "dancer": (L.STAGE, L.PHOTO_STUDIO),
+    "model": (L.PHOTO_STUDIO, L.STAGE),
+    "stripper": (L.STAGE, L.NIGHTCLUB),
+    "maid": (L.HOTEL_ROOM, L.HOME_LIVING_ROOM),
+    "cam_girl": (L.PHOTO_STUDIO, L.HOME_OFFICE),
+    "boss_ceo": (L.OFFICE,),
+    "babysitter_au_pair": (L.HOME_LIVING_ROOM, L.PARK),
+    "pornstar": (L.PHOTO_STUDIO, L.HOTEL_ROOM),
+    "streamer": (L.HOME_OFFICE, L.PHOTO_STUDIO),
+    "bartender": (L.BAR, L.NIGHTCLUB),
+    "tech_engineer": (L.OFFICE, L.HOME_OFFICE),
+    "lifeguard": (L.BEACH, L.POOLSIDE),
+    "cashier": (L.CAFE, L.CITY_STREET),
+    "massage_therapist": (L.SALON, L.HOTEL_ROOM),
+    "nurse": (L.HOSPITAL_WARD,),
+    "secretary": (L.OFFICE,),
+    "yoga_instructor": (L.YOGA_STUDIO, L.GYM),
+    "fitness_coach": (L.GYM, L.YOGA_STUDIO),
+    "cook": (L.RESTAURANT_KITCHEN, L.HOME_KITCHEN),
+    "artist": (L.PHOTO_STUDIO, L.HOME_OFFICE),
+    "movie_star_actress": (L.STAGE, L.PHOTO_STUDIO),
+    "doctor": (L.HOSPITAL_WARD, L.LAB),
+    "librarian": (L.LIBRARY, L.CLASSROOM),
+    "spy": (L.CITY_STREET, L.HOTEL_ROOM),
+    "police_officer": (L.CITY_STREET, L.OFFICE),
+    "soldier": (L.FOREST_TRAIL, L.CITY_STREET),
+    "lawyer": (L.OFFICE, L.LIBRARY),
+    "hairdresser": (L.SALON,),
+    "dentist": (L.HOSPITAL_WARD, L.LAB),
+    "singer_musician": (L.STAGE, L.NIGHTCLUB),
+    "gynecologist": (L.HOSPITAL_WARD, L.LAB),
+    "writer": (L.HOME_OFFICE, L.CAFE),
+    "flight_attendant": (L.HOTEL_ROOM, L.CITY_STREET),
+    "professional_athlete": (L.GYM, L.PARK),
+    "scientist": (L.LAB,),
+    "florist": (L.GARDEN, L.SALON),
+    "makeup_artist": (L.SALON, L.PHOTO_STUDIO),
+    "photographer": (L.PHOTO_STUDIO, L.CITY_STREET),
+    "social_worker": (L.OFFICE, L.HOME_LIVING_ROOM),
+    "designer": (L.HOME_OFFICE, L.OFFICE),
+    "pharmacist": (L.LAB, L.HOSPITAL_WARD),
+    "nutritionist": (L.OFFICE, L.GYM),
+}
+
+# Fallback for occupations not in the map above (or None).
+_DEFAULT_WORK_LOCATIONS: Tuple[L, ...] = (L.OFFICE, L.CITY_STREET)
+
+
+def work_locations_for(occupation) -> Tuple[L, ...]:
+    """Workplace LocationTypes for an occupation (enum or value); default is
+    (OFFICE, CITY_STREET) for occupations with no natural workplace."""
+    key = occupation.value if hasattr(occupation, "value") else occupation
+    return OCCUPATION_WORK_LOCATIONS.get(key, _DEFAULT_WORK_LOCATIONS)
+
+
+# ---------------------------------------------------------------------------
 # Deterministic story helpers (Feature 2)
 # ---------------------------------------------------------------------------
 # Used when Venice is unavailable so a story_mode batch still gets a title + one

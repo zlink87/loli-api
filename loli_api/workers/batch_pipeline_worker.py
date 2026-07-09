@@ -12,9 +12,12 @@ import asyncio
 import logging
 import traceback
 from datetime import datetime
+from typing import Optional
 
+from config import settings
 from models.enums import JobStatus
 from services.job_manager import JobManager, Job
+from services.workflow_meta import TIER_V1
 from workers.pipeline_worker import PipelineBackgroundWorker, _download_image
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,47 @@ STORAGE_FOLDER = "batch_edits"
 def _is_oom(msg: str) -> bool:
     m = (msg or "").lower()
     return "out of memory" in m or "outofmemoryerror" in m
+
+
+def _check_cropstitch_outfit_required(outfit_meta: Optional[dict], require: bool) -> None:
+    """
+    WS3.2 startup guard: raise if ``BATCH_REQUIRE_CROPSTITCH_OUTFIT`` is set but the
+    batch engine's RESOLVED outfit template (``PipelineBackgroundWorker.workflow_meta
+    ["outfit"]``, populated by ``_load_workflows()`` -> ``workflow_meta.describe_
+    template``) is tier "v1" (the legacy whole-frame graph) rather than a
+    crop-and-stitch tier (rapid_cropstitch / 2511full).
+
+    Exists so a mis-deployed environment (e.g. a CI-built image missing the
+    gitignored ``.env``, so ``COMFYUI_OUTFIT_WORKFLOW_PATH_2511``/``_V2``/
+    ``COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH`` all read empty and the tier-precedence
+    chain silently lands on V1) fails LOUD at boot instead of silently shipping
+    degraded batch outfit quality — see Phase 0 diagnostics in the quality/realism
+    plan. Factored out of ``start()`` so the tier comparison is unit-testable with a
+    plain dict, no live engine required.
+
+    Args:
+        outfit_meta: ``engine.workflow_meta.get("outfit")`` — a
+            ``{"path": ..., "tier": ..., "sampler": {...}}`` dict, or None if the
+            engine hasn't loaded its templates yet.
+        require: ``settings.BATCH_REQUIRE_CROPSTITCH_OUTFIT``.
+
+    Raises:
+        RuntimeError: naming the resolved path, when ``require`` is True and the
+            resolved tier is "v1".
+    """
+    if not require:
+        return
+    tier = (outfit_meta or {}).get("tier")
+    if tier == TIER_V1:
+        path = (outfit_meta or {}).get("path", "<unknown — workflow_meta not populated>")
+        raise RuntimeError(
+            "BATCH_REQUIRE_CROPSTITCH_OUTFIT=true but the batch engine's resolved "
+            f"outfit workflow is tier 'v1' (legacy whole-frame, not crop-and-stitch): "
+            f"{path}. This usually means COMFYUI_OUTFIT_WORKFLOW_PATH_2511 / _V2 / "
+            "COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH all resolved empty in this environment "
+            "(e.g. a CI-built image without the gitignored .env). Fix the deployment "
+            "env, or set BATCH_REQUIRE_CROPSTITCH_OUTFIT=false to explicitly allow V1."
+        )
 
 
 class BatchPipelineWorker:
@@ -49,8 +93,16 @@ class BatchPipelineWorker:
     async def start(self) -> None:
         self._running = True
         # Ensure the engine's workflow templates are loaded (without starting its loop).
+        # Multiple BatchPipelineWorker instances share ONE engine (main.py), so only
+        # the first call actually loads; workflow_meta is populated either way by the
+        # time we reach the guard below.
         if self.engine._pose_template is None or self.engine._outfit_template is None:
             await self.engine._load_workflows()
+        # WS3.2: fail loud at startup instead of silently degrading to V1 — see
+        # _check_cropstitch_outfit_required's docstring.
+        _check_cropstitch_outfit_required(
+            self.engine.workflow_meta.get("outfit"), settings.BATCH_REQUIRE_CROPSTITCH_OUTFIT
+        )
         self._task = asyncio.create_task(self._worker_loop())
         logger.info(f"Batch pipeline worker '{self.name}' started")
 
@@ -111,6 +163,18 @@ class BatchPipelineWorker:
                     progress_start=p_start, progress_end=p_end,
                     is_final_step=(i == num_steps - 1),
                 )
+
+                # WS3.1 observability: same per-step debug_meta shape as
+                # PipelineBackgroundWorker._process_job, sourced from the shared
+                # engine's workflow_meta (this worker only drives step execution
+                # via self.engine._run_step; it has no template state of its own).
+                step_meta = self.engine.workflow_meta.get(step_name, {})
+                job.debug_meta.setdefault("steps", []).append({
+                    "step": step_name,
+                    "workflow_path": step_meta.get("path"),
+                    "tier": step_meta.get("tier"),
+                    "seed": seed,
+                })
 
             await self.job_manager.update_job_status(
                 job.job_id, JobStatus.RUNNING, progress=0.85, image_generated_at=datetime.utcnow()

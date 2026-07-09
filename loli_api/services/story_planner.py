@@ -195,6 +195,11 @@ class DeterministicScenePlanner(StoryPlanner):
         name = character.persona.name
         story_title = st.deterministic_story_title(name, occ or "") if story_mode else None
 
+        # Per-photo nudity arc (guided ceiling). The deterministic planner assigns
+        # ramp[gidx] as each beat's level exactly; validate_and_repair reuses the same
+        # ramp as a per-photo ceiling. tmpl.nudity_bias is now a legacy field (unused).
+        ramp = _nudity_ramp(count, controls)
+
         scenes: List[SceneSpec] = []
         gidx = 0
         for arc, beat_count in arcs:
@@ -203,7 +208,7 @@ class DeterministicScenePlanner(StoryPlanner):
                 pose = self._pick_pose(tmpl, rng, like_kw, dislike_kw, controls)
                 outfit = self._pick_outfit(tmpl, rng, like_kw, dislike_kw, controls)
                 location = self._pick_location(tmpl, rng, like_kw, dislike_kw, controls)
-                nudity = _nudity_for(tmpl.nudity_bias, gidx, count, controls)
+                nudity = ramp[gidx] if gidx < len(ramp) else NudityLevel.LOW
                 narrative = None
                 if story_mode:
                     mood = sv.scene_mood_phrase(character.persona.kinks, character.persona.personality)
@@ -313,26 +318,57 @@ def _derive_seed(controls: BatchControls, gidx: int) -> Optional[int]:
     return None  # random -> worker chooses
 
 
-def _nudity_for(bias: str, gidx: int, count: int, controls: BatchControls) -> NudityLevel:
+def _nudity_ramp(count: int, controls: BatchControls) -> List[NudityLevel]:
     """
-    Nudity for a beat, respecting the max_nudity ceiling and escalation style.
+    Per-photo nudity arc for a batch — the guided-ceiling ladder.
 
-    'building' is monotonically non-decreasing across global_index (guaranteed).
-    'flat' uses the beat's own bias, capped at the ceiling.
+    Returns `count` levels, one per global beat index, monotonically non-decreasing
+    from a start level up to controls.max_nudity (the finish + ceiling). Used two ways:
+      * the deterministic planner assigns ramp[gidx] as each beat's level exactly;
+      * validate_and_repair uses ramp[i] as a per-photo CEILING (clamps down, never up).
+
+    Start level = controls.start_nudity if given, else derived from escalation
+    ('building' -> low, 'flat' -> max_nudity), clamped to the ceiling. sfw_only -> all
+    LOW. count <= 1 -> [max] (a single photo lands at the finish level). This makes
+    'flat' + no start_nudity a constant-at-max ramp, i.e. identical to the old
+    max-only ceiling behavior (back-compat); 'building' + no start_nudity rises
+    low -> max and is now actually enforced.
     """
+    n = max(count, 0)
     if controls.sfw_only:
-        return NudityLevel.LOW
+        return [NudityLevel.LOW] * n
     max_idx = _nudity_index(controls.max_nudity)
-    if _val(controls.escalation) == "building":
-        if count <= 1:
-            idx = max_idx
-        else:
-            idx = int((gidx / (count - 1)) * max_idx + 1e-9)
-    else:  # flat
-        target = {"low": 0, "medium": 1, "escalate": 1}.get(bias, 0)
-        idx = min(target, max_idx)
-    idx = max(0, min(idx, max_idx))
-    return _NUDITY_LADDER[idx]
+    if n <= 1:
+        return [_NUDITY_LADDER[max_idx]] * n
+    if controls.start_nudity is not None:
+        start_idx = min(_nudity_index(controls.start_nudity), max_idx)
+    elif _val(controls.escalation) == "building":
+        start_idx = 0
+    else:  # flat (or any unknown escalation) -> constant at the ceiling
+        start_idx = max_idx
+    span = max_idx - start_idx
+    ramp: List[NudityLevel] = []
+    for gidx in range(n):
+        idx = start_idx + int((gidx / (n - 1)) * span + 1e-9)
+        ramp.append(_NUDITY_LADDER[max(0, min(idx, max_idx))])
+    return ramp
+
+
+def _format_nudity_plan(ramp: List[NudityLevel]) -> str:
+    """Compress a per-photo ramp into human ranges: 'photos 1-3: low; 4-6: medium; 7-8: high'."""
+    if not ramp:
+        return ""
+    groups: List[str] = []
+    start = 0
+    for i in range(1, len(ramp) + 1):
+        if i == len(ramp) or ramp[i] != ramp[start]:
+            lvl = _val(ramp[start])
+            if start == i - 1:
+                groups.append(f"photo {start + 1}: {lvl}")
+            else:
+                groups.append(f"photos {start + 1}-{i}: {lvl}")
+            start = i
+    return "; ".join(groups)
 
 
 def _weighted_pick(pool, rng, like_kw: set, dislike_kw: set, phrase_map: dict):
@@ -449,26 +485,39 @@ Each BEAT is:
 {"beat_description":"short concrete caption for this photo (scene only)",
  "setting":"ONE sentence describing the PLACE/environment for this photo (scene only)",
  "activity":"short phrase: what she is DOING in this photo (e.g. 'pouring coffee', 'stretching by the window')",
+ "outfit_detail":"<=12 words naming the clothing concretely (colors/fabric/fit), matching the chosen outfit + nudityLevel",
+ "expression":"<=6 words: her facial expression/mood ONLY (e.g. 'sleepy soft smile')",
  "narrative":"1-3 sentences of THIRD-PERSON, PRESENT-TENSE story prose (gallery only)",
  "pose":<pose|null>,"outfit":<outfit|null>,"nudityLevel":"low|medium|high",
  "accessories":[<accessory>...]|null,"location":<location>,"time_of_day":<time>,
  "lighting":<lighting>,"mood_kinks":[<kink>...]|null,"mood_personality":<personality>|null}
 
 HARD RULES:
+- THE DAY IS HERS: build the whole day around WHO SHE IS — her occupation, relationship,
+  personality and kinks. SHE chooses where the day goes; the locations, activities and outfits
+  are the ones THIS character would pick, following the DAY SHAPE in the user message.
 - Choose pose/outfit/location/time_of_day/lighting ONLY from the exact lists in the user
   message. Use null for pose/outfit if none fits a beat; location/time_of_day/lighting are
   always required. accessories/mood_kinks/mood_personality come from the shared lists.
 - COHERENCE IS YOUR JOB now (no menu enforces it): outfit, location, activity and time must
   make sense together in each beat — no gym clothes in a nightclub, no cocktail dress while
   cooking breakfast, no swimwear in an office.
+- VARIETY IS A HARD RULE: never reuse the same outfit+pose pair; consecutive beats must differ
+  in activity AND in at least one of pose/location/outfit; no single outfit spans more than 2
+  beats (except a work uniform inside the work chapter).
 - FLOW: consecutive beats connect. time_of_day generally advances across the day; the setting
   changes between chapters. Group beats into arcs as CHAPTERS of the one story.
 - IDENTITY IS PIXEL-LOCKED. In beat_description, setting, activity AND narrative, NEVER
   describe her face, age, ethnicity, hair, eyes, body, breasts or skin. Using her first name
   is fine. Describe places, clothes, actions, light and mood only.
+- "outfit_detail" describes ONLY clothing (garment, colors, fabric, fit) and must match the
+  chosen outfit + nudityLevel; "expression" is her expression/mood ONLY (e.g. 'soft sleepy
+  smile') — NEVER facial features (eyes, lips, jaw, nose, chin, face shape).
 - "narrative": keep the EXACT SAME third-person present voice for EVERY beat; continue directly
   from the previous beat; reflect her personality/likes/persona-context; avoid her dislikes.
-- nudityLevel must never exceed the stated maximum; follow the escalation style.
+- NUDITY: follow the per-photo targets in the user message's NUDITY PLAN. Never exceed a photo's
+  target; you may stay lower when the scene demands it, but reach the finish level by the final
+  photos. For any photo targeted medium or high, ALWAYS choose an outfit (never null).
 - Emit EXACTLY the requested number of beats total across all arcs. No prose outside JSON, no markdown.
 """
 
@@ -579,13 +628,21 @@ class VeniceScenePlanner(StoryPlanner):
         model's job (enforced by the system prompt), not a hand-authored BeatTemplate.
         """
         persona = character.persona
+        # Her kinks are her SIGNATURE moods — raw enum value + its mood phrase so the
+        # director can steer mood_kinks/atmosphere toward who she is.
+        kink_bits: List[str] = []
+        for k in (persona.kinks or []):
+            ph = ap.phrase(ap.KINK_PHRASES, k)
+            kink_bits.append(f"{_val(k)} ({ph})" if ph else str(_val(k)))
+        kinks_line = ", ".join(kink_bits) or "none given"
         summary_parts = [
             f"name: {persona.name}",
             f"occupation: {ap.phrase(ap.OCCUPATION_PHRASES, persona.occupation) or 'unspecified'}",
             f"personality: {ap.phrase(ap.PERSONALITY_PHRASES, persona.personality) or 'unspecified'}",
             f"relationship vibe: {ap.phrase(ap.RELATIONSHIP_PHRASES, persona.relationship) or 'unspecified'}",
-            f"likes: {', '.join(character.likes) or 'none given'}",
-            f"dislikes: {', '.join(character.dislikes) or 'none given'}",
+            f"kinks (her signature moods): {kinks_line}",
+            f"likes (weave these into her activities and settings): {', '.join(character.likes) or 'none given'}",
+            f"dislikes (NEVER plan an activity or setting she dislikes): {', '.join(character.dislikes) or 'none given'}",
         ]
         if character.bio:
             summary_parts.append(f"persona/context: {character.bio.strip()[:600]}")
@@ -612,12 +669,69 @@ class VeniceScenePlanner(StoryPlanner):
             "PERSONALITIES": _allowed_values(PersonalityType),
         }
         vocab_block = "\n".join(f"{k}: {', '.join(v) or '(none allowed)'}" for k, v in pools.items())
+
+        # DAY SHAPE — structure her day like a real person's, anchoring the ONE work
+        # chapter in a place this occupation actually works (filtered by allow/block).
+        occ_raw = _val(persona.occupation)
+        allowed_locs = {_val(a) for a in controls.allowed_locations} if controls.allowed_locations else None
+        blocked_locs = {_val(b) for b in (controls.blocked_locations or [])}
+        work_locs = [
+            _val(loc) for loc in st.work_locations_for(persona.occupation)
+            if _val(loc) not in blocked_locs and (allowed_locs is None or _val(loc) in allowed_locs)
+        ] if occ_raw else []
+        occ_phrase = ap.phrase(ap.OCCUPATION_PHRASES, persona.occupation) or (occ_raw or "").replace("_", " ")
+
+        day_shape_lines = [
+            "DAY SHAPE (build her day like a real person's, in this order):",
+            "- Open at home: waking slow, first coffee, breakfast, getting ready.",
+        ]
+        # Drop the work bullet when the occupation is unknown or all its workplaces are blocked.
+        if occ_raw and work_locs:
+            day_shape_lines.append(
+                f"- ONE work chapter as a {occ_phrase} at {', '.join(work_locs)}, "
+                "with concrete on-the-job activities."
+            )
+        day_shape_lines.append("- An after-work unwind: home to change or shower, then head out or settle in.")
+        day_shape_lines.append(
+            "- An evening finish where the story peaks and the nudity plan reaches its height."
+        )
+        day_shape_lines.append(
+            "Example (a nurse's day): coffee -> breakfast -> hospital shift -> home -> shower -> "
+            "change -> drinks -> club."
+        )
+        if count <= 4:
+            day_shape_lines.append(
+                f"(Only {count} photos here — compress the arc: fewer beats, but keep the progression.)"
+            )
+        day_shape_block = "\n".join(day_shape_lines)
+
+        # NUDITY PLAN — per-photo guided-ceiling targets from the SAME ramp
+        # validate_and_repair enforces, so the prompt and the clamp agree.
+        nudity_plan = _format_nudity_plan(_nudity_ramp(count, controls))
+        nudity_block = (
+            f"NUDITY PLAN (per-photo targets): {nudity_plan}. Never exceed a photo's target; you may "
+            f"stay lower when the scene demands it (e.g. at work), but reach {max_nudity} by the final "
+            "photos. For photos targeted medium/high, ALWAYS choose an outfit (never null)."
+        )
+
+        variety_line = (
+            f"VARIETY: never repeat an outfit+pose combination; use at least {min(count, 5)} distinct "
+            f"locations and at least {min(count, 6)} distinct outfits across the set."
+        )
+        mood_line = (
+            "MOOD: for mood_kinks, prefer HER kinks (listed above); reach for others only when a "
+            "scene genuinely calls for it."
+        )
+
         arc_hint = str(controls.arc_count) if controls.arc_count else "3-5"
         return (
             "CHARACTER:\n" + "\n".join(summary_parts) + "\n\n"
             f"PLAN: Write ONE cohesive day-in-the-life story for {persona.name} as {count} photos, "
-            f"grouped into {arc_hint} chapters (arcs). Escalation style: '{_val(controls.escalation)}'. "
-            f"Maximum nudityLevel allowed: {max_nudity}.\n\n"
+            f"grouped into {arc_hint} chapters (arcs).\n\n"
+            + day_shape_block + "\n\n"
+            + nudity_block + "\n\n"
+            + variety_line + "\n"
+            + mood_line + "\n\n"
             "ALLOWED VALUES (choose freely, keep each scene internally coherent):\n"
             + vocab_block + "\n\n"
             f"Return the JSON from the system prompt: a story_title and arcs whose beats total EXACTLY {count}."
@@ -735,6 +849,11 @@ def _raw_beat_to_scene(
     # Render-safe channel (folded into the background prompt) — scrub identity here too.
     setting = _scrub_scene_text(raw.get("setting"), 400)
     activity = _scrub_scene_text(raw.get("activity"), 200)
+    # Structured description channels (WS2): outfit_detail sharpens the outfit step,
+    # expression drives the pose step. Both are identity-scrubbed; expression also has
+    # facial-FEATURE tokens stripped (it must carry an expression/mood only).
+    outfit_detail = _scrub_scene_text(raw.get("outfit_detail"), 160)
+    expression = _scrub_expression(raw.get("expression"))
     try:
         return SceneSpec(
             arc_id=arc_id,
@@ -753,6 +872,8 @@ def _raw_beat_to_scene(
             mood_personality=_coerce_enum(PersonalityType, raw.get("mood_personality")),
             setting=setting,
             activity=activity,
+            outfit_detail=outfit_detail,
+            expression=expression,
             narrative=narrative,
             story_title=(str(story_title)[:160] if story_title else None),
         )
@@ -802,6 +923,194 @@ def _enforce_beat_pool(s: SceneSpec, slot: _BeatSlot, controls: BatchControls, s
     return s
 
 
+# ---------------------------------------------------------------------------
+# Variety enforcement (set-level dedup) — plan 1.5
+# ---------------------------------------------------------------------------
+# Location coherence for the few poses/outfits that only make sense in specific
+# places, so a variety re-pick never introduces an incoherent pairing (a "cooking"
+# pose outside a kitchen, a bikini in an office). A pose/outfit absent from these
+# maps is location-agnostic (allowed anywhere).
+_KITCHENS = {LocationType.HOME_KITCHEN.value, LocationType.RESTAURANT_KITCHEN.value}
+_OUTDOORS = {
+    LocationType.PARK.value, LocationType.CITY_STREET.value, LocationType.FOREST_TRAIL.value,
+    LocationType.BEACH.value, LocationType.POOLSIDE.value, LocationType.GARDEN.value,
+    LocationType.ROOFTOP.value,
+}
+_SWIM_SPOTS = {
+    LocationType.BEACH.value, LocationType.POOLSIDE.value, LocationType.HOME_BATHROOM.value,
+    LocationType.HOTEL_ROOM.value,
+}
+
+_POSE_LOCATION_GUARD: Dict[str, set] = {
+    PoseType.COOKING.value: _KITCHENS,
+    PoseType.OPENING_FRIDGE.value: _KITCHENS,
+    PoseType.EATING.value: _KITCHENS | {
+        LocationType.CAFE.value, LocationType.RESTAURANT.value, LocationType.HOME_LIVING_ROOM.value,
+    },
+    PoseType.JOGGING.value: _OUTDOORS | {LocationType.GYM.value},
+}
+
+_OUTFIT_LOCATION_GUARD: Dict[str, set] = {
+    OutfitType.BIKINI.value: _SWIM_SPOTS,
+    OutfitType.ONE_PIECE_SWIMSUIT.value: _SWIM_SPOTS,
+    OutfitType.NURSE_UNIFORM.value: {LocationType.HOSPITAL_WARD.value, LocationType.HOME_BEDROOM.value},
+    OutfitType.SCHOOL_UNIFORM.value: {
+        LocationType.CLASSROOM.value, LocationType.LIBRARY.value, LocationType.HOME_BEDROOM.value,
+    },
+    OutfitType.MILITARY_UNIFORM.value: {LocationType.HOME_BEDROOM.value},
+    OutfitType.CHEF_UNIFORM.value: {
+        LocationType.RESTAURANT_KITCHEN.value, LocationType.HOME_KITCHEN.value, LocationType.HOME_BEDROOM.value,
+    },
+}
+
+_UNIFORM_OUTFITS = {
+    OutfitType.NURSE_UNIFORM, OutfitType.SCHOOL_UNIFORM,
+    OutfitType.MILITARY_UNIFORM, OutfitType.CHEF_UNIFORM,
+}
+
+
+def _outfit_fill_pool(controls: BatchControls) -> List[OutfitType]:
+    """Outfits eligible for auto-fill / variety re-pick: allowed − blocked − NAKED, stable order."""
+    pool: List[OutfitType] = []
+    for o in OutfitType:
+        if o == OutfitType.NAKED:
+            continue
+        if o in (controls.blocked_outfits or []):
+            continue
+        if controls.allowed_outfits and o not in controls.allowed_outfits:
+            continue
+        pool.append(o)
+    return pool
+
+
+def _pose_ok_at(pose, location) -> bool:
+    allowed = _POSE_LOCATION_GUARD.get(_val(pose))
+    return allowed is None or _val(location) in allowed
+
+
+def _outfit_ok_at(outfit, location) -> bool:
+    allowed = _OUTFIT_LOCATION_GUARD.get(_val(outfit))
+    return allowed is None or _val(location) in allowed
+
+
+def _variety_pose_candidates(scene: SceneSpec, slot, controls: BatchControls) -> List[PoseType]:
+    base = _allowed_pose_pool(slot.tmpl, controls) if slot is not None \
+        else [p for p in PoseType if p not in (controls.blocked_poses or [])]
+    return [p for p in base if _pose_ok_at(p, scene.location)]
+
+
+def _variety_outfit_candidates(scene: SceneSpec, slot, controls: BatchControls) -> List[OutfitType]:
+    base = _allowed_outfit_pool(slot.tmpl, controls) if slot is not None else _outfit_fill_pool(controls)
+    return [o for o in base if o != OutfitType.NAKED and _outfit_ok_at(o, scene.location)]
+
+
+def _slot_is_single_uniform(slot, controls: BatchControls) -> bool:
+    """True when this beat position's allowed outfit pool is exactly one uniform — the
+    work-chapter case where repeating that one outfit is intended, so it is exempt from
+    the >=3-uses cap."""
+    if slot is None:
+        return False
+    pool = _allowed_outfit_pool(slot.tmpl, controls)
+    return len(pool) == 1 and pool[0] in _UNIFORM_OUTFITS
+
+
+def _enforce_variety(
+    scenes: List[SceneSpec], slots: List[_BeatSlot], controls: BatchControls
+) -> List[SceneSpec]:
+    """
+    Single ordered walk enforcing set-level variety (plan 1.5). Per beat, repairs:
+      * a duplicate non-None (outfit, pose) pair already seen earlier in the set,
+      * an outfit used >= 3 times (unless this beat's slot pool is a single uniform —
+        a work chapter is SUPPOSED to hold one uniform across its beats),
+      * a (location, pose) identical to the immediately preceding beat.
+    Pose is repaired FIRST (leaves the planned outfit intact), then outfit only if the
+    offense survives. Candidates respect the block/allow lists and the pose/outfit
+    location-coherence guards; NAKED is never introduced and nudityLevel is never touched.
+    Seeded per beat so the whole pass is reproducible; an unresolvable beat is left as-is
+    and logged.
+    """
+    if not scenes:
+        return scenes
+
+    outfit_counts: Dict[str, int] = {}
+    for s in scenes:
+        if s.outfit is not None:
+            k = _val(s.outfit)
+            outfit_counts[k] = outfit_counts.get(k, 0) + 1
+
+    seen_pairs: set = set()
+
+    def _pair_of(sc: SceneSpec) -> Optional[Tuple[str, str]]:
+        if sc.outfit is None or sc.pose is None:
+            return None
+        return (_val(sc.outfit), _val(sc.pose))
+
+    def _offenses(sc: SceneSpec, prev: Optional[SceneSpec], slot) -> Tuple[bool, bool, bool]:
+        pair = _pair_of(sc)
+        dup = pair is not None and pair in seen_pairs
+        over = (
+            sc.outfit is not None
+            and outfit_counts.get(_val(sc.outfit), 0) >= 3
+            and not _slot_is_single_uniform(slot, controls)
+        )
+        consec = (
+            prev is not None
+            and sc.pose is not None
+            and _val(sc.pose) == _val(prev.pose)
+            and _val(sc.location) == _val(prev.location)
+        )
+        return dup, over, consec
+
+    for i, s in enumerate(scenes):
+        slot = slots[i] if i < len(slots) else None
+        prev = scenes[i - 1] if i > 0 else None
+        rng = random.Random((controls.base_seed or 0) + 500009 * (i + 1))
+
+        dup, over, consec = _offenses(s, prev, slot)
+        if dup or over or consec:
+            # Repair pose first (only helps dup/consec; leaves the outfit intact).
+            if s.pose is not None and (dup or consec):
+                order = _variety_pose_candidates(s, slot, controls)
+                rng.shuffle(order)
+                for p in order:
+                    pv = _val(p)
+                    if pv == _val(s.pose):
+                        continue
+                    if s.outfit is not None and (_val(s.outfit), pv) in seen_pairs:
+                        continue
+                    if prev is not None and pv == _val(prev.pose) and _val(s.location) == _val(prev.location):
+                        continue
+                    s.pose = p
+                    break
+            dup, over, consec = _offenses(s, prev, slot)
+            # Then repair outfit (fixes dup/over; respects the usage cap; never NAKED).
+            if s.outfit is not None and (dup or over):
+                order = _variety_outfit_candidates(s, slot, controls)
+                rng.shuffle(order)
+                for o in order:
+                    ov = _val(o)
+                    if ov == _val(s.outfit):
+                        continue
+                    if s.pose is not None and (ov, _val(s.pose)) in seen_pairs:
+                        continue
+                    if outfit_counts.get(ov, 0) >= 3:
+                        continue
+                    outfit_counts[_val(s.outfit)] = outfit_counts.get(_val(s.outfit), 0) - 1
+                    outfit_counts[ov] = outfit_counts.get(ov, 0) + 1
+                    s.outfit = o
+                    break
+            dup, over, consec = _offenses(s, prev, slot)
+            if dup or over or consec:
+                logger.debug(
+                    "variety: unresolved beat %d (dup=%s over=%s consec=%s)", i, dup, over, consec
+                )
+
+        pair = _pair_of(s)
+        if pair is not None:
+            seen_pairs.add(pair)
+    return scenes
+
+
 def validate_and_repair(
     scenes: List[SceneSpec],
     character: Character,
@@ -809,6 +1118,8 @@ def validate_and_repair(
     controls: BatchControls,
     *,
     enforce_beat_pool: bool = True,
+    enforce_nudity_ramp: bool = True,
+    enforce_variety: bool = True,
 ) -> List[SceneSpec]:
     """
     Coerce/repair enums, clamp nudity, enforce allow/block, enforce beat-pool
@@ -822,16 +1133,27 @@ def validate_and_repair(
     pools. The other repairs (nudity ceiling, allow/block, identity scrub,
     count guarantee) still apply — manual mode overrides planner choices, not
     safety controls.
+
+    ``enforce_nudity_ramp`` clamps each photo DOWN to the per-photo guided-ceiling
+    ramp (and auto-fills an outfit for a medium/high scene that has none, since
+    nudity renders only through the outfit step). ``enforce_variety`` runs the
+    set-level dedup pass. Both default True (venice/deterministic/fallback); the
+    manual path passes both False so an admin's exact scene list is left intact.
     """
     max_idx = _nudity_index(controls.max_nudity)
     slots = _beat_slots(character, count, controls) if enforce_beat_pool else []
+    ramp = _nudity_ramp(count, controls) if enforce_nudity_ramp else []
     repaired: List[SceneSpec] = []
     for i, scene in enumerate(scenes[:count]):
         s = scene.model_copy(deep=True)
 
-        # Nudity ceiling (hard clamp) + sfw.
+        # Nudity clamp. sfw_only -> LOW. Guided-ceiling: clamp DOWN to the per-photo
+        # ramp ceiling when enforcing the arc, else the flat max_nudity ceiling. Never
+        # forces a level UP (an LLM "low" mid-batch stays low).
         if controls.sfw_only:
             s.nudityLevel = NudityLevel.LOW
+        elif enforce_nudity_ramp and i < len(ramp):
+            s.nudityLevel = _NUDITY_LADDER[min(_nudity_index(s.nudityLevel), _nudity_index(ramp[i]))]
         else:
             s.nudityLevel = _NUDITY_LADDER[min(_nudity_index(s.nudityLevel), max_idx)]
 
@@ -870,15 +1192,30 @@ def validate_and_repair(
         if i < len(slots):
             s = _enforce_beat_pool(s, slots[i], controls, seed=(controls.base_seed or 0) + i)
 
+        # Outfit-fill: a medium/high scene renders its nudity ONLY through the outfit
+        # step, so a non-LOW scene with outfit=None would silently drop to dressed/blank.
+        # Fill deterministically from the allowed pool (never NAKED); empty pool -> leave
+        # None (nothing safe to place). Gated with the ramp so manual scenes keep None.
+        if enforce_nudity_ramp and s.outfit is None and s.nudityLevel != NudityLevel.LOW:
+            fill_pool = _outfit_fill_pool(controls)
+            if fill_pool:
+                fill_rng = random.Random((controls.base_seed or 0) + 700001 * (i + 1))
+                s.outfit = fill_rng.choice(fill_pool)
+
         # Scrub identity tokens from free-text (defense-in-depth).
         if s.background_text:
             s.background_text = _scrub_identity(s.background_text)
         s.beat_description = _scrub_identity(s.beat_description)
-        # setting/activity DO reach the render, so scrubbing them is load-bearing.
+        # setting/activity/outfit_detail/expression DO reach the render, so scrubbing them
+        # is load-bearing (expression additionally strips facial-feature tokens).
         if s.setting:
             s.setting = _scrub_scene_text(s.setting, 400)
         if s.activity:
             s.activity = _scrub_scene_text(s.activity, 200)
+        if s.outfit_detail:
+            s.outfit_detail = _scrub_scene_text(s.outfit_detail, 160)
+        if s.expression:
+            s.expression = _scrub_expression(s.expression)
         if s.narrative:
             s.narrative = _scrub_narrative(s.narrative)
 
@@ -894,6 +1231,10 @@ def validate_and_repair(
         pad = DeterministicScenePlanner().plan_scenes_sync(character, count, controls)
         repaired.extend(pad[len(repaired): len(repaired) + deficit])
     repaired = repaired[:count]
+
+    # Set-level variety pass (after padding so the final set is what gets deduped).
+    if enforce_variety:
+        repaired = _enforce_variety(repaired, slots, controls)
 
     # Re-index global order so downstream ordering is contiguous.
     for i, s in enumerate(repaired):
@@ -959,8 +1300,8 @@ def _scrub_narrative(text: str) -> Optional[str]:
 
 def _scrub_scene_text(text, limit: int) -> Optional[str]:
     """
-    Identity-scrub a render-safe scene field (setting/activity) and cap its length.
-    Returns None if nothing meaningful survives the scrub. These fields DO reach the
+    Identity-scrub a render-safe scene field (setting/activity/outfit_detail) and cap its
+    length. Returns None if nothing meaningful survives the scrub. These fields DO reach the
     render, so scrubbing here (and again in validate_and_repair) is load-bearing, not
     just cosmetic like narrative.
     """
@@ -968,6 +1309,29 @@ def _scrub_scene_text(text, limit: int) -> Optional[str]:
         return None
     scrubbed = _scrub_identity(str(text))
     return scrubbed[:limit] if scrubbed else None
+
+
+# Facial-FEATURE tokens the `expression` field must never carry — it is an expression/mood
+# only (eyes/skin/hair are already handled by _scrub_identity; these are the extras).
+_EXPRESSION_FEATURE_RE = re.compile(
+    r"\b(?:lips?|teeth|tooth|jaws?|cheekbones?|noses?|chins?|eyes?)\b", re.IGNORECASE
+)
+
+
+def _scrub_expression(text) -> Optional[str]:
+    """
+    Scrub the expression/mood field: identity-scrub + cap at 80 (like setting/activity),
+    then additionally strip facial-FEATURE tokens (lips/teeth/jaw/cheekbone/nose/chin/eyes)
+    so the field can only carry an EXPRESSION/mood, never a description of the face itself.
+    Returns None if nothing meaningful survives.
+    """
+    scrubbed = _scrub_scene_text(text, 80)
+    if not scrubbed:
+        return None
+    scrubbed = _EXPRESSION_FEATURE_RE.sub("", scrubbed)
+    scrubbed = re.sub(r"\s{2,}", " ", scrubbed)
+    scrubbed = re.sub(r"\s+([,.;])", r"\1", scrubbed).strip(" ,.;")
+    return scrubbed or None
 
 
 # ---------------------------------------------------------------------------
@@ -1006,7 +1370,10 @@ async def plan_scenes(
         planner = ManualScenePlanner(manual_scenes or [])
         scenes = await planner.plan_scenes(character, count, controls)
         return (
-            validate_and_repair(scenes, character, count, controls, enforce_beat_pool=False),
+            validate_and_repair(
+                scenes, character, count, controls,
+                enforce_beat_pool=False, enforce_nudity_ramp=False, enforce_variety=False,
+            ),
             "manual",
         )
 

@@ -16,9 +16,10 @@ _mr.validate_source_image = lambda u: u  # type: ignore
 from models.requests import PersonaOptions
 from models.batch import BatchControls, assemble_story, BatchItemRead
 from models.scene import SceneSpec
-from models.enums import OutfitType, LocationType, PoseType
+from models.enums import OutfitType, LocationType, PoseType, NudityLevel
 from services.story_planner import (
     Character, DeterministicScenePlanner, validate_and_repair, plan_scenes, _parse_arcs_json,
+    VeniceScenePlanner, STORY_DIRECTOR_SYSTEM_PROMPT,
 )
 from services.scene_mapper import scene_to_pipeline_request
 
@@ -203,6 +204,49 @@ def test_scrub_identity_strips_appearance_from_setting_activity():
     rp = (req.prompt or "").lower()
     for banned in ("redhead", "brunette", "green eyes"):
         assert banned not in rp
+
+
+# --- story-director prompt (WS1.4) + structured channels (WS2.2) ---
+def test_director_system_prompt_declares_outfit_detail_and_expression():
+    # WS2.2: the BEAT schema the director must emit now includes both structured fields.
+    assert '"outfit_detail"' in STORY_DIRECTOR_SYSTEM_PROMPT
+    assert '"expression"' in STORY_DIRECTOR_SYSTEM_PROMPT
+
+
+def test_director_prompt_has_kinks_work_location_nudity_plan_and_no_appearance():
+    planner = VeniceScenePlanner(api_key="x")
+    controls = BatchControls(start_nudity="low", max_nudity="high", story_mode=True)
+    prompt = planner._build_director_user_prompt(_character(occupation="nurse"), 8, controls)
+    # her kinks (raw value + phrase from ap.KINK_PHRASES)
+    assert "oral_play" in prompt
+    assert "sultry intimate mood" in prompt
+    # occupation-anchored work location + the day/nudity structure blocks
+    assert "hospital_ward" in prompt
+    assert "DAY SHAPE" in prompt
+    assert "NUDITY PLAN" in prompt
+    # the identity firewall: the director prompt must carry NO appearance tokens
+    # ("hair" is intentionally not checked — it collides with the 'hair_pulling' kink value).
+    low = prompt.lower()
+    for banned in ("redhead", "blonde", "brunette", "auburn", "eyes", "skin", "freckle"):
+        assert banned not in low, f"appearance token leaked into director prompt: {banned!r}"
+
+
+def test_parser_maps_and_scrubs_outfit_detail_and_expression():
+    raw = (
+        '{"story_title":"S","arcs":[{"arc_id":"a","arc_title":"A","beats":[{'
+        '"beat_description":"x","location":"home_kitchen",'
+        '"outfit_detail":"champagne silk pajama set, camisole and shorts",'
+        '"expression":"soft sleepy smile, parted lips, sharp cheekbones"}]}]}'
+    )
+    scenes = _parse_arcs_json(raw)
+    assert len(scenes) == 1
+    # outfit_detail is mapped + scrubbed but keeps the clothing description
+    assert scenes[0].outfit_detail and "silk pajama" in scenes[0].outfit_detail
+    # expression keeps the mood but drops facial-FEATURE words
+    expr = (scenes[0].expression or "").lower()
+    assert "smile" in expr
+    for feature in ("lips", "cheekbone"):
+        assert feature not in expr, f"facial feature survived in expression: {feature!r}"
 
 
 if __name__ == "__main__":
