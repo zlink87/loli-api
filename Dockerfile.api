@@ -22,10 +22,13 @@ WORKDIR /app/loli_api
 EXPOSE 8001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8001/health || exit 1
+    CMD curl -fsS http://localhost:${PORT:-8001}/health || exit 1
 
 # IMPORTANT: single worker. Job state is currently in-memory (per-process), so multiple
 # uvicorn workers would make GET /v1/jobs/{id} miss jobs created in another process.
 # To scale horizontally, add the durable Supabase job store (Step B) first.
 # The service is I/O-bound (just talks to RunPod/Supabase), so 1 worker handles plenty.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
+# Shell form (not exec-array) + `exec` so $PORT expands and uvicorn stays PID 1 for
+# correct SIGTERM/graceful shutdown. Platforms like Railway/Render/Fly inject $PORT;
+# ${PORT:-8001} keeps a plain `docker run` (no $PORT set) on the same port as before.
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8001} --workers 1"]

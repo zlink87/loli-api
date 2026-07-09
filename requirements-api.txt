@@ -33,4 +33,5 @@ PyJWT>=2.8.0
 # Image handling + Supabase storage
 Pillow>=10.3.0
 numpy>=1.26
+opencv-python-headless>=4.9  # cv2 for head_mask.py (YuNet face detect); headless = server build
 supabase>=2.0.0

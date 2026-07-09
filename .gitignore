@@ -94,3 +94,9 @@ loli_api/logs/
 # Local ComfyUI installs (never commit — caused a 24k-file accident 2026-07)
 ComfyUI/Loli Comfy UI/
 ComfyUI/**/standalone-env/
+
+# Runtime assets the API loads at startup — force-tracked past the broad *.onnx/*.png
+# rules above so cloud (git-based) container builds include them. Keep .orig backups ignored.
+!loli_api/assets/models/face_detection_yunet_2023mar.onnx
+!loli_api/assets/poses/pose_ref_*.png
+loli_api/assets/poses/pose_ref_*.orig.png
