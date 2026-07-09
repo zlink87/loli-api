@@ -139,3 +139,44 @@ class CharacterRead(BaseModel):
     status: str = "draft"
     created_at: datetime
     updated_at: datetime
+
+
+class BulkCharacterCreate(BaseModel):
+    """Request body for POST /v1/characters/bulk (admin-only, Batch Character Creation).
+
+    A list of characters to save, where each item is the exact `CharacterCreate` body
+    the single `POST /v1/characters` uses (reused verbatim). Items succeed/fail
+    INDEPENDENTLY — a bad item does not roll back the good ones.
+    """
+
+    items: List[CharacterCreate] = Field(
+        ..., description="Characters to save; each is a full CharacterCreate body."
+    )
+
+
+class BulkCharacterError(BaseModel):
+    """Per-item failure detail in a bulk-save response."""
+
+    code: str = Field(..., description="Machine error code, e.g. CREATE_ERROR")
+    message: str = Field(..., description="Human-readable failure reason")
+
+
+class BulkCharacterItemResult(BaseModel):
+    """One item's outcome in a POST /v1/characters/bulk response, in request order."""
+
+    index: int = Field(..., description="0-based position of this item in the request")
+    status: str = Field(..., description="'created' or 'failed'")
+    character: Optional[CharacterRead] = Field(
+        default=None, description="The created character (present when status == 'created')"
+    )
+    error: Optional[BulkCharacterError] = Field(
+        default=None, description="Failure detail (present when status == 'failed')"
+    )
+
+
+class BulkCharacterResponse(BaseModel):
+    """Response for POST /v1/characters/bulk (200 OK), per-item outcome in request order."""
+
+    results: List[BulkCharacterItemResult] = Field(
+        ..., description="One entry per input item, in request order"
+    )

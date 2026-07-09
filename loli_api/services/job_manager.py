@@ -56,12 +56,16 @@ class JobManager:
     Based on ManagedQueue pattern from app.py lines 1855-1901.
     """
 
-    def __init__(self, max_queue_size: int = 100):
+    def __init__(self, max_queue_size: int = 100, creation_queue_max_size: Optional[int] = None):
         """
         Initialize job manager.
 
         Args:
-            max_queue_size: Maximum number of jobs in queue
+            max_queue_size: Maximum number of jobs in the per-type interactive queues
+            creation_queue_max_size: Maximum number of jobs in the dedicated Batch
+                Character Creation queue (POST /v1/generate/batch). Defaults to
+                max_queue_size when not provided; set generously so realistic admin
+                batches fit in one atomic dispatch.
         """
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self.outfit_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
@@ -72,11 +76,18 @@ class JobManager:
         self.batch_pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         # Dedicated queue for admin image-to-video (reel) jobs.
         self.video_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        # Dedicated queue for Batch Character Creation text_to_image jobs, isolated
+        # from the interactive single-generate queue (self.queue) so a big batch can't
+        # starve interactive traffic. Jobs on it KEEP job_type="text_to_image" (the
+        # poll response is identical to single-generate); only the routing differs.
+        _creation_max = creation_queue_max_size if creation_queue_max_size is not None else max_queue_size
+        self.creation_queue: asyncio.Queue = asyncio.Queue(maxsize=_creation_max)
         self.jobs: Dict[str, Job] = {}
         # Maps RunPod job id -> local job id, so a webhook/reconciler can map back.
         self.runpod_index: Dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._max_queue_size = max_queue_size
+        self._creation_max_queue_size = _creation_max
         # Optional RunPod client, attached at startup, used to cancel in-flight jobs.
         self._runpod_client = None
 
@@ -103,7 +114,8 @@ class JobManager:
         self,
         request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest],
         user_id: str,
-        job_type: str = "text_to_image"
+        job_type: str = "text_to_image",
+        queue: str = "default"
     ) -> Job:
         """
         Create and queue a new job.
@@ -112,6 +124,10 @@ class JobManager:
             request: The generation or edit request
             user_id: The user who created the job
             job_type: Job type ("text_to_image", "outfit_edit", or "pose_edit")
+            queue: Routing override. "default" routes by job_type (unchanged). "creation"
+                routes a text_to_image job to the dedicated Batch Character Creation queue
+                (creation_queue) while leaving job.job_type == "text_to_image" — so the
+                GET /v1/jobs/{jobId} poll response is identical to single-generate.
 
         Returns:
             Created Job instance
@@ -145,8 +161,12 @@ class JobManager:
         async with self._lock:
             self.jobs[job_id] = job
 
-        # Route to appropriate queue
-        if job_type == "outfit_edit":
+        # Route to appropriate queue. An explicit `queue` override wins over job_type
+        # routing so batch-creation traffic can be isolated on its own queue while the
+        # job KEEPS its "text_to_image" job_type.
+        if queue == "creation":
+            await self.creation_queue.put(job_id)
+        elif job_type == "outfit_edit":
             await self.outfit_queue.put(job_id)
         elif job_type == "pose_edit":
             await self.pose_queue.put(job_id)
@@ -353,6 +373,22 @@ class JobManager:
         """Mark current video queue task as done."""
         self.video_queue.task_done()
 
+    async def get_next_creation_job(self) -> Optional[str]:
+        """Get the next job ID from the dedicated Batch Character Creation queue (blocking)."""
+        return await self.creation_queue.get()
+
+    def mark_creation_done(self) -> None:
+        """Mark current Batch Character Creation queue task as done."""
+        self.creation_queue.task_done()
+
+    def can_enqueue_creation(self, count: int) -> bool:
+        """
+        True if `count` more jobs fit on the creation_queue without exceeding its
+        maxsize. Atomic pre-check for POST /v1/generate/batch: the whole batch is
+        enqueued only when it fits entirely, so a batch never partially enqueues.
+        """
+        return self.creation_queue.qsize() + count <= self._creation_max_queue_size
+
     def queue_size(self, job_type: str = "text_to_image") -> int:
         """Get current queue size for the specified job type."""
         if job_type == "outfit_edit":
@@ -367,10 +403,14 @@ class JobManager:
             return self.batch_pipeline_queue.qsize()
         elif job_type == "video_gen":
             return self.video_queue.qsize()
+        elif job_type == "creation":
+            return self.creation_queue.qsize()
         return self.queue.qsize()
 
     def is_queue_full(self, job_type: str = "text_to_image") -> bool:
         """Check if queue is at capacity for the specified job type."""
+        if job_type == "creation":
+            return self.creation_queue.qsize() >= self._creation_max_queue_size
         if job_type == "outfit_edit":
             return self.outfit_queue.qsize() >= self._max_queue_size
         elif job_type == "pose_edit":

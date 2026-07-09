@@ -6,10 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any, Optional
 import logging
 
-from models.requests import GenerateImageRequest
-from models.responses import JobCreateResponse
+from models.requests import GenerateImageRequest, BatchGenerateRequest
+from models.responses import JobCreateResponse, BatchGenerateResponse, BatchGenerateItemResult
 from models.enums import JobStatus
 from auth.dependencies import get_current_user
+from auth.admin import require_admin
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -150,3 +151,72 @@ async def create_generate_job(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create job. Please try again."
         )
+
+
+@router.post(
+    "/generate/batch",
+    response_model=BatchGenerateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Dispatch N character image generation jobs (Batch Character Creation)",
+    description="""
+Admin-only. Dispatch a list of independent character photos, one text_to_image job
+each, routed to a dedicated `creation_queue` (isolated from interactive single-generate
+so a big batch can't starve it) and drained by a dedicated worker pool.
+
+Each item is the exact `GenerateImageRequest` body the single form builds. There is NO
+maximum item count. If any item fails validation the whole request 422s and nothing is
+enqueued. Enqueuing is atomic: if the batch queue can't fit ALL items, returns 429 and
+enqueues none.
+
+Poll each returned `jobId` via GET /v1/jobs/{jobId} exactly as the single flow does —
+the job type stays `text_to_image`, so the poll response is identical.
+    """,
+    responses={
+        202: {"description": "Batch dispatched", "model": BatchGenerateResponse},
+        401: {"description": "Unauthorized - Invalid or missing JWT token"},
+        403: {"description": "Forbidden - Admin access required"},
+        422: {"description": "Validation error - one or more items invalid; none enqueued"},
+        429: {"description": "Batch queue at capacity; none enqueued"},
+    },
+)
+async def create_batch_generate_jobs(
+    request: BatchGenerateRequest,
+    user: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Dispatch a batch of character image generation jobs onto the isolated creation queue.
+
+    Enqueuing is all-or-nothing: the creation queue's remaining capacity is checked
+    against the full item count BEFORE anything is enqueued (429 if it won't all fit),
+    so a batch never partially enqueues.
+    """
+    job_manager = get_job_manager()
+    user_id = user.get("sub", "anonymous")
+    items = request.items
+
+    # Atomic capacity pre-check: enqueue the whole batch or none of it.
+    if not job_manager.can_enqueue_creation(len(items)):
+        logger.warning(
+            f"Creation queue can't fit batch of {len(items)} from user {user_id}; rejecting (429)"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Batch queue is at capacity. Please try again shortly.",
+        )
+
+    results = []
+    for index, item in enumerate(items):
+        # queue="creation" isolates batch traffic while keeping job_type="text_to_image"
+        # so GET /v1/jobs/{jobId} is byte-identical to single-generate.
+        job = await job_manager.create_job(item, user_id, queue="creation")
+        results.append(
+            BatchGenerateItemResult(
+                index=index,
+                id=item.id,
+                jobId=job.job_id,
+                status=JobStatus.QUEUED,
+            )
+        )
+
+    logger.info(f"Batch dispatched: {len(results)} jobs -> creation_queue for user {user_id}")
+    return BatchGenerateResponse(items=results)

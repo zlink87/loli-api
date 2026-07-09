@@ -134,6 +134,14 @@ class Settings(BaseSettings):
     MOTION_WRITER_TEMPERATURE: float = 0.7
     MOTION_WRITER_MAX_TOKENS: int = 200
 
+    # Scene writer (Batch Character Creation: Venice writes a short, identity-free
+    # scene/environment sentence the admin drops into GenerateImageRequest.context).
+    # Uses Venice above. Empty SCENE_WRITER_MODEL -> VENICE_MODEL. Works keyless
+    # (deterministic curated fallback varied by input; never breaks the flow).
+    SCENE_WRITER_MODEL: str = ""
+    SCENE_WRITER_TEMPERATURE: float = 0.9
+    SCENE_WRITER_MAX_TOKENS: int = 160
+
     # Character generation: run the second detail-refine pass by default
     # (upscale-model round trip + refine steps; same output resolution,
     # ~+50-100% GPU time per image). Requires 4x_Nickelback_70000G.safetensors
@@ -154,6 +162,16 @@ class Settings(BaseSettings):
     # Number of dedicated batch pipeline workers (real parallelism for batches,
     # isolated from interactive /v1/edit traffic). Keep RunPod max_workers >= this.
     BATCH_WORKER_POOL_SIZE: int = 3
+    # Batch Character Creation — dedicated pool of text_to_image workers draining
+    # the isolated `creation_queue` (POST /v1/generate/batch), so a large character
+    # batch can't starve the interactive single-generate queue (self.queue). Runs the
+    # SAME text_to_image pipeline as the single BackgroundWorker; keep RunPod
+    # max_workers >= this.
+    CREATION_BATCH_WORKER_POOL_SIZE: int = 3
+    # Generous maxsize for `creation_queue` so a realistic admin batch fits in one
+    # atomic dispatch (POST /v1/generate/batch enqueues all-or-nothing; a batch larger
+    # than this 429s). Independent of MAX_QUEUE_SIZE (the per-interactive-queue cap).
+    CREATION_QUEUE_MAX_SIZE: int = 500
     # Max in-flight items per batch (fairness: stops one batch monopolizing the queue).
     BATCH_MAX_INFLIGHT: int = 3
     # Per-item retry attempts before an item is marked failed.
