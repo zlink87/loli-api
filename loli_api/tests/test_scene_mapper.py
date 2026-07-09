@@ -42,10 +42,19 @@ def _scene(**kw):
     return SceneSpec(**base)
 
 
-def test_source_is_always_hero_photo():
-    char = _character()
+def test_source_is_hero_photo_when_no_nude_base():
+    char = _character()  # nude_base_url defaults to None
     req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
     assert req.source_image == char.hero_photo_url
+
+
+def test_source_prefers_nude_base_when_present():
+    # W2 prep: when a nude/undressed base is populated, it becomes the swap source so a new
+    # garment renders onto a clean body instead of fighting the hero's existing clothes.
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
+    assert req.source_image == "https://x.supabase.co/nude.png"
 
 
 def test_photo_style_threaded_from_controls():
@@ -235,10 +244,13 @@ def test_outfit_denoise_none_for_naked_outfit():
     assert req.outfitDenoise is None
 
 
-def test_outfit_denoise_none_by_default():
+def test_outfit_denoise_defaults_to_085_for_outfit_step():
+    # BatchControls.outfit_denoise defaults to None, but the mapper now applies a stronger
+    # 0.85 default when a real (non-NAKED) outfit is present so the dressed-by-default avatar
+    # garment is actually removed (was: passed None through -> engine ~0.80).
     char = _character()
     req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
-    assert req.outfitDenoise is None  # BatchControls.outfit_denoise defaults to None
+    assert req.outfitDenoise == 0.85
 
 
 def test_outfit_prompt_mode_threaded_from_controls():
@@ -248,10 +260,26 @@ def test_outfit_prompt_mode_threaded_from_controls():
     assert req.outfitPromptMode == "replace"
 
 
-def test_outfit_prompt_mode_defaults_to_standard():
+def test_outfit_prompt_mode_defaults_to_replace():
+    # Batch default flipped standard -> replace: dressed-by-default avatars need an explicit
+    # remove-then-replace lead-in or the swap reconstructs the original garment.
     char = _character()
     req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
-    assert req.outfitPromptMode == "standard"
+    assert req.outfitPromptMode == "replace"
+
+
+# ---------------------------------------------------------------------------
+# W3 prep: lighting / timeOfDay flow from the scene onto the request (additive)
+# ---------------------------------------------------------------------------
+def test_lighting_and_time_of_day_mapped_from_scene():
+    char = _character()
+    scene = _scene(
+        pose=PoseType.SITTING,
+        time_of_day=TimeOfDayType.GOLDEN_HOUR, lighting=LightingType.CANDLELIT,
+    )
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert req.lighting == "candlelit"      # enum-value string, ready for the W3 pose step
+    assert req.timeOfDay == "golden_hour"
 
 
 if __name__ == "__main__":

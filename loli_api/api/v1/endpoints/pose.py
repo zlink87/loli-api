@@ -15,6 +15,7 @@ from models.requests import PoseEditRequest
 from models.responses import JobCreateResponse
 from services import pose_assets
 from services import prompt_constants as pc
+from services import scene_vocab as sv
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,8 @@ def build_pose_prompt(
     pose: PoseType,
     activity: Optional[str] = None,
     expression: Optional[str] = None,
+    lighting: Optional[str] = None,
+    time_of_day: Optional[str] = None,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
@@ -113,6 +116,26 @@ def build_pose_prompt(
             byte-locked by the composite-back in prepare_outfit_workflow, so
             there is nothing for a prompted expression to act on outside a pose
             step. None = unchanged base prompt.
+        lighting: Optional raw lighting enum-VALUE string (e.g.
+            PipelineEditRequest.lighting, sourced from SceneSpec.lighting —
+            values like "moody_dim"/"candlelit"/"neon"). Phrase-ified here via
+            services.scene_vocab.lighting_phrase() — the SAME LIGHTING_PHRASES
+            map scene_mapper.build_scene_background_text uses for the
+            background step, so tone matches — and appended as
+            ", in {lighting phrase}". This is the primary fix for batch photos
+            always rendering bright: the pose step is the only pipeline step
+            that fully re-diffuses the frame (denoise=1.0), so it is the one
+            place a lighting clause can actually re-light the person instead
+            of just the (person-masked-out) background. None, or a value
+            absent from the map, leaves the prompt unchanged — never injects
+            a raw enum string like "moody_dim" into the prompt.
+        time_of_day: Optional raw time-of-day enum-VALUE string (e.g.
+            PipelineEditRequest.timeOfDay, sourced from SceneSpec.time_of_day —
+            values like "evening"/"night"/"golden_hour"). Phrase-ified via
+            services.scene_vocab.time_of_day_phrase() and appended as
+            ", {time_of_day phrase}" (the phrase already carries its own
+            preposition, e.g. "at sunset" / "late at night"). Same
+            graceful-skip behavior as lighting.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
@@ -129,6 +152,12 @@ def build_pose_prompt(
         prompt += f", while {activity.strip()}"
     if expression and expression.strip():
         prompt += f", {expression.strip()} expression"
+    lighting_text = sv.lighting_phrase(lighting)
+    if lighting_text:
+        prompt += f", in {lighting_text}"
+    time_of_day_text = sv.time_of_day_phrase(time_of_day)
+    if time_of_day_text:
+        prompt += f", {time_of_day_text}"
     return prompt
 
 

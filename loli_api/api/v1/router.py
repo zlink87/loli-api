@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from .endpoints import (
     generate, jobs, preview, edit, outfit, pose, background, pipeline,
-    characters, batches, video, persona,
+    characters, batches, video, persona, nude_base,
 )
 
 # Create main API router
@@ -24,6 +24,7 @@ api_router.include_router(characters.router)
 api_router.include_router(batches.router)
 api_router.include_router(video.router)
 api_router.include_router(persona.router)
+api_router.include_router(nude_base.router)
 
 
 def configure_services(
@@ -44,6 +45,7 @@ def configure_services(
     persona_writer=None,
     motion_writer=None,
     chat_persona_store=None,
+    nude_base_store=None,
 ):
     """
     Configure services for all endpoint modules.
@@ -102,6 +104,14 @@ def configure_services(
         characters.set_persona_writer(persona_writer)
     if chat_persona_store is not None:
         characters.set_chat_persona_store(chat_persona_store)
+    # Nude base (per-character identity-locked undressed render) — admin, Supabase-gated.
+    # Batches auto-use it once generated (activated in BatchReconciler); the endpoints
+    # 503 until the stores are wired, so nothing changes for characters without one.
+    nude_base.set_job_manager(job_manager)
+    if character_store is not None:
+        nude_base.set_character_store(character_store)
+    if nude_base_store is not None:
+        nude_base.set_nude_base_store(nude_base_store)
     # Reels (image-to-video) — admin, Supabase-gated
     video.set_job_manager(job_manager)
     if notification_service:

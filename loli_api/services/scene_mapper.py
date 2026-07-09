@@ -116,10 +116,15 @@ def scene_to_pipeline_request(
     # Outfit-step-only knob (WS3.2): dead weight when there's no outfit step (outfit
     # is None) or nothing to strengthen against (NAKED has no "current clothing" to
     # override — build_prompt's NAKED branch doesn't consult it), so it's gated on a
-    # non-NAKED effective outfit. Batch avatars are dressed-by-default, so this is a
-    # dressed-source -> dressed-target heuristic.
+    # non-NAKED effective outfit. Batch avatars are DRESSED by default, so a swap must
+    # actively REMOVE the source garment, not just describe a new one over it — otherwise
+    # the edit tends to reconstruct the original clothes. So for a real (non-NAKED) outfit
+    # we default to a STRONGER denoise (0.85) unless the admin set an explicit value; an
+    # explicit admin choice still wins. None when there's no outfit step / NAKED.
     outfit_denoise = (
-        controls.outfit_denoise if (outfit is not None and outfit != OutfitType.NAKED) else None
+        (controls.outfit_denoise if controls.outfit_denoise is not None else 0.85)
+        if (outfit is not None and outfit != OutfitType.NAKED)
+        else None
     )
 
     background_text = scene.background_text or sv.build_scene_background_text(
@@ -149,7 +154,10 @@ def scene_to_pipeline_request(
 
     return PipelineEditRequest(
         # NOTE: the planner Character dataclass field is hero_photo_url (story_planner.py).
-        source_image=character.hero_photo_url,
+        # Prefer a nude/undressed base (nude_base_url) as the swap SOURCE so a new garment
+        # renders onto a clean body instead of fighting the hero's existing clothes; None
+        # today (populated by a later agent) -> falls back to the hero photo unchanged.
+        source_image=getattr(character, "nude_base_url", None) or character.hero_photo_url,
         pose=pose,
         outfit=outfit,
         # WS2 structured description channels: outfit_detail/expression are
@@ -164,9 +172,16 @@ def scene_to_pipeline_request(
         # consume it, so it's never duplicated-but-unread on the request.
         activity=(scene.activity if pose is not None else None),
         outfitDenoise=outfit_denoise,
+        # Batch source avatars are dressed-by-default, so BatchControls.outfit_prompt_mode
+        # now defaults to "replace" (explicit remove-then-replace lead-in); an explicit
+        # admin "standard"/"replace" still passes straight through here.
         outfitPromptMode=controls.outfit_prompt_mode,
         nudityLevel=nudity,
         accessories=scene.accessories,
+        # Additive scene metadata (identity-free enum-value strings) reserved for the pose
+        # step (W3). Nothing consumes them yet; always safe to set from the scene.
+        lighting=_val(scene.lighting),
+        timeOfDay=_val(scene.time_of_day),
         prompt=background_text or None,
         negativePrompt=None,
         seed=seed,

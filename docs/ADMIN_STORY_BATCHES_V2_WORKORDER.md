@@ -205,3 +205,48 @@ Pull option lists from `/openapi.json → components.schemas`: `NudityLevel`, `O
 - [ ] Period/days control (WI-7) sends `controls.period_days` (1–7); omitted or `1` behaves identically to today.
 - [ ] Character creation sends `generate_persona: true` (WI-8); the created character's persona shows all 6+ generated fields populated, not just System Prompt; a typed `bio` is preserved.
 - [ ] No appearance text ever enters a batch request; existing batches (no new fields) still work.
+
+---
+
+## 7. Known render limits (set expectations)
+
+*(Added 2026-07-09, from this session's render-pipeline investigation. Companion ops
+doc: [`docs/OPS_OUTFIT_TIER_2511.md`](./OPS_OUTFIT_TIER_2511.md).)*
+
+These are backend rendering-pipeline realities, not admin-panel bugs — set
+expectations accordingly rather than building or promising a control that can't
+move the pixels.
+
+**Head accessories can't change.** `glasses` / `earrings` / `hat` / `sunglasses`
+(`AccessoryType`) all sit on or immediately around the head, which is the identity
+anchor: the outfit step masks the head out of its edit region (a server-computed
+head-protect mask, subtracted before the crop-and-stitch sampler runs), and the
+background step masks the *entire* person and composites them back byte-identical.
+Whatever survives those two steps then has its face restored again by the pose
+step's face-swap. So an avatar's glasses/earrings/hat appear identically in every
+photo by construction — an `accessories` value can select them (on a single-photo
+edit, or via the story planner's `scene_spec.accessories`) but nothing visibly
+changes. Only `necklace` sits low enough (below the head-mask's chin/jaw padding)
+to land in the editable region and actually render. Don't promise an accessories
+control for head items.
+
+**Poses can look stiff/repetitive.** Each of the 16 `PoseType` values is driven by
+exactly one fixed reference image (`assets/poses/pose_ref_<value>.png`) that the
+pose workflow instructs the model to copy closely ("Make the person in image 1 do
+the exact same pose of the person in image 2 ... match image 2 accurately"). Every
+photo using a given pose type therefore looks near-identical to every other photo
+using that same type, and the achievable variety across a whole batch is capped at
+16 silhouettes total. Fixing this needs more/varied reference images per pose, or a
+pose-generation model — a backend change, not something an admin input can reach.
+
+**"Generate" re-plans; "Launch this plan" reproduces the preview.**
+`POST /v1/characters/{id}/batches` — what the "Generate {count}" button calls,
+whether `dry_run` is `true` or `false` — always calls the story planner fresh. With
+Venice as the planner (temperature 0.7), that means a second "Generate" with
+identical inputs produces a **different** storyboard than the one just previewed.
+Only `POST /v1/batches/{id}/launch` ("Launch this plan") skips planning entirely
+and reuses the previewed batch's persisted `scene_spec` rows as-is. So the
+"preview → confirm" flow in the contract doc's §6 isn't just a nicety — it's the
+only path that renders exactly what was previewed. Consider making the UI's
+primary Generate action reuse an existing preview (`dry_run:true` first, then
+launch that) rather than exposing a plain "Generate" that silently re-plans.

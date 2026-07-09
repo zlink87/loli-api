@@ -34,6 +34,15 @@ Covers:
   c21 build_pose_prompt: activity/expression appended (", while {activity}" /
       ", {expression} expression"); base prompt is byte-identical when both are
       omitted/None (back-compat for /v1/edit/pose, which never sets them).
+  c22 build_pose_prompt: lighting phrase-ified via services.scene_vocab and
+      appended (", in {lighting phrase}"); raw enum-value string never leaks;
+      None/unrecognized -> byte-identical to the base prompt.
+  c23 build_pose_prompt: time_of_day phrase-ified and appended (", {time_of_day
+      phrase}"); same graceful None/unrecognized back-compat; combines with
+      activity/expression/lighting in the documented append order.
+  c24 outfit build_prompt: lighting phrase-ified and appended after
+      outfit_detail (both branches: dressed and NAKED); same graceful
+      None/unrecognized back-compat.
 
 (c7, c8, c15 covered `has_contradiction`/`MAX_SCENE_WORDS`/`scene_preserves_hint`
 — all removed with the Venice generation-scene-writer on 2026-07-08. c11 is the
@@ -437,6 +446,138 @@ def test_pose_prompt_activity_and_expression_appended():
 
 
 # ---------------------------------------------------------------------------
+# c22 — build_pose_prompt: lighting phrase-ified + appended; back-compat when
+# None/unrecognized (W3: batch photos always rendering bright — the pose step
+# is the only step that fully re-diffuses the frame, so it's the one place a
+# lighting clause can actually re-light the person).
+# ---------------------------------------------------------------------------
+def test_pose_prompt_lighting_appended():
+    base = pose_ep.build_pose_prompt(PoseType.SITTING)
+
+    lit = pose_ep.build_pose_prompt(PoseType.SITTING, lighting="moody_dim")
+    assert lit == base + ", in moody dim low-key lighting"
+
+    # Raw enum-value string is never injected verbatim — only the phrase-ified
+    # text from services.scene_vocab.LIGHTING_PHRASES.
+    assert "moody_dim" not in lit
+
+    # None -> byte-identical to the base prompt (back-compat).
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, lighting=None) == base
+
+    # Unrecognized value -> gracefully skipped (no clause appended, no raw
+    # string injected), never a crash.
+    unknown = pose_ep.build_pose_prompt(PoseType.SITTING, lighting="not_a_real_lighting_value")
+    assert unknown == base
+    assert "not_a_real_lighting_value" not in unknown
+
+    # Omitting the base-call params entirely (today's /v1/edit/pose call shape)
+    # still yields the exact unchanged prompt.
+    assert pose_ep.build_pose_prompt(PoseType.SITTING) == base
+    print("c22 OK: lighting phrase-ified + appended; None/unrecognized leave the prompt unchanged")
+
+
+# ---------------------------------------------------------------------------
+# c23 — build_pose_prompt: time_of_day phrase-ified + appended; back-compat;
+# combines with activity/expression/lighting in the documented append order
+# (activity, expression, lighting, time_of_day).
+# ---------------------------------------------------------------------------
+def test_pose_prompt_time_of_day_appended_and_combines_with_lighting():
+    base = pose_ep.build_pose_prompt(PoseType.SITTING)
+
+    # "golden_hour" (underscored raw value) vs "during golden hour" (spaced
+    # phrase) — a clean pair for the no-raw-leak assertion below.
+    golden = pose_ep.build_pose_prompt(PoseType.SITTING, time_of_day="golden_hour")
+    assert golden == base + ", during golden hour"
+    assert "golden_hour" not in golden
+
+    # None -> byte-identical (back-compat).
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, time_of_day=None) == base
+
+    # Unrecognized value -> gracefully skipped.
+    unknown = pose_ep.build_pose_prompt(PoseType.SITTING, time_of_day="not_a_real_tod_value")
+    assert unknown == base
+    assert "not_a_real_tod_value" not in unknown
+
+    # Full combination: activity, expression, lighting, time_of_day all append
+    # in that order (mirrors workers.pipeline_worker._build_step_workflow's
+    # pose branch, which passes all four through from PipelineEditRequest).
+    combo = pose_ep.build_pose_prompt(
+        PoseType.SITTING,
+        activity="pouring coffee",
+        expression="sleepy soft smile",
+        lighting="moody_dim",
+        time_of_day="night",
+    )
+    assert combo == (
+        base
+        + ", while pouring coffee"
+        + ", sleepy soft smile expression"
+        + ", in moody dim low-key lighting"
+        + ", late at night"
+    )
+    print(
+        "c23 OK: time_of_day phrase-ified + appended; None/unrecognized unchanged; "
+        "combines with activity/expression/lighting in append order"
+    )
+
+
+# ---------------------------------------------------------------------------
+# c24 — outfit build_prompt: lighting phrase-ified + appended after
+# outfit_detail (both branches); back-compat when None/unrecognized.
+# ---------------------------------------------------------------------------
+def test_outfit_prompt_lighting_appended_after_outfit_detail():
+    base = outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW)
+
+    lit = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, lighting="candlelit",
+    )
+    # Lighting is inserted into the LEAD sentence (same region as
+    # outfit_detail), before the identity clause — not appended at the very
+    # end of the whole joined prompt. Stripping the clause back out reproduces
+    # the base prompt exactly.
+    assert "flickering candlelight" in lit
+    assert lit.replace(", in flickering candlelight", "", 1) == base
+    # Raw enum-value string never leaks ("candlelit" is not a substring of the
+    # phrase "flickering candlelight" — they diverge after "candlel").
+    assert "candlelit" not in lit
+
+    # Sits AFTER outfit_detail on the same lead sentence, before the identity
+    # clause (mirrors c18's outfit_detail placement check).
+    detailed_and_lit = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW,
+        outfit_detail="charcoal pinstripe, fitted blazer", lighting="candlelit",
+    )
+    identity = pc.identity_clause("the outfit and clothing")
+    assert "charcoal pinstripe, fitted blazer" in detailed_and_lit
+    assert "flickering candlelight" in detailed_and_lit
+    assert (
+        detailed_and_lit.index("charcoal pinstripe")
+        < detailed_and_lit.index("flickering candlelight")
+        < detailed_and_lit.index(identity)
+    )
+
+    # NAKED branch also gets the lighting clause (outfit_detail applies there
+    # too — c19 — and lighting follows the same both-branches treatment).
+    naked_lit = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH, lighting="candlelit")
+    assert naked_lit.startswith("Remove all clothing")
+    assert "flickering candlelight" in naked_lit
+
+    # None -> byte-identical (back-compat).
+    assert outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, lighting=None) == base
+
+    # Unrecognized value -> gracefully skipped.
+    unknown = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, lighting="not_a_real_lighting_value",
+    )
+    assert unknown == base
+    assert "not_a_real_lighting_value" not in unknown
+    print(
+        "c24 OK: outfit lighting phrase-ified + appended after outfit_detail on both "
+        "branches; None/unrecognized leave the prompt unchanged"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -459,6 +600,9 @@ def _run_all():
         test_outfit_detail_appended_on_naked_branch_too,
         test_outfit_replace_mode_swaps_lead_in,
         test_pose_prompt_activity_and_expression_appended,
+        test_pose_prompt_lighting_appended,
+        test_pose_prompt_time_of_day_appended_and_combines_with_lighting,
+        test_outfit_prompt_lighting_appended_after_outfit_detail,
     ]
     failures = 0
     for fn in tests:

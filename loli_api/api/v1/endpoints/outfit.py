@@ -21,6 +21,7 @@ from models.requests import OutfitEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
 from services import prompt_constants as pc
+from services import scene_vocab as sv
 from services.outfit_vocab import OUTFIT_DESCRIPTIONS, ACCESSORY_DESCRIPTIONS
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,7 @@ def build_prompt(
     nudity_level: NudityLevel = NudityLevel.LOW,
     outfit_detail: Optional[str] = None,
     replace_mode: bool = False,
+    lighting: Optional[str] = None,
 ) -> str:
     """
     Build the positive prompt from outfit and accessories.
@@ -138,6 +140,18 @@ def build_prompt(
             for an explicit remove-then-replace instruction (see
             ``_outfit_replace_lead``). The NAKED branch already reads as a
             removal instruction, so this has no effect there.
+        lighting: Optional raw lighting enum-VALUE string (e.g.
+            PipelineEditRequest.lighting, sourced from SceneSpec.lighting —
+            values like "moody_dim"/"candlelit"/"neon"). Phrase-ified via
+            services.scene_vocab.lighting_phrase() (the same LIGHTING_PHRASES
+            map the background step and the pose step use) and appended onto
+            the lead sentence right after outfit_detail as ", in {lighting
+            phrase}". The outfit step composites the person back over the
+            source, so this mostly affects the newly-rendered garment/crop
+            region rather than re-lighting the whole person — a cheap,
+            low-risk secondary lighting signal, not the primary fix (that is
+            build_pose_prompt's lighting param). None, or a value absent from
+            the map, leaves the prompt unchanged.
 
     Returns:
         Complete prompt string
@@ -148,10 +162,14 @@ def build_prompt(
     else:
         outfit_desc = str(outfit.value)
 
+    lighting_text = sv.lighting_phrase(lighting)
+
     if outfit == OutfitType.NAKED:
         lead = f"Remove all clothing, the person should be {outfit_desc}"
         if outfit_detail and outfit_detail.strip():
             lead += f", {outfit_detail.strip()}"
+        if lighting_text:
+            lead += f", in {lighting_text}"
         prompt_parts = [
             lead,
             pc.identity_clause("the clothing and covering"),
@@ -165,6 +183,8 @@ def build_prompt(
         )
         if outfit_detail and outfit_detail.strip():
             lead += f", {outfit_detail.strip()}"
+        if lighting_text:
+            lead += f", in {lighting_text}"
         prompt_parts = [
             lead,
             pc.identity_clause("the outfit and clothing"),
@@ -445,6 +465,37 @@ def prepare_outfit_workflow(
 
 
 # ---------------------------------------------------------------------------
+# Shared job submission (used by /v1/edit/outfit AND internal callers, e.g. the
+# nude-base generator in api/v1/endpoints/nude_base.py)
+# ---------------------------------------------------------------------------
+async def submit_outfit_edit_job(request: OutfitEditRequest, user_id: str):
+    """
+    Enqueue an outfit_edit job the exact way ``edit_outfit`` does — enforce the
+    outfit queue cap (429), mirror the request to the notification webhook, then
+    ``job_manager.create_job(..., job_type="outfit_edit")``. Returns the created
+    Job; the caller shapes its own HTTP response.
+
+    Factored so a non-request-bound internal caller (nude-base generation) reuses
+    the identical submission path (same queue, same worker, same identity-locked
+    head-mask + crop-stitch flow) rather than duplicating it.
+    """
+    job_manager = get_job_manager()
+
+    if job_manager.is_queue_full(job_type="outfit_edit"):
+        logger.warning(f"Outfit queue full, rejecting request from user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Outfit edit queue is full. Please try again later."
+        )
+
+    notification_service = get_notification_service()
+    if notification_service:
+        await notification_service.send_request_received(user_id, request.model_dump(mode="json"))
+
+    return await job_manager.create_job(request, user_id, job_type="outfit_edit")
+
+
+# ---------------------------------------------------------------------------
 # API Endpoint
 # ---------------------------------------------------------------------------
 @router.post(
@@ -493,26 +544,11 @@ async def edit_outfit(
     - `jobId`: Unique identifier to poll for status
     - `status`: Initial status (always "queued")
     """
-    job_manager = get_job_manager()
     user_id = current_user.get("sub", "anonymous")
 
     try:
-        # Check queue capacity
-        if job_manager.is_queue_full(job_type="outfit_edit"):
-            logger.warning(f"Outfit queue full, rejecting request from user {user_id}")
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Outfit edit queue is full. Please try again later."
-            )
-
-        # Send payload to Google Chat webhook for logging
-        notification_service = get_notification_service()
-        if notification_service:
-            payload_dict = request.model_dump(mode="json")
-            await notification_service.send_request_received(user_id, payload_dict)
-
-        # Create job
-        job = await job_manager.create_job(request, user_id, job_type="outfit_edit")
+        # Queue-cap check + webhook mirror + enqueue (shared with internal callers).
+        job = await submit_outfit_edit_job(request, user_id)
 
         logger.info(
             f"Created outfit edit job {job.job_id} for user {user_id} "

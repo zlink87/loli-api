@@ -281,6 +281,15 @@ class PipelineBackgroundWorker:
         request object missing them (e.g. a hand-built test stand-in, or the
         legacy interactive endpoints' own request models, which don't carry
         these fields at all) degrades to the pre-WS2/WS3.2 behavior exactly.
+
+        W3: ``request.lighting``/``timeOfDay`` (raw enum-value strings, e.g.
+        "moody_dim"/"night") are read the same defensive way and routed to the
+        pose step's ``build_pose_prompt`` (the primary lighting fix — see its
+        docstring) and, for ``lighting`` only, to the outfit step's
+        ``build_prompt`` (secondary/cheap — the outfit step composites the
+        person back over the source, so it mostly affects the regenerated
+        crop). Both builders phrase-ify the raw value via
+        ``services.scene_vocab`` and no-op on None/unrecognized values.
         """
         # Optional photographic-finish clause. Applied ONLY on the last active
         # step: earlier revisions applied it at every step, and 2-3 re-diffusions
@@ -296,6 +305,14 @@ class PipelineBackgroundWorker:
                     request.pose,
                     activity=getattr(request, "activity", None),
                     expression=getattr(request, "expression", None),
+                    # W3 lighting fix: the pose step is the only step that fully
+                    # re-diffuses the frame, so it's the one place a lighting/
+                    # time-of-day clause can actually re-light the person (the
+                    # background step masks the person OUT and composites them
+                    # back untouched). Raw enum-value strings off the request;
+                    # build_pose_prompt phrase-ifies them via scene_vocab.
+                    lighting=getattr(request, "lighting", None),
+                    time_of_day=getattr(request, "timeOfDay", None),
                 ),
                 photo_style,
             )
@@ -311,6 +328,10 @@ class PipelineBackgroundWorker:
                     request.outfit, request.accessories, request.nudityLevel,
                     outfit_detail=getattr(request, "outfitDetail", None),
                     replace_mode=(getattr(request, "outfitPromptMode", "standard") == "replace"),
+                    # Secondary/cheap lighting signal (see build_prompt docstring):
+                    # the outfit step composites the person back over the source,
+                    # so this mainly affects the regenerated crop, not a full relight.
+                    lighting=getattr(request, "lighting", None),
                 ),
                 photo_style,
             )

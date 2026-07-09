@@ -75,6 +75,11 @@ class Character:
     likes: List[str] = field(default_factory=list)
     dislikes: List[str] = field(default_factory=list)
     hero_photo_url: Optional[str] = None
+    # Optional nude/undressed base of this avatar. When present, the scene mapper uses
+    # it as the outfit-swap SOURCE instead of hero_photo_url so a new garment renders
+    # onto a clean body rather than fighting the hero's existing clothes. Populated by a
+    # later agent; None today -> mapper falls back to hero_photo_url (unchanged behavior).
+    nude_base_url: Optional[str] = None
     # Free-text persona/context (characters.context). Story-mode uses it for narrative
     # coherence; inert to beat-slot/pool selection.
     bio: Optional[str] = None
@@ -680,8 +685,15 @@ HARD RULES:
   personality and kinks. SHE chooses where the day goes; the locations, activities and outfits
   are the ones THIS character would pick, following the DAY SHAPE in the user message.
 - Choose pose/outfit/location/time_of_day/lighting ONLY from the exact lists in the user
-  message. Use null for pose/outfit if none fits a beat; location/time_of_day/lighting are
-  always required. accessories/mood_kinks/mood_personality come from the shared lists.
+  message. Use null for POSE only if none fits a beat; OUTFIT is REQUIRED on EVERY beat
+  (see the OUTFIT RULE below); location/time_of_day/lighting are always required.
+  accessories/mood_kinks/mood_personality come from the shared lists.
+- OUTFIT RULE (HARD): every beat MUST set a non-null "outfit" enum chosen from the OUTFITS
+  list — NEVER null. If you are unsure, pick the CLOSEST outfit to what she is wearing; a
+  null outfit makes the render keep the avatar's original clothes and ignore your caption.
+  "outfit_detail" MUST describe the SAME garment as that chosen "outfit" enum at this beat's
+  nudityLevel — never a different garment class (do NOT pick outfit "satin_robe" and then
+  write "leather crop top and jeans"). The enum and the words must always agree.
 - COHERENCE IS YOUR JOB now (no menu enforces it): outfit, location, activity and time must
   make sense together in each beat — no gym clothes in a nightclub, no cocktail dress while
   cooking breakfast, no swimwear in an office.
@@ -697,14 +709,16 @@ HARD RULES:
 - IDENTITY IS PIXEL-LOCKED. In beat_description, setting, activity AND narrative, NEVER
   describe her face, age, ethnicity, hair, eyes, body, breasts or skin. Using her first name
   is fine. Describe places, clothes, actions, light and mood only.
-- "outfit_detail" describes ONLY clothing (garment, colors, fabric, fit) and must match the
-  chosen outfit + nudityLevel; "expression" is her expression/mood ONLY (e.g. 'soft sleepy
-  smile') — NEVER facial features (eyes, lips, jaw, nose, chin, face shape).
+- "outfit_detail" describes ONLY clothing (garment, colors, fabric, fit) — the SAME garment
+  as the chosen "outfit" enum at this nudityLevel (per the OUTFIT RULE); "expression" is her
+  expression/mood ONLY (e.g. 'soft sleepy smile') — NEVER facial features (eyes, lips, jaw,
+  nose, chin, face shape).
 - "narrative": keep the EXACT SAME third-person present voice for EVERY beat; continue directly
   from the previous beat; reflect her personality/likes/persona-context; avoid her dislikes.
 - NUDITY: follow the per-photo targets in the user message's NUDITY PLAN. Never exceed a photo's
   target; you may stay lower when the scene demands it, but reach the finish level by the final
-  photos. For any photo targeted medium or high, ALWAYS choose an outfit (never null).
+  photos. For any photo targeted medium or high, the chosen outfit + outfit_detail must clearly
+  show that exposure level (the outfit is always set — see the OUTFIT RULE).
 - Emit EXACTLY the requested number of beats total across all arcs. No prose outside JSON, no markdown.
 """
 
@@ -919,7 +933,8 @@ class VeniceScenePlanner(StoryPlanner):
         nudity_block = (
             f"NUDITY PLAN (per-photo targets): {nudity_plan}. Never exceed a photo's target; you may "
             f"stay lower when the scene demands it (e.g. at work), but reach {max_nudity} by the final "
-            "photos. For photos targeted medium/high, ALWAYS choose an outfit (never null)."
+            "photos. ALWAYS set an outfit enum on EVERY photo (never null) and make outfit_detail "
+            "describe that same garment — a null outfit keeps the avatar's original clothes."
         )
 
         # TIME PLAN — per-photo chronological targets from the SAME _time_ramp
@@ -1211,6 +1226,185 @@ def _outfit_fill_pool(controls: BatchControls) -> List[OutfitType]:
     return pool
 
 
+def _outfit_allowed(outfit: Optional[OutfitType], controls: BatchControls) -> bool:
+    """
+    Does `outfit` pass the batch allow/block filters? Reuses the fill-pool logic (which
+    already drops NAKED, blocked, and non-allowlisted types), so a keyword-derived or
+    reconciled outfit is only ever accepted when it is a valid fill target. NAKED always
+    fails here (a caption describes clothing; nudity is driven by the ramp, not fill).
+    """
+    return outfit is not None and outfit in _outfit_fill_pool(controls)
+
+
+# Keyword -> OutfitType map for reading a concrete garment back out of an outfit_detail
+# CAPTION. The story director authors outfit_detail as the human-facing description of
+# what she wears; when the `outfit` ENUM is null or disagrees with that caption the render
+# either skips the outfit step (avatar's own clothes leak through) or mixes contradicting
+# signals. This map lets the caption drive/repair the enum. NAKED is deliberately absent —
+# a caption names clothing, and nudity is the ramp's job. Distinctive phrases map to their
+# type; the LONGEST match wins at lookup time (see _outfit_from_detail), so specific phrases
+# ("little black dress", "satin robe", "crop top") beat the generic single words they contain.
+_OUTFIT_KEYWORDS: Dict[str, OutfitType] = {
+    # dresses / gowns (bare "dress"/"suit" stay UNMAPPED — too ambiguous to be confident)
+    "little black dress": OutfitType.LITTLE_BLACK_DRESS,
+    "red evening gown": OutfitType.RED_EVENING_GOWN,
+    "evening gown": OutfitType.RED_EVENING_GOWN,
+    "gown": OutfitType.RED_EVENING_GOWN,
+    "cocktail dress": OutfitType.COCKTAIL_DRESS,
+    "cocktail": OutfitType.COCKTAIL_DRESS,
+    "bodycon dress": OutfitType.BODYCON_DRESS,
+    "bodycon": OutfitType.BODYCON_DRESS,
+    "white summer dress": OutfitType.WHITE_SUMMER_DRESS,
+    "summer dress": OutfitType.WHITE_SUMMER_DRESS,
+    "floral maxi dress": OutfitType.FLORAL_MAXI_DRESS,
+    "maxi dress": OutfitType.FLORAL_MAXI_DRESS,
+    "floral dress": OutfitType.FLORAL_MAXI_DRESS,
+    "velvet dress": OutfitType.VELVET_DRESS,
+    "velvet": OutfitType.VELVET_DRESS,
+    "satin slip dress": OutfitType.SATIN_SLIP_DRESS,
+    "slip dress": OutfitType.SATIN_SLIP_DRESS,
+    "polka dot dress": OutfitType.POLKA_DOT_DRESS_50S,
+    "polka dot": OutfitType.POLKA_DOT_DRESS_50S,
+    # tailored / formal
+    "business suit": OutfitType.BUSINESS_SUIT,
+    "pantsuit": OutfitType.BUSINESS_SUIT,
+    "pant suit": OutfitType.BUSINESS_SUIT,
+    "power suit": OutfitType.POWER_SUIT_80S,
+    "blazer": OutfitType.BLAZER_TROUSERS,
+    "pencil skirt": OutfitType.PENCIL_SKIRT_SET,
+    "tuxedo": OutfitType.TUXEDO,
+    # casual / street
+    "denim jacket": OutfitType.DENIM_JACKET_JEANS,
+    "jeans": OutfitType.DENIM_JACKET_JEANS,
+    "denim": OutfitType.DENIM_JACKET_JEANS,
+    "graphic tee": OutfitType.GRAPHIC_TEE_SHORTS,
+    "hoodie": OutfitType.HOODIE_JOGGERS,
+    "joggers": OutfitType.HOODIE_JOGGERS,
+    "flannel": OutfitType.FLANNEL_SHIRT,
+    "crop top": OutfitType.CROP_TOP_CARGO,
+    "cargo": OutfitType.CROP_TOP_CARGO,
+    "oversized streetwear": OutfitType.OVERSIZED_STREETWEAR,
+    "streetwear": OutfitType.OVERSIZED_STREETWEAR,
+    "bomber": OutfitType.BOMBER_JACKET_FIT,
+    # active
+    "yoga": OutfitType.YOGA_OUTFIT,
+    "tennis": OutfitType.TENNIS_OUTFIT,
+    "running gear": OutfitType.RUNNING_GEAR,
+    "gym set": OutfitType.GYM_SET,
+    "gym": OutfitType.GYM_SET,
+    # swim
+    "one piece swimsuit": OutfitType.ONE_PIECE_SWIMSUIT,
+    "swimsuit": OutfitType.ONE_PIECE_SWIMSUIT,
+    "bikini": OutfitType.BIKINI,
+    # outerwear
+    "leather jacket": OutfitType.LEATHER_JACKET,
+    "leather": OutfitType.LEATHER_JACKET,
+    "trench coat": OutfitType.TRENCH_COAT,
+    "trench": OutfitType.TRENCH_COAT,
+    "puffer": OutfitType.PUFFER_JACKET,
+    "fur coat": OutfitType.FUR_COAT,
+    "fur": OutfitType.FUR_COAT,
+    # cultural
+    "kimono": OutfitType.KIMONO,
+    "sari": OutfitType.SARI,
+    "cheongsam": OutfitType.CHEONGSAM,
+    "hanbok": OutfitType.HANBOK,
+    "dirndl": OutfitType.DIRNDL,
+    # eveningwear / lingerie / loungewear
+    "sequin": OutfitType.SEQUIN_TOP_SKIRT,
+    "jumpsuit": OutfitType.JUMPSUIT,
+    "bell bottoms": OutfitType.BELL_BOTTOMS_70S,
+    "silk pajama": OutfitType.SILK_PAJAMAS,
+    "pajama": OutfitType.SILK_PAJAMAS,
+    "pyjama": OutfitType.SILK_PAJAMAS,
+    "lace bodysuit": OutfitType.LACE_BODYSUIT,
+    "bodysuit": OutfitType.LACE_BODYSUIT,
+    "satin robe": OutfitType.SATIN_ROBE,
+    "robe": OutfitType.SATIN_ROBE,
+    # uniforms
+    "nurse": OutfitType.NURSE_UNIFORM,
+    "school uniform": OutfitType.SCHOOL_UNIFORM,
+    "military uniform": OutfitType.MILITARY_UNIFORM,
+    "military": OutfitType.MILITARY_UNIFORM,
+    "chef": OutfitType.CHEF_UNIFORM,
+}
+# Longest / most-specific phrase first (ties broken alphabetically for determinism), so a
+# lookup returns the tightest match, not whatever generic word it happens to contain first.
+_OUTFIT_KEYWORDS_ORDER: List[str] = sorted(_OUTFIT_KEYWORDS, key=lambda p: (-len(p), p))
+
+# Broad garment-CLASS words used only to notice that an outfit_detail names a DIFFERENT
+# kind of garment than the enum when no specific keyword matched (the conservative "drop
+# the contradicting detail" branch of _reconcile_outfit). Specific garments live in
+# _OUTFIT_KEYWORDS above; these are the coarse classes a mismatch surfaces as.
+_GARMENT_CLASS_WORDS: Tuple[str, ...] = (
+    "dress", "gown", "skirt", "suit", "tuxedo", "robe", "bikini", "swimsuit", "lingerie",
+    "bodysuit", "leotard", "jacket", "coat", "jeans", "denim", "pajama", "pyjama", "hoodie",
+    "uniform", "kimono", "sari", "cheongsam", "hanbok", "dirndl", "jumpsuit", "shorts",
+    "leggings", "lace", "sequin", "blazer", "trousers", "pants", "sweater",
+)
+
+
+def _outfit_from_detail(text: str) -> Optional[OutfitType]:
+    """
+    Best-effort map an outfit_detail CAPTION to a concrete OutfitType by keyword.
+    Case-insensitive, word-boundary (so "fur" never matches "furnace"), tolerant of
+    plurals and hyphens; the LONGEST / most-specific phrase wins (so "little black dress"
+    beats the bare word it contains, "satin robe" beats "robe", "crop top" beats
+    "leather"). Returns None when nothing recognizable matches — the caller then falls
+    back to a pool pick (fill) or leaves the enum unchanged (reconcile). NAKED is never
+    returned (a caption describes clothing; nudity is driven by the ramp, not this map).
+    """
+    if not text:
+        return None
+    low = re.sub(r"\s{2,}", " ", re.sub(r"[-/]", " ", str(text).lower()))
+    for phrase in _OUTFIT_KEYWORDS_ORDER:
+        if re.search(r"\b" + re.escape(phrase) + r"s?\b", low):
+            return _OUTFIT_KEYWORDS[phrase]
+    return None
+
+
+def _detail_conflicts_with_outfit(outfit: OutfitType, detail: str) -> bool:
+    """
+    True when `detail` names a garment CLASS that the `outfit` enum plainly is NOT — used
+    only in the conservative branch where no specific keyword matched. Needs a class word
+    in the detail that is absent from the enum's own name words (e.g. enum "satin_robe" vs
+    detail "chiffon dress"), so an ambiguous caption ("a silky wrap") or one consistent
+    with the enum ("charcoal pinstripe suit" vs BUSINESS_SUIT) is never treated as a
+    conflict. Keeps _reconcile_outfit from dropping a detail on a mere unknown descriptor.
+    """
+    low = re.sub(r"[-/]", " ", str(detail).lower())
+    own = {w for w in re.split(r"[^a-z0-9]+", _val(outfit) or "") if w}
+    classes = {w for w in _GARMENT_CLASS_WORDS if re.search(r"\b" + re.escape(w) + r"s?\b", low)}
+    if not classes:
+        return False
+    return classes.isdisjoint(own)
+
+
+def _reconcile_outfit(scene: SceneSpec, controls: BatchControls) -> None:
+    """
+    Make scene.outfit and scene.outfit_detail describe the SAME garment (mutates `scene`).
+    The render prompt combines the outfit enum's tier prose with outfit_detail, so when the
+    two disagree (production data: outfit=satin_robe but detail="leather crop top and
+    high-waisted jeans"; outfit=little_black_dress but detail="satin robe") the image comes
+    out confused. The caption is the richer signal the user actually sees, so the RULE is:
+      * a confident keyword hit on the detail that is a DIFFERENT, allowed OutfitType
+        -> override the enum to match the detail;
+      * no confident hit, but the detail clearly names a garment class the enum is not
+        -> drop the detail (keep the enum) so the two channels can't contradict.
+    Conservative on purpose: an ambiguous or already-consistent detail is left untouched,
+    and a confident-but-blocked target is not forced in (allow/block wins).
+    """
+    if scene.outfit is None or not scene.outfit_detail:
+        return
+    derived = _outfit_from_detail(scene.outfit_detail)
+    if derived is not None:
+        if derived != scene.outfit and _outfit_allowed(derived, controls):
+            scene.outfit = derived  # caption wins: enum now matches what she's described wearing
+        return
+    if _detail_conflicts_with_outfit(scene.outfit, scene.outfit_detail):
+        scene.outfit_detail = None  # contradicting caption with no confident target -> drop it
+
+
 def _pose_ok_at(pose, location) -> bool:
     allowed = _POSE_LOCATION_GUARD.get(_val(pose))
     return allowed is None or _val(location) in allowed
@@ -1439,15 +1633,33 @@ def validate_and_repair(
             else:
                 s.time_of_day = time_ramp[i]
 
-        # Outfit-fill: a medium/high scene renders its nudity ONLY through the outfit
-        # step, so a non-LOW scene with outfit=None would silently drop to dressed/blank.
-        # Fill deterministically from the allowed pool (never NAKED); empty pool -> leave
-        # None (nothing safe to place). Gated with the ramp so manual scenes keep None.
-        if enforce_nudity_ramp and s.outfit is None and s.nudityLevel != NudityLevel.LOW:
-            fill_pool = _outfit_fill_pool(controls)
-            if fill_pool:
-                fill_rng = random.Random((controls.base_seed or 0) + 700001 * (i + 1))
-                s.outfit = fill_rng.choice(fill_pool)
+        # Outfit-fill: the outfit STEP only runs when the request carries an outfit enum
+        # (pipeline_worker._determine_active_steps: outfit active iff outfit is not None),
+        # and outfit_detail is consumed ONLY inside that step. So a beat that has a caption
+        # (outfit_detail) but a null enum silently renders the avatar's OWN clothes while
+        # the gallery shows the caption — the #1 reported bug ("caption says velvet dress,
+        # render keeps the original outfit"). Fill a null enum whenever the beat carries any
+        # outfit SIGNAL: a non-LOW nudity target (nudity renders only through this step) OR
+        # an authored outfit_detail. PREFER deriving the enum from the caption so the two
+        # agree; else pick deterministically from the allowed pool. Never NAKED; empty pool
+        # or no signal -> leave None. Gated with the ramp so manual scenes keep None.
+        if enforce_nudity_ramp and s.outfit is None and (
+            s.nudityLevel != NudityLevel.LOW or s.outfit_detail
+        ):
+            derived = _outfit_from_detail(s.outfit_detail) if s.outfit_detail else None
+            if derived is not None and _outfit_allowed(derived, controls):
+                s.outfit = derived
+            else:
+                fill_pool = _outfit_fill_pool(controls)
+                if fill_pool:
+                    fill_rng = random.Random((controls.base_seed or 0) + 700001 * (i + 1))
+                    s.outfit = fill_rng.choice(fill_pool)
+
+        # Enum<->detail reconcile: when the LLM set an outfit but the caption describes a
+        # different garment, the caption wins (override the enum) or the contradicting
+        # caption is dropped — so the outfit step never gets self-contradicting signals.
+        # Runs right after the fill (a just-filled enum already matches its detail -> no-op).
+        _reconcile_outfit(s, controls)
 
         # Scrub identity tokens from free-text (defense-in-depth).
         if s.background_text:

@@ -62,10 +62,13 @@ class BatchControls(BaseModel):
         ),
     )
     outfit_prompt_mode: str = Field(
-        default="standard",
+        default="replace",
         description=(
-            "'standard' (append the outfit description) | 'replace' (explicitly remove the "
-            "current clothing first, then describe the new outfit)"
+            "'replace' (DEFAULT for batches: explicitly remove the current clothing first, "
+            "then describe the new outfit) | 'standard' (append the outfit description only). "
+            "Batch source avatars are dressed-by-default, so removal must be explicit or the "
+            "swap tends to reconstruct the original garment. The admin UI should align its "
+            "default to 'replace' (or omit the field so this backend default applies)."
         ),
     )
     blocked_poses: List[PoseType] = Field(default_factory=list)

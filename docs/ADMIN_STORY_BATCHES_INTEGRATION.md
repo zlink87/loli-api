@@ -871,3 +871,71 @@ via `chat_persona_id`).
 
 Omitting `generate_persona` (or sending `false`) is fully back-compatible with
 today's two-call flow — this is purely additive.
+
+---
+
+## Addendum (2026-07-09): per-character nude base (additive dressing for batches)
+
+**The bug this fixes.** Batches dress each scene by *editing the character's clothed
+hero photo*. Swapping one outfit for another is a **subtractive** edit (remove the old
+garment, add the new one) and it's unreliable — the hero's original clothing (e.g. an
+open plaid shirt) tends to **ghost through** the supposedly-different outfit, so "the
+outfit doesn't fully change." The fix: generate **one identity-locked nude base** per
+character (the avatar undressed to bare skin, done once) and start each batch scene's
+edit chain from *that* base instead of the clothed hero. Dressing then becomes
+**additive** — clothes onto bare skin — which eliminates the ghost-garment problem, and
+makes nudity trivial (a scene with no outfit step simply stays nude/base).
+
+**How identity stays safe.** The base is produced by the **existing** outfit-edit path
+(`outfit=naked` at high nudity) — the same server-side YuNet head mask + crop-and-stitch
+composite-back that locks the face/head byte-for-byte on every other outfit edit. No new
+identity mechanism; the face on the nude base is the hero's face, pixel-for-pixel.
+
+### Endpoints (admin-only, character-scoped)
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| POST | `/v1/characters/{id}/nude-base` | Generate the character's nude base (async) | 202 → `NudeBaseStatusResponse` |
+| GET  | `/v1/characters/{id}/nude-base` | Status; **finalizes** the base once its job succeeds | 200 → `NudeBaseStatusResponse` |
+
+`POST` takes **no body**. It returns a `jobId` — poll it exactly like any other edit
+(`GET /v1/jobs/{jobId}`). The base is persisted the moment you call
+`GET /v1/characters/{id}/nude-base` after that job has succeeded (the GET reconciles the
+job and writes the final URL — there is no separate "confirm" call). POST is idempotent
+while a generation is already in flight (it returns the in-progress one instead of
+spawning a duplicate).
+
+```jsonc
+// NudeBaseStatusResponse
+{
+  "characterId": "uuid",
+  "status": "pending",          // pending → succeeded | failed
+  "jobId": "outjob_…",          // the outfit_edit job (poll it, or re-GET this endpoint)
+  "imageUrl": null,             // set once status is "succeeded"
+  "error": null,                // set when status is "failed"
+  "createdAt": "…", "updatedAt": "…"
+}
+```
+
+**Errors:** 404 (character missing on POST / no base yet on GET), 422 (character has no
+hero image), 503 (Supabase DB not configured), plus the usual 401/403.
+
+### Batches use it automatically — nothing to send
+
+This is **character-level, not batch-level**: there is **no `controls.*` change**. Once a
+character has a succeeded nude base, every subsequent batch for that character sources its
+scene edits from the base automatically. A character **without** one plans and batches
+**exactly as today** (the edit chain falls back to the clothed hero) — so this is purely
+additive and safe to roll out per-character. Suggested admin UI: a "Generate nude base"
+button on the character detail page with a pending/ready indicator; batches need no new
+control.
+
+> **Moderation / consent.** This deliberately **creates and stores an explicit nude
+> asset** per character (in the loli-api-owned `character_nude_bases` table — an internal
+> asset, never shown in chat and never added to the gallery). It is an **explicit,
+> per-character admin action** — never auto-generated on character creation or batch
+> launch. Only run it for characters where that is intended and permitted.
+
+- [ ] Run migration `loli_api/migrations/0003_character_nude_bases.sql` once (creates the
+      `character_nude_bases` job/asset table; the product `characters` table must already
+      exist).

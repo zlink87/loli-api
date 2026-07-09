@@ -82,6 +82,31 @@ def location_phrase(location) -> str:
     return phrase(LOCATION_PHRASES, location)
 
 
+def time_of_day_phrase(time_of_day) -> str:
+    """
+    Descriptive phrase for a TimeOfDayType (or its raw enum-value string, e.g.
+    the ``timeOfDay`` string that rides PipelineEditRequest). Same lookup used
+    by build_scene_background_text, exposed standalone so other prompt
+    builders (e.g. api.v1.endpoints.pose.build_pose_prompt) can phrase-ify a
+    time-of-day value with the exact same tone. Unknown/None -> "" (caller
+    skips the clause rather than injecting a raw enum string).
+    """
+    return phrase(TIME_OF_DAY_PHRASES, time_of_day)
+
+
+def lighting_phrase(lighting) -> str:
+    """
+    Descriptive phrase for a LightingType (or its raw enum-value string, e.g.
+    the ``lighting`` string that rides PipelineEditRequest). Same lookup used
+    by build_scene_background_text, exposed standalone so other prompt
+    builders (e.g. api.v1.endpoints.pose.build_pose_prompt /
+    api.v1.endpoints.outfit.build_prompt) can phrase-ify a lighting value with
+    the exact same tone. Unknown/None -> "" (caller skips the clause rather
+    than injecting a raw enum string).
+    """
+    return phrase(LIGHTING_PHRASES, lighting)
+
+
 def scene_mood_phrase(kinks=None, personality=None) -> str:
     """
     Tasteful mood-only phrases from per-scene kink/personality overrides.

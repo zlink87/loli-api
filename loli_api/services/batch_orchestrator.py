@@ -177,6 +177,7 @@ class BatchReconciler:
         settings,
         supabase_storage_service=None,
         character_image_store: Optional[CharacterImageStore] = None,
+        nude_base_store=None,
     ):
         self.job_manager = job_manager
         self.character_store = character_store
@@ -184,6 +185,10 @@ class BatchReconciler:
         self.settings = settings
         self.supabase_storage = supabase_storage_service
         self.character_image_store = character_image_store
+        # Optional per-character nude-base lookup. When wired AND a character has a
+        # succeeded nude base, scenes edit from it (additive dressing); otherwise the
+        # source stays the clothed hero (unchanged). None -> feature inert.
+        self.nude_base_store = nude_base_store
         self._running = False
         self._task = None
         self._max_inflight = max(1, int(settings.BATCH_MAX_INFLIGHT))
@@ -237,12 +242,29 @@ class BatchReconciler:
     async def _tick(self) -> None:
         batches = await self.batch_store.list_active_batches()
         char_cache: Dict[str, object] = {}
+        # character_id -> resolved nude-base URL (or None), memoized per tick.
+        nude_cache: Dict[str, Optional[str]] = {}
         for batch in batches:
             if batch.status != "running":
                 continue
-            await self._reconcile_batch(batch, char_cache)
+            await self._reconcile_batch(batch, char_cache, nude_cache)
 
-    async def _reconcile_batch(self, batch: BatchRead, char_cache: Dict[str, object]) -> None:
+    async def _resolve_nude_base_url(self, character_id: str) -> Optional[str]:
+        """The character's additive-dressing source (latest succeeded nude base), or None.
+
+        None when the store is unwired, no base exists, or the lookup fails — every
+        such case falls back to the clothed hero photo in scene_mapper (unchanged)."""
+        if self.nude_base_store is None:
+            return None
+        try:
+            return await self.nude_base_store.get_active_url(character_id)
+        except Exception as e:  # noqa: BLE001 — a lookup failure must not stall the batch
+            logger.warning(f"nude base lookup failed for character {character_id}: {e}")
+            return None
+
+    async def _reconcile_batch(
+        self, batch: BatchRead, char_cache: Dict[str, object], nude_cache: Dict[str, Optional[str]]
+    ) -> None:
         items = await self.batch_store.list_items(batch.id)
 
         # 1. Collect terminal child-job states into batch_items.
@@ -273,12 +295,17 @@ class BatchReconciler:
             if character is None:
                 character = await self.character_store.get(batch.character_id)
                 char_cache[batch.character_id] = character
+            if batch.character_id not in nude_cache:
+                nude_cache[batch.character_id] = await self._resolve_nude_base_url(batch.character_id)
             if character is not None:
                 planner_character = Character(
                     persona=character.persona,
                     likes=batch.likes,
                     dislikes=batch.dislikes,
                     hero_photo_url=character.hero_image_url,
+                    # THE activation line: when set, scene_mapper sources scene edits from
+                    # the nude base instead of the clothed hero (additive dressing).
+                    nude_base_url=nude_cache.get(batch.character_id),
                 )
                 for item in pending:
                     if inflight >= self._max_inflight:

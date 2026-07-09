@@ -304,7 +304,8 @@ def test_legacy_controls_jsonb_parses_with_new_fields_defaulted():
     controls = BatchControls(**{"max_nudity": "medium", "escalation": "building"})
     assert controls.start_nudity is None
     assert controls.outfit_denoise is None
-    assert controls.outfit_prompt_mode == "standard"
+    # Batch default flipped to "replace" (dressed-by-default avatars need explicit removal).
+    assert controls.outfit_prompt_mode == "replace"
 
 
 # --- nudity ramp derivation ---

@@ -674,6 +674,28 @@ class PipelineEditRequest(BaseModel):
             "(non-posed items keep the hero's face byte-locked)."
         ),
     )
+    lighting: Optional[str] = Field(
+        default=None,
+        max_length=60,
+        description=(
+            "Optional identity-free lighting descriptor (e.g. from SceneSpec.lighting, an "
+            "enum value like 'candlelit'/'neon'/'moody_dim'). Phrase-ified (via "
+            "services.scene_vocab) and appended to the pose step's prompt — the primary "
+            "lighting fix, since pose is the only step that fully re-diffuses the frame — "
+            "and, as a secondary/cheap signal, to the outfit step's prompt. Unrecognized "
+            "values or None leave both prompts unchanged."
+        ),
+    )
+    timeOfDay: Optional[str] = Field(
+        default=None,
+        max_length=40,
+        description=(
+            "Optional time-of-day descriptor (e.g. from SceneSpec.time_of_day, an enum "
+            "value like 'golden_hour'/'night'). Phrase-ified (via services.scene_vocab) and "
+            "appended to the pose step's prompt only. Unrecognized values or None leave the "
+            "prompt unchanged."
+        ),
+    )
     prompt: Optional[str] = Field(
         default=None,
         max_length=2000,

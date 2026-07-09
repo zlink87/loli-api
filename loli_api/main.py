@@ -49,6 +49,7 @@ from services.chat_persona_store import ChatPersonaStore
 from services.persona_writer import PersonaWriter
 from services.motion_writer import MotionWriter
 from services.batch_store import BatchStore
+from services.nude_base_store import NudeBaseStore
 from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
 from models.responses import HealthResponse, ErrorResponse
 from models.enums import PoseType
@@ -237,6 +238,7 @@ character_store = None
 character_image_store = None
 chat_persona_store = None
 batch_store = None
+nude_base_store = None
 batch_orchestrator = None
 batch_reconciler = None
 batch_engine = None
@@ -248,11 +250,15 @@ if supabase_db.is_configured():
     character_image_store = CharacterImageStore(_db)
     chat_persona_store = ChatPersonaStore(_db)
     batch_store = BatchStore(_db)
+    nude_base_store = NudeBaseStore(_db)
     batch_orchestrator = BatchOrchestrator(job_manager, character_store, batch_store, settings)
     batch_reconciler = BatchReconciler(
         job_manager, character_store, batch_store, settings,
         supabase_storage_service=supabase_storage_service,
         character_image_store=character_image_store,
+        # Activates additive dressing: scenes source from the character's nude base
+        # (when one exists) instead of the clothed hero — see scene_mapper/story_planner.
+        nude_base_store=nude_base_store,
     )
     # One shared step-execution engine (templates loaded once); M lightweight workers
     # drain the dedicated batch queue in parallel, isolated from interactive edits.
@@ -407,6 +413,7 @@ async def lifespan(app: FastAPI):
         persona_writer=persona_writer,
         motion_writer=motion_writer,
         chat_persona_store=chat_persona_store,
+        nude_base_store=nude_base_store,
     )
 
     # Sync BASE_URL to Supabase so external services know our tunnel URL

@@ -287,6 +287,64 @@ def test_pipeline_pose_step_carries_prompt_and_no_ref_on_outfit():
 
 
 # ---------------------------------------------------------------------------
+# t5 — W3 regression: _build_step_workflow threads request.lighting/timeOfDay
+# into the pose step's node 114 prompt (the primary lighting fix — pose is the
+# only pipeline step that fully re-diffuses the frame), and request.lighting
+# into the outfit step's node 16 prompt (secondary/cheap addition). A request
+# with neither attribute set (the pre-W3 shape) still produces the exact
+# pre-W3 prompt.
+# ---------------------------------------------------------------------------
+def test_pipeline_step_workflow_threads_lighting_and_time_of_day():
+    worker = _make_pipeline_worker()
+    pose = PoseType.SITTING
+    ref_name = pose_assets.worker_filename(pose)
+
+    # Pose step: both lighting + timeOfDay set on the request reach node 114,
+    # phrase-ified exactly like a direct build_pose_prompt(..., lighting=...,
+    # time_of_day=...) call.
+    pose_request = _FakePipelineRequest(pose=pose)
+    pose_request.lighting = "moody_dim"
+    pose_request.timeOfDay = "night"
+
+    wf = worker._build_step_workflow(
+        "pose", pose_request, "pipe_pose_src.png", seed=99, job_id="jobLight",
+        pose_ref_name=ref_name,
+    )
+    node114_prompt = wf["114"]["inputs"]["prompt"]
+    assert node114_prompt == build_pose_prompt(pose, lighting="moody_dim", time_of_day="night")
+    assert "in moody dim low-key lighting" in node114_prompt
+    assert "late at night" in node114_prompt
+    # Raw enum-value string never leaks into the actual node prompt.
+    assert "moody_dim" not in node114_prompt
+
+    # A request with no lighting/timeOfDay attributes at all (the pre-W3
+    # shape, same as _FakePipelineRequest elsewhere in this file) still
+    # produces the exact pre-W3 prompt (back-compat).
+    bare_request = _FakePipelineRequest(pose=pose)
+    bare_wf = worker._build_step_workflow(
+        "pose", bare_request, "pipe_pose_src.png", seed=99, job_id="jobBare",
+        pose_ref_name=ref_name,
+    )
+    assert bare_wf["114"]["inputs"]["prompt"] == build_pose_prompt(pose)
+
+    # Outfit step: lighting reaches node 16 (secondary/cheap signal).
+    outfit_request = _FakePipelineRequest(outfit=OutfitType.BUSINESS_SUIT)
+    outfit_request.lighting = "candlelit"
+    outfit_wf = worker._build_step_workflow(
+        "outfit", outfit_request, "pipe_outfit_src.png", seed=99, job_id="jobOutfitLight",
+    )
+    node16_prompt = outfit_wf["16"]["inputs"]["positive"]
+    assert "in flickering candlelight" in node16_prompt
+    assert "candlelit" not in node16_prompt
+
+    print(
+        "t5 OK: _build_step_workflow threads lighting/timeOfDay into the pose step's "
+        "node 114, and lighting into the outfit step's node 16; a bare request (no "
+        "attrs) stays byte-identical to pre-W3"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -295,6 +353,7 @@ def _run_all():
         test_stage_pose_reference_appends_entry,
         test_payload_under_cap,
         test_pipeline_pose_step_carries_prompt_and_no_ref_on_outfit,
+        test_pipeline_step_workflow_threads_lighting_and_time_of_day,
     ]
     failures = 0
     for fn in tests:
