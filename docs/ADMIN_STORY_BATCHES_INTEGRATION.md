@@ -815,3 +815,59 @@ finer-grained 5-stop ladder instead of 3.
 
 Omitting `period_days` (or sending `1`) is fully back-compatible with today's
 single-day planning — this is purely additive.
+
+---
+
+## Addendum (2026-07-09): auto-generate the full persona on character creation
+
+**The gap this closes:** `POST /v1/characters` never called Venice — it only wrote the
+flat trait columns. Generating a persona required a SEPARATE follow-up call to
+`POST /v1/characters/{id}/persona` (§3), and in practice the admin panel was only
+requesting `system_prompt`, leaving `greeting_message` / `tone` / `style` /
+`boundaries` / `summary` / `welcome_message` empty on every new character. This
+addendum adds an opt-in flag so ONE call to `POST /v1/characters` can create the
+character **and** write its full persona.
+
+### `CharacterCreate` gains 4 new optional fields
+
+```jsonc
+{
+  "persona": { /* PersonaOptions */ },
+  "hero_image_url": "https://<proj>.supabase.co/storage/v1/object/public/images/estella.png",
+  "bio": "Night-shift nurse, introverted, loves slow mornings.",
+  "name": null,
+
+  "generate_persona": true,        // NEW, default false — generate + persist the full
+                                    // chat persona via Venice in this same call
+  "persona_fields": null,          // NEW, optional — which fields to generate; null =
+                                    // the sensible default below. Ignored if
+                                    // generate_persona is false.
+  "persona_enrichment": null,      // NEW, optional — transient likes/dislikes/interests/
+                                    // hobbies/language to flavor generation (not stored)
+  "persona_model_id": null         // NEW, optional — model_id recorded on the created
+                                    // chat_persona row
+}
+```
+
+**Default `persona_fields` (when `null`)**: every generatable field —
+`system_prompt`, `greeting_message`, `tone`, `style`, `boundaries`, `summary`,
+`welcome_message`, `bio` — **except**:
+- `name`, since `persona.name` was just set explicitly, and
+- `bio`, **only when this same request's own `bio` field is non-empty** — a bio you
+  typed at creation is never silently overwritten by generation. If you want Venice
+  to (re)write the bio too, include `"bio"` explicitly in `persona_fields`.
+
+**Resilience**: a persona-generation failure (Venice error, Supabase write error)
+never fails character creation — the character is already created by that point, so
+creation always returns normally; the response's `chat_persona_id` simply stays
+`null` if generation didn't complete. Same for the (unusual) case where persona
+services aren't configured on the backend at all.
+
+**Response is unchanged** (`CharacterRead`) — no new response fields. When
+generation succeeds, `chat_persona_id` (already part of `CharacterRead`) is
+populated in the same response; the generated prose itself lives in
+`chat_personas` (read it the same way the "Edit Chat Persona" panel already does,
+via `chat_persona_id`).
+
+Omitting `generate_persona` (or sending `false`) is fully back-compatible with
+today's two-call flow — this is purely additive.

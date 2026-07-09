@@ -10,12 +10,13 @@ Characters are created with status='draft'; the admin publishes them from the
 existing admin UI once the generated photos look right.
 """
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 from services.url_guard import validate_source_image, SourceImageError
 
+from .persona import PersonaEnrichment, PersonaField
 from .requests import PersonaOptions
 
 
@@ -36,6 +37,41 @@ class CharacterCreate(BaseModel):
         default=None,
         max_length=50,
         description="Display name; defaults to persona.name when omitted",
+    )
+    generate_persona: bool = Field(
+        default=False,
+        description=(
+            "If true, immediately generate + persist the character's free-text chat "
+            "persona (system_prompt, greeting_message, etc.) via Venice right after "
+            "creation, in this same call. Default off — fully back-compatible."
+        ),
+    )
+    persona_fields: Optional[List[PersonaField]] = Field(
+        default=None,
+        description=(
+            "Which persona fields to generate when generate_persona=true. None "
+            "(default) = all generatable fields (system_prompt, greeting_message, "
+            "tone, style, boundaries, summary, welcome_message, bio) EXCEPT: 'name' "
+            "(already set by persona.name) and 'bio' when this request's own `bio` "
+            "field is non-empty (a bio you typed here is never silently overwritten "
+            "by generation — to regenerate it too, include \"bio\" explicitly). "
+            "Ignored when generate_persona=false."
+        ),
+    )
+    persona_enrichment: Optional[PersonaEnrichment] = Field(
+        default=None,
+        description=(
+            "Optional transient likes/dislikes/interests/hobbies/language to flavor "
+            "generation (not stored). Ignored when generate_persona=false."
+        ),
+    )
+    persona_model_id: Optional[str] = Field(
+        default=None,
+        max_length=80,
+        description=(
+            "Optional model_id to record on the created chat_persona row. Ignored "
+            "when generate_persona=false."
+        ),
     )
 
     @field_validator("hero_image_url")
@@ -67,6 +103,7 @@ class CharacterCreate(BaseModel):
                 },
                 "hero_image_url": "https://xxx.supabase.co/storage/v1/object/public/images/estella.png",
                 "bio": "A night-shift nurse; introverted, loves slow mornings.",
+                "generate_persona": True,
             }
         }
 

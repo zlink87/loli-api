@@ -23,7 +23,7 @@ The admin UI needs a handful of additions to surface these. **Only one is strict
 
 ## 1. What changed in the API (delta only)
 
-All additions live on `controls` (in `BatchCreate`) or in each item's `scene_spec` (in `BatchDetailRead`). Nothing was removed or renamed.
+All additions live on `controls` (in `BatchCreate`), in each item's `scene_spec` (in `BatchDetailRead`), or on `CharacterCreate`. Nothing was removed or renamed.
 
 | New field | Where | Type / range | Purpose |
 |---|---|---|---|
@@ -33,6 +33,10 @@ All additions live on `controls` (in `BatchCreate`) or in each item's `scene_spe
 | `outfit_detail` | item `scene_spec` | `string｜null` (≤160) | Concrete garment description for that photo (display only). |
 | `expression` | item `scene_spec` | `string｜null` (≤80) | That photo's facial expression/mood (display only). |
 | `period_days` | `controls` | `int 1–7` (default `1`) | Number of day-cycles the story spans. **See WI-7.** |
+| `generate_persona` | `CharacterCreate` | `bool` (default `false`) | Generate + persist the full chat persona via Venice in the SAME creation call. **See WI-8.** |
+| `persona_fields` | `CharacterCreate` | `PersonaField[]｜null` | Optional override of which fields `generate_persona` writes; `null` = the sensible default (see WI-8). |
+| `persona_enrichment` | `CharacterCreate` | object｜null | Optional transient flavor for generation (not stored). |
+| `persona_model_id` | `CharacterCreate` | `string｜null` | Optional model_id recorded on the created persona row. |
 
 `max_nudity` already existed and is now **both** the hard ceiling **and** the nudity-arc FINISH handle.
 
@@ -107,6 +111,33 @@ If outfit changes look weak/absent across a whole batch, that's usually a backen
 - Omitting `period_days` (or sending `1`) behaves identically to today.
 - Launching with `period_days: 3` and opening the dry-run storyboard shows `time_of_day` tags progressing chronologically and repeating that progression roughly once per day-cycle, with visibly different activities/locations per cycle rather than one stretched-out day.
 
+### WI-8 — Auto-generate the full persona on character creation (**required**; fixes the mostly-empty persona bug)
+
+**The problem:** today the character-creation flow leaves the persona mostly blank. `System Prompt` ends up populated (a backend safety guarantee force-generates it), but `Greeting Message`, `Tone`, `Style`, `Boundaries`, and `Summary` stay empty — because generation was never requested for them. This is a two-call gap: `POST /v1/characters` creates the character; a fully separate `POST /v1/characters/{id}/persona` call (previously only invoked for `system_prompt`) is what actually writes the rest.
+
+**Build:** when submitting the **New Character** form, send `generate_persona: true` on the SAME `POST /v1/characters` call — do not make a second request.
+
+```jsonc
+POST /v1/characters
+{
+  "persona": { /* PersonaOptions, as today */ },
+  "hero_image_url": "...",
+  "bio": "Night-shift nurse, introverted, loves slow mornings.",  // optional, as today
+  "name": null,
+  "generate_persona": true   // NEW — the only field you need to add to this call
+}
+```
+
+- That single flag generates + persists `system_prompt`, `greeting_message`, `tone`, `style`, `boundaries`, `summary`, and `welcome_message` via Venice, all in this one request. If you left `bio` empty above, `bio` is generated too; if you typed a `bio`, it is preserved (never silently overwritten — see the contract doc's 2026-07-09 "auto-generate persona" addendum for the exact default-field rule, and `persona_fields` if you want to override it, e.g. to force-regenerate `bio` too).
+- The response is the same `CharacterRead` shape as today — no new fields to read. `chat_persona_id` (already part of `CharacterRead`) will be populated when generation succeeded; the "Edit Chat Persona" panel will show the generated text exactly the way it already does today for any existing character.
+- **Retire the separate "generate system_prompt only" call this flow currently makes on creation** — it's superseded by this one flag.
+- The standalone `POST /v1/characters/{id}/persona` endpoint (§3) still exists and still matters — keep it for **re-generating** a field later (e.g. an admin clicks "Regenerate greeting" on an existing character from the Edit Chat Persona panel in your first screenshot). This work item is specifically about the *creation* flow.
+
+**Acceptance criteria:**
+- Creating a character with `generate_persona: true` and opening its "Edit Chat Persona" panel immediately afterward shows `System Prompt`, `Greeting Message`, `Tone`, `Style`, `Boundaries`, and `Summary` all populated — not just `System Prompt`.
+- Creating a character with `generate_persona: true` and a typed `bio` shows that exact bio text preserved (not overwritten by generation).
+- Creating a character without `generate_persona` (or with it `false`/omitted) behaves exactly as today (empty persona fields, unchanged).
+
 ---
 
 ## 3. Reference: dry-run storyboard with the new fields
@@ -172,5 +203,5 @@ Pull option lists from `/openapi.json → components.schemas`: `NudityLevel`, `O
 - [ ] Character form surfaces occupation/relationship/personality/kinks with the "shapes her story" hint (WI-4).
 - [ ] Likes/dislikes re-sent on every launch (WI-5).
 - [ ] Period/days control (WI-7) sends `controls.period_days` (1–7); omitted or `1` behaves identically to today.
+- [ ] Character creation sends `generate_persona: true` (WI-8); the created character's persona shows all 6+ generated fields populated, not just System Prompt; a typed `bio` is preserved.
 - [ ] No appearance text ever enters a batch request; existing batches (no new fields) still work.
-```
