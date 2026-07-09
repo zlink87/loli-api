@@ -56,7 +56,10 @@ class BackgroundWorker:
         workflow_path: str,
         notification_service: Optional[NotificationService] = None,
         supabase_storage_service: Optional[SupabaseStorageService] = None,
-        runpod_client: Optional[RunPodServerlessClient] = None
+        runpod_client: Optional[RunPodServerlessClient] = None,
+        get_next_job=None,
+        mark_done=None,
+        name: str = "default",
     ):
         """
         Initialize background worker.
@@ -69,6 +72,13 @@ class BackgroundWorker:
             workflow_path: Path to ComfyUI workflow JSON
             notification_service: Google Chat notification service (optional)
             supabase_storage_service: Supabase storage service (optional, used if provided)
+            get_next_job: Optional coroutine returning the next job id (defaults to
+                job_manager.get_next_job — the interactive single-generate queue). Pass
+                job_manager.get_next_creation_job to bind a pool worker to the isolated
+                Batch Character Creation queue. The pipeline is otherwise identical.
+            mark_done: Optional callable marking the current queue task done (defaults to
+                job_manager.mark_done; pair with the matching queue's *_done()).
+            name: Worker label used in logs to distinguish pool instances.
         """
         self.job_manager = job_manager
         self.comfyui = comfyui_client
@@ -78,6 +88,11 @@ class BackgroundWorker:
         self.supabase_storage = supabase_storage_service
         self.workflow_path = workflow_path
         self.notification = notification_service
+        self.name = name
+        # Injectable queue plumbing: default to the interactive queue's getter/done, or
+        # bind to another queue (e.g. creation_queue) without duplicating the pipeline.
+        self._get_next_job = get_next_job or job_manager.get_next_job
+        self._mark_done = mark_done or job_manager.mark_done
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._workflow_template: Optional[dict] = None
@@ -90,7 +105,7 @@ class BackgroundWorker:
         await self._load_workflow()
 
         self._task = asyncio.create_task(self._worker_loop())
-        logger.info("Background worker started")
+        logger.info(f"Background worker '{self.name}' started")
 
     async def stop(self) -> None:
         """Stop the background worker gracefully."""
@@ -101,7 +116,7 @@ class BackgroundWorker:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("Background worker stopped")
+        logger.info(f"Background worker '{self.name}' stopped")
 
     async def _load_workflow(self) -> None:
         """Load the workflow template from file."""
@@ -125,18 +140,18 @@ class BackgroundWorker:
         while self._running:
             try:
                 # Get next job from queue (blocking)
-                job_id = await self.job_manager.get_next_job()
+                job_id = await self._get_next_job()
                 job = await self.job_manager.get_job(job_id)
 
                 if not job:
                     logger.warning(f"Job {job_id} not found in registry")
-                    self.job_manager.mark_done()
+                    self._mark_done()
                     continue
 
                 # Skip cancelled jobs
                 if job.status == JobStatus.FAILED:
                     logger.info(f"Skipping cancelled job {job_id}")
-                    self.job_manager.mark_done()
+                    self._mark_done()
                     continue
 
                 logger.info(f"Processing job {job_id} for user {job.user_id}")
@@ -166,7 +181,7 @@ class BackgroundWorker:
         # Safety guard: only process character generation jobs
         if hasattr(job, 'job_type') and job.job_type != "text_to_image":
             logger.warning(f"Skipping non-character job {job.job_id} (type={job.job_type})")
-            self.job_manager.mark_done()
+            self._mark_done()
             return
 
         start_time = datetime.utcnow()
@@ -452,7 +467,7 @@ class BackgroundWorker:
                 )
 
         finally:
-            self.job_manager.mark_done()
+            self._mark_done()
 
 class CleanupWorker:
     """

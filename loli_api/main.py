@@ -48,6 +48,7 @@ from services.character_image_store import CharacterImageStore
 from services.chat_persona_store import ChatPersonaStore
 from services.persona_writer import PersonaWriter
 from services.motion_writer import MotionWriter
+from services.scene_writer import SceneWriter
 from services.batch_store import BatchStore
 from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
 from models.responses import HealthResponse, ErrorResponse
@@ -76,7 +77,12 @@ logger = logging.getLogger(__name__)
 logging.getLogger("watchfiles").setLevel(logging.WARNING)
 
 # Initialize services (singleton instances)
-job_manager = JobManager(max_queue_size=settings.MAX_QUEUE_SIZE)
+job_manager = JobManager(
+    max_queue_size=settings.MAX_QUEUE_SIZE,
+    # Dedicated, generously-sized queue for Batch Character Creation so a big batch
+    # (POST /v1/generate/batch) enqueues atomically without starving self.queue.
+    creation_queue_max_size=settings.CREATION_QUEUE_MAX_SIZE,
+)
 
 comfyui_client = ComfyUIClient(
     server_address=settings.COMFYUI_SERVER_ADDRESS
@@ -112,6 +118,17 @@ motion_writer = MotionWriter(
     model=settings.MOTION_WRITER_MODEL or settings.VENICE_MODEL,
     temperature=settings.MOTION_WRITER_TEMPERATURE,
     max_tokens=settings.MOTION_WRITER_MAX_TOKENS,
+)
+
+# Scene writer (Batch Character Creation: identity-free scene sentence for a draft's
+# context). Unconditional — works keyless (deterministic curated fallback) and uses
+# Venice when VENICE_API_KEY is set. Never breaks generation.
+scene_writer = SceneWriter(
+    api_key=settings.VENICE_API_KEY,
+    base_url=settings.VENICE_BASE_URL,
+    model=settings.SCENE_WRITER_MODEL or settings.VENICE_MODEL,
+    temperature=settings.SCENE_WRITER_TEMPERATURE,
+    max_tokens=settings.SCENE_WRITER_MAX_TOKENS,
 )
 
 storage_service = StorageService(
@@ -173,6 +190,27 @@ background_worker = BackgroundWorker(
     supabase_storage_service=supabase_storage_service,
     runpod_client=runpod_client
 )
+
+# Batch Character Creation: a dedicated pool of BackgroundWorkers running the SAME
+# text_to_image pipeline but draining the isolated creation_queue (get_next_creation_job
+# / mark_creation_done), so a large batch (POST /v1/generate/batch) can't starve the
+# interactive single-generate queue. Mirrors the Story-Batch pool shape (main.py below).
+creation_workers = [
+    BackgroundWorker(
+        job_manager=job_manager,
+        comfyui_client=comfyui_client,
+        prompt_generator=prompt_generator,
+        storage_service=storage_service,
+        workflow_path=settings.COMFYUI_WORKFLOW_PATH,
+        notification_service=notification_service,
+        supabase_storage_service=supabase_storage_service,
+        runpod_client=runpod_client,
+        get_next_job=job_manager.get_next_creation_job,
+        mark_done=job_manager.mark_creation_done,
+        name=f"creation-{i}",
+    )
+    for i in range(settings.CREATION_BATCH_WORKER_POOL_SIZE)
+]
 
 cleanup_worker = CleanupWorker(
     job_manager=job_manager,
@@ -407,6 +445,7 @@ async def lifespan(app: FastAPI):
         persona_writer=persona_writer,
         motion_writer=motion_writer,
         chat_persona_store=chat_persona_store,
+        scene_writer=scene_writer,
     )
 
     # Sync BASE_URL to Supabase so external services know our tunnel URL
@@ -423,6 +462,11 @@ async def lifespan(app: FastAPI):
         # await cleanup_worker.start()
         await image_cache_service.start_cleanup_worker()
         await keep_warm_service.start()
+        for w in creation_workers:
+            await w.start()
+        logger.info(
+            f"Batch Character Creation: {len(creation_workers)} creation workers started"
+        )
         for w in batch_workers:
             await w.start()
         if batch_reconciler:
@@ -453,6 +497,8 @@ async def lifespan(app: FastAPI):
     await background_edit_worker.stop()
     await pipeline_worker.stop()
     await video_worker.stop()
+    for w in creation_workers:
+        await w.stop()
     for w in batch_workers:
         await w.stop()
     if batch_reconciler:

@@ -16,7 +16,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from auth.admin import require_admin
-from models.character import CharacterCreate, CharacterUpdate, CharacterRead
+from models.character import (
+    CharacterCreate,
+    CharacterUpdate,
+    CharacterRead,
+    BulkCharacterCreate,
+    BulkCharacterResponse,
+    BulkCharacterItemResult,
+    BulkCharacterError,
+)
 from models.persona import PersonaEnrichment, PersonaField
 
 logger = logging.getLogger(__name__)
@@ -123,11 +131,13 @@ def _image_read(row: dict) -> CharacterImageRead:
 _DEFAULT_PERSONA_FIELDS = [f for f in PersonaField if f != PersonaField.name]
 
 
-@router.post("", response_model=CharacterRead, status_code=status.HTTP_201_CREATED)
-async def create_character(
-    body: CharacterCreate,
-    user: Dict[str, Any] = Depends(require_admin),
-):
+async def _create_character_with_persona(body: CharacterCreate) -> CharacterRead:
+    """
+    Create one character row and, when body.generate_persona is set, generate + persist
+    its chat persona in the same call. Shared by POST /v1/characters (single) and
+    POST /v1/characters/bulk so both behave identically. Persona generation is best-effort:
+    a failure there is logged and creation still succeeds (it never raises).
+    """
     store = get_character_store()
     character = await store.create(body)
 
@@ -182,6 +192,59 @@ async def create_character(
         )
 
     return character
+
+
+@router.post("", response_model=CharacterRead, status_code=status.HTTP_201_CREATED)
+async def create_character(
+    body: CharacterCreate,
+    user: Dict[str, Any] = Depends(require_admin),
+):
+    return await _create_character_with_persona(body)
+
+
+@router.post("/bulk", response_model=BulkCharacterResponse)
+async def create_characters_bulk(
+    body: BulkCharacterCreate,
+    user: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Save many characters at once (Batch Character Creation "Save all").
+
+    Each item runs the SAME logic as POST /v1/characters (including the optional
+    generate_persona path). Items succeed/fail INDEPENDENTLY — a bad item is reported as
+    a per-item failure without rolling back the good ones — and results are returned in
+    request order. Configuration errors (no DB) 503 the whole request, matching single.
+    """
+    # Fail the whole request up-front (503) if the store isn't configured — nothing could
+    # be saved anyway. Done before the loop so it isn't swallowed as a per-item failure.
+    get_character_store()
+
+    results = []
+    for index, item in enumerate(body.items):
+        try:
+            character = await _create_character_with_persona(item)
+            results.append(
+                BulkCharacterItemResult(index=index, status="created", character=character)
+            )
+        except HTTPException:
+            # Config/availability errors (e.g. store 503) fail the whole request.
+            raise
+        except Exception as e:  # noqa: BLE001 - a bad item must not sink the good ones
+            logger.error(f"Bulk character save failed for item {index}: {e}")
+            results.append(
+                BulkCharacterItemResult(
+                    index=index,
+                    status="failed",
+                    error=BulkCharacterError(code="CREATE_ERROR", message=str(e)),
+                )
+            )
+
+    created = sum(1 for r in results if r.status == "created")
+    logger.info(
+        f"Bulk character save: {created}/{len(results)} created "
+        f"({len(results) - created} failed)"
+    )
+    return BulkCharacterResponse(results=results)
 
 
 @router.get("", response_model=List[CharacterRead])

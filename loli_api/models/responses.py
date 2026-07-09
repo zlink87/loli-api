@@ -34,6 +34,56 @@ class JobCreateResponse(BaseModel):
         }
 
 
+class BatchGenerateItemResult(BaseModel):
+    """One dispatched item in a POST /v1/generate/batch response."""
+
+    index: int = Field(..., description="0-based position of this item in the request")
+    id: Optional[str] = Field(
+        default=None,
+        description="Echo of the item's optional GenerateImageRequest.id (client ref)",
+    )
+    jobId: str = Field(..., description="Job id to poll via GET /v1/jobs/{jobId}")
+    status: JobStatus = Field(
+        default=JobStatus.QUEUED, description="Initial job status (always queued)"
+    )
+
+
+class BatchGenerateResponse(BaseModel):
+    """Response for POST /v1/generate/batch (202 Accepted)."""
+
+    items: List[BatchGenerateItemResult] = Field(
+        ..., description="One entry per dispatched item, in request order"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "items": [
+                    {"index": 0, "id": "draft-a1", "jobId": "imgjob_abc123", "status": "queued"},
+                    {"index": 1, "id": "draft-b2", "jobId": "imgjob_def456", "status": "queued"},
+                ]
+            }
+        }
+
+
+class SceneRandomizeResponse(BaseModel):
+    """Response for POST /v1/scenes/randomize (200 OK)."""
+
+    scene: str = Field(..., description="Identity-free scene sentence for the draft's context")
+    provider: str = Field(
+        default="deterministic",
+        description="'venice' (LLM) or 'deterministic' (fallback) — for display only",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "scene": "After a long hospital shift, unwinding on her apartment balcony under warm evening light",
+                "provider": "venice",
+            }
+        }
+
+
 class JobResultItem(BaseModel):
     """Individual result item in job output."""
 

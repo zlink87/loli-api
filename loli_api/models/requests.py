@@ -328,6 +328,70 @@ class GenerateImageRequest(BaseModel):
         }
 
 
+class BatchGenerateRequest(BaseModel):
+    """
+    Request body for POST /v1/generate/batch (Batch Character Creation, admin-only).
+
+    A list of independent character photos to dispatch, where each item is the exact
+    `GenerateImageRequest` the single `POST /v1/generate/image` form already builds
+    (reused verbatim — no new item fields). There is NO maximum item count; concurrency
+    is bounded server-side by a dedicated worker pool on an isolated queue. If ANY item
+    fails Pydantic validation the whole request returns 422 and nothing is enqueued.
+    """
+
+    items: List[GenerateImageRequest] = Field(
+        ...,
+        description="Character photos to dispatch; each is a full GenerateImageRequest.",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "items": [
+                    {
+                        "id": "draft-a1",
+                        "persona": {
+                            "ethnicity": "asian", "age": 26, "hairStyle": "ponytail",
+                            "hairColor": "black", "eyeColor": "brown", "name": "Sakura",
+                        },
+                        "context": "after a long shift, relaxing at home",
+                    }
+                ]
+            }
+        }
+
+
+class SceneRandomizeRequest(BaseModel):
+    """
+    Request body for POST /v1/scenes/randomize (Batch Character Creation, admin-only).
+
+    Both inputs optional. `persona` themes the generated scene to her occupation /
+    personality / relationship; `hint` is a free-text seed. Stateless — nothing stored.
+    """
+
+    persona: Optional[PersonaOptions] = Field(
+        default=None,
+        description="Optional persona to theme the scene (occupation/personality/relationship).",
+    )
+    hint: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Optional free-text scene seed (e.g. 'somewhere cosy at night').",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "persona": {
+                    "ethnicity": "caucasian", "age": 28, "hairStyle": "straight",
+                    "hairColor": "blonde", "eyeColor": "green", "name": "Estella",
+                    "occupation": "nurse", "personality": "shy",
+                },
+                "hint": "somewhere cosy at night",
+            }
+        }
+
+
 class OutfitEditRequest(BaseModel):
     """Request body for POST /v1/edit/outfit."""
 

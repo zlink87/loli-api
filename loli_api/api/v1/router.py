@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from .endpoints import (
     generate, jobs, preview, edit, outfit, pose, background, pipeline,
-    characters, batches, video, persona,
+    characters, batches, video, persona, scenes,
 )
 
 # Create main API router
@@ -24,6 +24,7 @@ api_router.include_router(characters.router)
 api_router.include_router(batches.router)
 api_router.include_router(video.router)
 api_router.include_router(persona.router)
+api_router.include_router(scenes.router)
 
 
 def configure_services(
@@ -44,6 +45,7 @@ def configure_services(
     persona_writer=None,
     motion_writer=None,
     chat_persona_store=None,
+    scene_writer=None,
 ):
     """
     Configure services for all endpoint modules.
@@ -110,3 +112,7 @@ def configure_services(
         video.set_character_image_store(character_image_store)
     if motion_writer is not None:
         video.set_motion_writer(motion_writer)
+    # Scene randomizer (Batch Character Creation) — admin, stateless, works keyless
+    # (deterministic fallback) and uses Venice when VENICE_API_KEY is set.
+    if scene_writer is not None:
+        scenes.set_scene_writer(scene_writer)
