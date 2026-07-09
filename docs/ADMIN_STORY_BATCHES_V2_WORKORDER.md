@@ -1,9 +1,9 @@
 # Admin UI Work Order — Story Batches v2 (persona-driven stories, nudity arc, structured prompts)
 
 **Audience:** the agent/developer building the **admin panel frontend** (separate repo).
-**Backend status:** shipped and on `main` (commit `248a343d`). API is additive and back-compatible — the current admin panel keeps working unchanged; this work order only *adds* controls that expose new capability.
+**Backend status:** shipped and on `main` (latest: `73f4d79c`). API is additive and back-compatible — the current admin panel keeps working unchanged; this work order only *adds* controls that expose new capability.
 
-**Source of truth for the contract:** [`docs/ADMIN_STORY_BATCHES_INTEGRATION.md`](./ADMIN_STORY_BATCHES_INTEGRATION.md) — read §3 (endpoints), §4 (request/response shapes), §7 (enums), and the **Addenda (2026-07-09)** at the bottom (there are two: "nudity arc, structured description channels, outfit strength" and "5-level nudity scale + `period_days`"). `/openapi.json` is canonical for enum option lists. This work order tells you *what UI to build*; that doc tells you *the exact field shapes*.
+**Source of truth for the contract:** [`docs/ADMIN_STORY_BATCHES_INTEGRATION.md`](./ADMIN_STORY_BATCHES_INTEGRATION.md) — read §3 (endpoints), §4 (request/response shapes), §7 (enums), and the **dated addenda** at the bottom (currently five: 07-07 "photo management + time-of-day"; 07-09 "nudity arc, structured description channels, outfit strength"; 07-09 "5-level nudity scale + `period_days`"; 07-09 "auto-generate the full persona on character creation"; 07-09 "per-character nude base (additive dressing for batches)"). `/openapi.json` is canonical for enum option lists. This work order tells you *what UI to build*; that doc tells you *the exact field shapes*.
 
 ---
 
@@ -65,11 +65,13 @@ All additions live on `controls` (in `BatchCreate`), in each item's `scene_spec`
 
 ### WI-2 — Advanced outfit-strength controls (optional; collapsible "Advanced")
 
-**Build:** in an **Advanced** section of the launch modal:
-- `outfit_denoise` — a slider `0.5–0.95` with an **"Auto"** state that sends `null` (engine default ≈ 0.80). Label: "Outfit change strength". Helper: "Higher forces the new outfit over the avatar's current clothing more strongly. Try 0.85 if outfits aren't changing."
-- `outfit_prompt_mode` — a toggle `Standard ｜ Replace`. Helper: "Replace explicitly removes current clothing first — use when a dressed avatar keeps showing through."
+> **⚠️ Correction (2026-07-09, post-launch): the default below changed, and it's a required fix, not optional.** Real production batches showed the panel was sending `outfit_prompt_mode: "standard"` explicitly on every launch (not omitting it) — that **silently overrides** the backend's new default and was a direct contributor to the "clothes don't fully change" bug. The engine default is now **`"replace"`** (see the 2026-07-09 addendum in the contract doc). Update the panel to match:
 
-**Acceptance criteria:** both default to Auto/Standard and are omitted (or sent as `null`/`"standard"`) when untouched; the batch behaves identically to today when they're at defaults.
+**Build:** in an **Advanced** section of the launch modal:
+- `outfit_denoise` — a slider `0.5–0.95` with an **"Auto"** state that sends `null` (engine default is now **0.85** when an outfit is present, was ~0.80). Label: "Outfit change strength". Helper: "Higher forces the new outfit over the avatar's current clothing more strongly."
+- `outfit_prompt_mode` — a toggle `Standard ｜ Replace`, **defaulting to Replace** (was Standard). Helper: "Replace explicitly removes current clothing first — recommended; switch to Standard only if you want the new outfit to blend with what she's already wearing."
+
+**Acceptance criteria:** both are **omitted from the request when untouched** (don't hardcode a value — let the engine default win, so a future backend tuning change doesn't require another panel deploy to pick up); if you DO send them explicitly for some reason, send `outfit_prompt_mode: "replace"` and `outfit_denoise: null`, not `"standard"`/a stale numeric default.
 
 ### WI-3 — Storyboard card: show the new per-photo channels (recommended; display only)
 
@@ -198,13 +200,32 @@ Pull option lists from `/openapi.json → components.schemas`: `NudityLevel`, `O
 ## 6. Definition of done
 
 - [ ] Nudity-arc two-handle control (WI-1, 5-stop: low/suggestive/medium/revealing/high) sends `start_nudity` + `max_nudity`; verified via dry-run storyboard (non-decreasing arc; `sfw_only` forces low).
-- [ ] Advanced outfit controls (WI-2) present, default to Auto/Standard, omitted/`null` when untouched.
+- [ ] Advanced outfit controls (WI-2) present; **default is now Replace/Auto** (not Standard); omitted from the request when untouched.
 - [ ] Storyboard cards show `outfit_detail` / `expression` / `nudityLevel` when present, degrade cleanly when `null` (WI-3).
 - [ ] Character form surfaces occupation/relationship/personality/kinks with the "shapes her story" hint (WI-4).
 - [ ] Likes/dislikes re-sent on every launch (WI-5).
 - [ ] Period/days control (WI-7) sends `controls.period_days` (1–7); omitted or `1` behaves identically to today.
 - [ ] Character creation sends `generate_persona: true` (WI-8); the created character's persona shows all 6+ generated fields populated, not just System Prompt; a typed `bio` is preserved.
+- [ ] Nude-base generate/status UI (WI-9) present on the character detail view; batches for that character visibly stop showing her original outfit ghosting through.
 - [ ] No appearance text ever enters a batch request; existing batches (no new fields) still work.
+
+---
+
+## WI-9 — Nude base: additive dressing per character (new; optional but recommended)
+
+**Why:** batches dress each scene by editing the character's clothed hero photo — a subtractive edit (remove the old garment, add the new one) that isn't always reliable; the avatar's original clothing can ghost through a "changed" outfit. A **nude base** — one identity-locked bare-skin render, generated once per character from her existing hero photo — flips this to an *additive* edit (clothes go ONTO bare skin), which is far more reliable. It's entirely new backend surface with no existing UI.
+
+**Build:** on the character detail view, near the hero photo:
+- A **"Generate nude base"** action → `POST /v1/characters/{id}/nude-base` (admin-only, 202 → `{characterId, status, jobId, imageUrl, error, createdAt, updatedAt}`, `status="pending"`). Same async pattern as every other edit: it queues a job, nothing renders synchronously.
+- Poll `GET /v1/characters/{id}/nude-base` (same response shape) until `status` is `"succeeded"` or `"failed"` — this endpoint finalizes the job on read, so simple polling (e.g. every 2–3s) is enough; no separate confirm step. `imageUrl` is populated once `succeeded`.
+- Show a status badge: none yet / generating / ready / failed (with `error` message + a retry = call `POST` again).
+- **Do not surface the nude image anywhere public** — no gallery, no chat, no character card. It's an internal rendering asset only; keep it behind the same admin-only view as generation.
+- **Consent/moderation copy**: this explicitly creates and stores a nude asset for that character. Add a short confirmation step ("Generate an internal nude base for {name}? Only do this for characters where this is intended.") before the first call — don't make it a one-click accident.
+
+**Acceptance criteria:**
+- Triggering generation on a character with no base shows "generating" then transitions to "ready" (or "failed" with a retry option) without a page reload.
+- A character with **no** nude base generated behaves in batches exactly as before (no visible change) — this control is purely additive/opt-in, nothing to migrate.
+- After generating a base, running a batch for that character and comparing to a prior one shows outfit changes taking more reliably (this is the actual acceptance test — the API contract alone doesn't prove the fix, a real batch does).
 
 ---
 
