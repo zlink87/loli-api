@@ -7,11 +7,16 @@ Mirrors PoseBackgroundWorker: download the source still, stage it, run the WAN
 publishes). Admin-only; requires the Supabase character-image store.
 """
 import asyncio
+import base64
 import random
 import logging
 import traceback
+import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+import json
 
 from config import settings
 from services.job_manager import Job, JobManager
@@ -33,8 +38,10 @@ from services import prompt_constants as pc
 from api.v1.endpoints.video import (
     build_video_prompt,
     prepare_video_workflow,
+    prepare_flf2v_workflow,
     motion_label,
 )
+from services.end_frame import resolve_end_frame_bytes
 
 from workers.base_worker import BaseEditWorker
 
@@ -58,6 +65,7 @@ class VideoBackgroundWorker(BaseEditWorker):
         supabase_storage_service: Optional[SupabaseStorageService] = None,
         runpod_client: Optional[RunPodServerlessClient] = None,
         character_image_store=None,
+        flf2v_workflow_path: str = "",
     ):
         super().__init__(
             job_manager=job_manager,
@@ -70,6 +78,11 @@ class VideoBackgroundWorker(BaseEditWorker):
             runpod_client=runpod_client,
         )
         self.character_image_store = character_image_store
+        # OFF by default: empty path -> FLF2V branch is never taken. Loaded once at
+        # startup (analogous to base_worker's _workflow_template) so per-job work
+        # never touches disk.
+        self.flf2v_workflow_path = flf2v_workflow_path
+        self._flf2v_template: Optional[dict] = None
 
     @property
     def worker_name(self) -> str:
@@ -80,6 +93,58 @@ class VideoBackgroundWorker(BaseEditWorker):
 
     def _mark_job_done(self) -> None:
         self.job_manager.mark_video_done()
+
+    async def _load_workflow(self) -> None:
+        """Load the default i2v template, then the optional FLF2V template.
+
+        A missing/broken FLF2V template must NOT stop the worker: it only disables
+        the (opt-in, OFF-by-default) FLF2V branch, leaving the normal i2v path
+        untouched. So load it guarded and log a warning on failure.
+        """
+        await super()._load_workflow()
+
+        if not self.flf2v_workflow_path:
+            return
+        try:
+            flf2v_file = Path(self.flf2v_workflow_path)
+            if not flf2v_file.exists():
+                raise FileNotFoundError(
+                    f"FLF2V workflow not found: {self.flf2v_workflow_path}"
+                )
+            with open(flf2v_file, "r", encoding="utf-8") as f:
+                self._flf2v_template = json.load(f)
+            logger.info(f"Loaded FLF2V workflow template: {self.flf2v_workflow_path}")
+        except Exception as e:  # noqa: BLE001 - degrade to i2v, never hard-fail startup
+            self._flf2v_template = None
+            logger.warning(
+                f"[VIDEO] FLF2V template load failed ({e}); FLF2V branch disabled, "
+                f"reels use the normal i2v path"
+            )
+
+    async def _stage_end_frame(self, job: Job) -> str:
+        """Build the FLF2V end frame from the just-staged source bytes and stage it.
+
+        Must be called AFTER prepare_source_image (which sets _last_source_bytes and
+        seeds _pending_images with the start frame). Appends the end frame as a
+        second base64 input.images[] entry (like stage_pose_reference) and returns
+        the flat filename the wan_i2v_flf2v.json end-image LoadImage (node 53) reads.
+        """
+        source_bytes = self._last_source_bytes
+        if not source_bytes:
+            raise RuntimeError("no staged source bytes to derive the end frame from")
+
+        # Tier 2 deterministic crop-zoom (PIL, CPU-bound) — offload to a thread.
+        end_bytes = await asyncio.to_thread(resolve_end_frame_bytes, source_bytes)
+
+        end_name = f"video_end_{uuid.uuid4().hex[:12]}.png"
+        b64 = base64.b64encode(end_bytes).decode("ascii")
+        if self._pending_images is None:
+            self._pending_images = []
+        self._pending_images.append(
+            {"name": end_name, "image": f"data:image/png;base64,{b64}"}
+        )
+        logger.info(f"[VIDEO] {job.job_id} | Staged FLF2V end frame: {end_name}")
+        return end_name
 
     async def _process_job(self, job: Job) -> None:
         start_time = datetime.utcnow()
@@ -113,17 +178,51 @@ class VideoBackgroundWorker(BaseEditWorker):
             )
 
             # Step 3: Prepare workflow and run on RunPod (longer video timeouts).
-            workflow = prepare_video_workflow(
-                self._workflow_template,
-                source_name,
-                prompt=prompt,
-                negative_prompt=negative,
-                seed=seed,
-                width=VIDEO_DEFAULT_WIDTH,
-                height=VIDEO_DEFAULT_HEIGHT,
-                length=length,
-                fps=fps,
+            # FLF2V branch is opt-in (request.useFlf2v) AND requires the FLF2V
+            # template to have loaded (empty config path -> _flf2v_template is None
+            # -> branch never taken). Any end-frame failure degrades to the normal
+            # i2v path — it must never hard-fail the job.
+            width = request.width or VIDEO_DEFAULT_WIDTH
+            height = request.height or VIDEO_DEFAULT_HEIGHT
+            use_flf2v = bool(getattr(request, "useFlf2v", False)) and (
+                self._flf2v_template is not None
             )
+            workflow = None
+            if use_flf2v:
+                try:
+                    end_name = await self._stage_end_frame(job)
+                    workflow = prepare_flf2v_workflow(
+                        self._flf2v_template,
+                        source_name,
+                        end_name,
+                        prompt=prompt,
+                        negative_prompt=negative,
+                        seed=seed,
+                        width=width,
+                        height=height,
+                        length=length,
+                        fps=fps,
+                    )
+                    logger.info(f"[VIDEO] {job.job_id} | Using FLF2V path")
+                except Exception as flf_err:  # noqa: BLE001 - degrade to i2v
+                    logger.warning(
+                        f"[VIDEO] {job.job_id} | FLF2V end-frame prep failed "
+                        f"({flf_err}); falling back to i2v"
+                    )
+                    workflow = None
+
+            if workflow is None:
+                workflow = prepare_video_workflow(
+                    self._workflow_template,
+                    source_name,
+                    prompt=prompt,
+                    negative_prompt=negative,
+                    seed=seed,
+                    width=width,
+                    height=height,
+                    length=length,
+                    fps=fps,
+                )
 
             gen_start = datetime.utcnow()
             relative_path, preview_url, expires_at, video_hash, media_type = (
@@ -235,7 +334,7 @@ class VideoBackgroundWorker(BaseEditWorker):
             request.character_id,
             character_image_id=image_id,
             media_url=video_url,
-            label=motion_label(request.motion),
+            label=request.motionLabel or motion_label(request.motion),
             media_type="video",
             is_active=False,  # DRAFT — admin publishes after review
         )

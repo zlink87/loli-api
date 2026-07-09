@@ -1,0 +1,154 @@
+{
+  "37": {
+    "inputs": {
+      "unet_name": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Diffusion Model (high noise expert)" }
+  },
+  "56": {
+    "inputs": {
+      "unet_name": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Diffusion Model (low noise expert)" }
+  },
+  "38": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "Load CLIP (UMT5)" }
+  },
+  "40": {
+    "inputs": { "vae_name": "wan_2.1_vae.safetensors" },
+    "class_type": "VAELoader",
+    "_meta": { "title": "Load VAE" }
+  },
+  "52": {
+    "inputs": { "image": "video_source.png" },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Load Image (start frame) [ANCHOR: source image]" }
+  },
+  "6": {
+    "inputs": {
+      "text": "subtle idle motion, gentle breathing, cinematic",
+      "clip": ["38", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP Text Encode (positive) [ANCHOR: motion prompt]" }
+  },
+  "7": {
+    "inputs": {
+      "text": "static, blurry, distorted, deformed, morphing, flickering, warping, jitter, extra limbs, bad anatomy, low quality, jpeg artifacts, watermark, text",
+      "clip": ["38", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP Text Encode (negative) [ANCHOR: negative prompt]" }
+  },
+  "54": {
+    "inputs": {
+      "shift": 8.0,
+      "model": ["37", 0]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": { "title": "ModelSamplingSD3 (high)" }
+  },
+  "55": {
+    "inputs": {
+      "shift": 8.0,
+      "model": ["56", 0]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": { "title": "ModelSamplingSD3 (low)" }
+  },
+  "50": {
+    "inputs": {
+      "width": 480,
+      "height": 832,
+      "length": 81,
+      "batch_size": 1,
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "vae": ["40", 0],
+      "start_image": ["52", 0]
+    },
+    "class_type": "WanImageToVideo",
+    "_meta": { "title": "WanImageToVideo [ANCHOR: width/height/length/batch]" }
+  },
+  "57": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 0,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": 10,
+      "return_with_leftover_noise": "enable",
+      "model": ["54", 0],
+      "positive": ["50", 0],
+      "negative": ["50", 1],
+      "latent_image": ["50", 2]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": { "title": "KSampler Advanced (high noise) [ANCHOR: seed]" }
+  },
+  "58": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 10,
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "disable",
+      "model": ["55", 0],
+      "positive": ["50", 0],
+      "negative": ["50", 1],
+      "latent_image": ["57", 0]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": { "title": "KSampler Advanced (low noise) [ANCHOR: seed]" }
+  },
+  "8": {
+    "inputs": {
+      "samples": ["58", 0],
+      "vae": ["40", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "70": {
+    "inputs": {
+      "model_name": "rife47.safetensors"
+    },
+    "class_type": "FrameInterpolationModelLoader",
+    "_meta": { "title": "Load Frame Interp Model [ANCHOR: interp model]" }
+  },
+  "71": {
+    "inputs": {
+      "interp_model": ["70", 0],
+      "images": ["8", 0],
+      "multiplier": 2
+    },
+    "class_type": "FrameInterpolate",
+    "_meta": { "title": "Frame Interpolate x2 [ANCHOR: interp multiplier]" }
+  },
+  "60": {
+    "inputs": {
+      "frame_rate": 16,
+      "filename_prefix": "video/wan_i2v",
+      "images": ["71", 0]
+    },
+    "class_type": "VideoImagesBridge",
+    "_meta": { "title": "Video -> Images Bridge (mp4) [ANCHOR: fps / filename_prefix]" }
+  }
+}

@@ -438,7 +438,14 @@ class PoseEditRequest(BaseModel):
 
 # Whitelisted frame counts for WAN i2v (must be 4n+1). 81 ≈ 5s @ 16fps.
 VIDEO_ALLOWED_LENGTHS = {49, 81}
+# Whitelisted (width, height) portrait resolutions a caller may opt into.
+# 720x1280 is the WAN 2.2 14B native tier; it can become the default once the
+# RunPod worker GPU tier is confirmed to not OOM (video worker has max_oom_attempts=1).
+VIDEO_ALLOWED_RESOLUTIONS = {(480, 832), (576, 1024), (720, 1280)}
 # Vertical reel defaults (portrait 9:16-ish); WAN is trained at 16fps.
+# NOTE: 480x832 kept as the shipped default (safe for the current RunPod tier).
+# Bump to 720x1280 (native 14B tier, sharper push-in) only after confirming the
+# worker GPU tier tolerates it without OOM.
 VIDEO_DEFAULT_WIDTH = 480
 VIDEO_DEFAULT_HEIGHT = 832
 VIDEO_DEFAULT_LENGTH = 81
@@ -466,7 +473,16 @@ class VideoGenerateRequest(BaseModel):
     motionPrompt: Optional[str] = Field(
         default=None,
         max_length=2000,
-        description="Optional free-text motion description prepended to the preset",
+        description="Optional free-text motion. When set, it is interpreted by the LLM and replaces the preset.",
+    )
+    useFlf2v: bool = Field(
+        default=False,
+        description=(
+            "Opt in to the first-last-frame (FLF2V) path: the clip resolves on a "
+            "controlled, in-focus end frame. Only takes effect when the server also "
+            "has COMFYUI_VIDEO_FLF2V_WORKFLOW_PATH configured; otherwise the normal "
+            "i2v path is used. OFF by default."
+        ),
     )
     negativePrompt: Optional[str] = Field(
         default=None,
@@ -489,10 +505,22 @@ class VideoGenerateRequest(BaseModel):
         le=30,
         description="Frames per second. None = server default (16).",
     )
+    width: Optional[int] = Field(
+        default=None,
+        description=f"Clip width. Allowed pairs: {sorted(VIDEO_ALLOWED_RESOLUTIONS)}. None = server default (480).",
+    )
+    height: Optional[int] = Field(
+        default=None,
+        description=f"Clip height. Allowed pairs: {sorted(VIDEO_ALLOWED_RESOLUTIONS)}. None = server default (832).",
+    )
 
     # Filled server-side (from the path + source resolution); not client-supplied.
     character_id: Optional[str] = Field(default=None, description="Set server-side from the URL path")
     source_image: Optional[str] = Field(default=None, description="Resolved still URL, set server-side")
+    motionLabel: Optional[str] = Field(
+        default=None,
+        description="Set server-side from the LLM interpretation of a custom motionPrompt",
+    )
 
     @field_validator("length")
     @classmethod
@@ -502,6 +530,19 @@ class VideoGenerateRequest(BaseModel):
                 f"Unsupported length '{v}'. Allowed: {sorted(VIDEO_ALLOWED_LENGTHS)}"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_resolution(self):
+        # None/None -> server default. Otherwise both must be set and the
+        # (width, height) pair must be one of the allowlisted resolutions.
+        if self.width is None and self.height is None:
+            return self
+        pair = (self.width, self.height)
+        if pair not in VIDEO_ALLOWED_RESOLUTIONS:
+            raise ValueError(
+                f"Unsupported resolution {pair}. Allowed: {sorted(VIDEO_ALLOWED_RESOLUTIONS)}"
+            )
+        return self
 
     class Config:
         json_schema_extra = {

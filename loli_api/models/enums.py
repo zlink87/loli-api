@@ -281,6 +281,22 @@ class MotionType(str, Enum):
     WAVE = "wave"
     WALK_TOWARD = "walk_toward"
     LOOK_OVER_SHOULDER = "look_over_shoulder"
+    WINK = "wink"
+    LIP_BITE = "lip_bite"
+    BEND_TO_CAMERA = "bend_to_camera"
+    HEAD_TILT = "head_tilt"
+    ADJUST_HAIR = "adjust_hair"
+    GLANCE_UP_THROUGH_LASHES = "glance_up_through_lashes"
+    GENTLE_LAUGH = "gentle_laugh"
+    SHOULDER_SWAY = "shoulder_sway"
+    COME_HITHER = "come_hither"
+    TWIRL = "twirl"
+    PEACE_SIGN = "peace_sign"
+    TOUCH_LIPS = "touch_lips"
+    SLOW_STRETCH = "slow_stretch"
+    LEAN_ON_HAND = "lean_on_hand"
+    GAZE_AND_SMILE = "gaze_and_smile"
+    NOD_AND_SMILE = "nod_and_smile"
 
 
 class AccessoryType(str, Enum):

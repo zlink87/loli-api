@@ -63,9 +63,11 @@ Content-Type: application/json
 {
   "source_image_id": "9c1e2a4f-...",   // required — id of an EXISTING character_images row (a still)
   "motion": "hair_in_wind",             // required — motion preset, see §3
-  "motionPrompt": null,                 // optional — free-text override/addition to the preset
+  "motionPrompt": null,                 // optional — when set, interpreted by the LLM and replaces the preset (see §3)
   "seed": null,                         // optional — omit for random
-  "negativePrompt": null                // optional — extra negative terms
+  "negativePrompt": null,               // optional — extra negative terms
+  "width": null,                        // optional — see §3.1; None = server default (480)
+  "height": null                        // optional — see §3.1; None = server default (832)
 }
 ```
 
@@ -133,6 +135,10 @@ reuse an aggressive image-job poll interval; 5–10s is reasonable.
 Use this to render a review queue: thumbnail/video preview, the source still for
 comparison, and a **Publish** button per unpublished item.
 
+The persisted chat quick-action button caption (the `chat_persona_actions.label`)
+is derived server-side: for a custom `motionPrompt` it is the LLM-generated
+`motionLabel`; otherwise it is derived from the chosen `motion` preset.
+
 ### 2.4 `POST /v1/characters/{character_id}/videos/{actionId}/publish`
 
 No body. Flips `chat_persona_actions.is_active` from `false` → `true` for that
@@ -147,11 +153,73 @@ published clip, that's a manual/backend task for now.
 Planning-stage list (confirm against `/openapi.json` once shipped):
 
 `subtle_idle`, `slow_turn`, `hair_in_wind`, `hair_flip`, `blow_kiss`, `wave`,
-`walk_toward`, `look_over_shoulder`
+`walk_toward`, `look_over_shoulder`, `wink`, `lip_bite`, `bend_to_camera`,
+`head_tilt`, `adjust_hair`, `glance_up_through_lashes`, `gentle_laugh`,
+`shoulder_sway`, `come_hither`, `twirl`, `peace_sign`, `touch_lips`,
+`slow_stretch`, `lean_on_hand`, `gaze_and_smile`, `nod_and_smile`
 
 Render as a dropdown, one clear default (`subtle_idle` — lowest motion, safest
 for identity). `motionPrompt` is an optional free-text field for admins who want
-to override/extend the preset — treat it like an "advanced" field, not primary UI.
+to describe their own motion. When set, it is interpreted by the LLM (Venice) into
+a WAN-friendly description and a short button label, and **replaces** the preset
+entirely (the preset is ignored); it falls back to the raw text when the LLM is
+off/down. Treat it like an "advanced" field, not primary UI.
+
+### 3.1 `width` / `height` — optional resolution opt-in
+
+Both default to `null` → the server default of **480×832** (safe for the current
+RunPod worker GPU tier). To render a sharper clip, send an allowlisted `(width,
+height)` **pair** — either both or neither:
+
+- `480 × 832` (default)
+- `576 × 1024`
+- `720 × 1280` (WAN 2.2 14B native tier — sharpest, but ~2–3× VRAM / slower)
+
+Any other pair, or only one of the two set, → `422`. Higher tiers risk OOM on
+the current worker (`max_oom_attempts=1`); 720p should become the default only
+once the worker GPU tier is confirmed to tolerate it.
+
+### 3.2 Frame interpolation (deploy-side, OFF by default)
+
+Smooth 16→32fps playback (RIFE/FILM) is shipped as a separate workflow,
+`workflows/wan_i2v_interp.json`, and is **off by default**. An operator enables it
+by pointing `COMFYUI_VIDEO_INTERP_WORKFLOW_PATH` at that file; when unset the worker
+uses the normal `wan_i2v.json`. The output frame_rate is scaled automatically
+(gen fps × interpolation multiplier) so playback stays real-time. Requires the
+RunPod worker image to have the ComfyUI `FrameInterpolate` node **and** a staged
+RIFE/FILM weight — a deploy-side action; do not enable it until that image is
+confirmed, or generation will fail on the worker.
+
+### 3.3 First-last-frame (FLF2V) endings (deploy-side, OFF by default)
+
+The `useFlf2v` request flag (defaults `false`) opts a reel into the first-last-frame
+path: WAN is conditioned on **both** the source still (start frame) and a controlled
+**end frame**, so the clip resolves on an in-focus, camera-facing beat and identity
+drift drops (the model synthesises coherent mid-frames instead of drifting to a soft,
+out-of-focus tail). It is shipped as a separate workflow, `workflows/wan_i2v_flf2v.json`
+(a `WanFirstLastFrameToVideo` graph), and is **doubly gated**: it runs only when the
+request sets `useFlf2v: true` **AND** the operator has pointed
+`COMFYUI_VIDEO_FLF2V_WORKFLOW_PATH` at that file. When either is missing, or if the
+end frame can't be produced, the worker silently falls back to the normal i2v path —
+`useFlf2v` never hard-fails a job.
+
+**End frame — which tier ships:** the end frame is a **deterministic PIL crop-zoom**
+(~1.18× toward the upper-centre/face) of the source still (Tier 2). This is
+identity-perfect (a straight crop of the source), always succeeds, and needs no extra
+GPU/network. A Tier-1 "soft-smile, camera-facing" edit-pipeline variant was scoped but
+**not shipped** — the existing still-edit path is async/queue-based with no synchronous
+single-still helper, so it would require a second RunPod round-trip and can't be
+verified locally (a hook + `TODO(tier1)` is left in `services/end_frame.py`).
+
+**Deploy gate:** enabling FLF2V requires the RunPod worker image to have the
+`WanFirstLastFrameToVideo` node (ComfyUI ≥ 0.3.48). Do not point
+`COMFYUI_VIDEO_FLF2V_WORKFLOW_PATH` at the file until that image is confirmed, or
+generation will fail on the worker.
+
+| Setting / flag | Default | Effect |
+|---|---|---|
+| `COMFYUI_VIDEO_FLF2V_WORKFLOW_PATH` (env) | `""` (OFF) | Path to the FLF2V graph; empty disables the branch entirely |
+| `useFlf2v` (request) | `false` | Per-reel opt-in; only honored when the env path above is set |
 
 ---
 
@@ -161,7 +229,8 @@ to override/extend the preset — treat it like an "advanced" field, not primary
    next to (or on) each existing still — this is how `source_image_id` gets set.
    **Exclude any row that is itself a video** from being pickable as a source.
 2. **Generate form:** motion preset dropdown (default `subtle_idle`) + optional
-   free-text motion override, behind an "Advanced" disclosure. Submit → `202` +
+   free-text "describe your own motion" field (LLM-interpreted, replaces the
+   preset), behind an "Advanced" disclosure. Submit → `202` +
    `jobId` → start polling `GET /v1/jobs/{jobId}` (reuse your existing image-job
    poller if it's generic).
 3. **Progress state:** video jobs are slow (up to several minutes) — show a
@@ -240,7 +309,8 @@ to override/extend the preset — treat it like an "advanced" field, not primary
 - [ ] "Generate Reel" entry point added per still in the character gallery
       (excludes video rows as source candidates).
 - [ ] Generate form: motion dropdown (default `subtle_idle`) + optional
-      free-text override behind an Advanced disclosure.
+      free-text "describe your own motion" (LLM-interpreted, replaces the preset)
+      behind an Advanced disclosure.
 - [ ] Job polling reuses/extends the existing poller; progress UI accounts for
       multi-minute video generation time.
 - [ ] Reels review queue (`GET /v1/characters/{id}/videos`) with inline video

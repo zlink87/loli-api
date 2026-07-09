@@ -42,6 +42,7 @@ def configure_services(
     batch_store=None,
     batch_orchestrator=None,
     persona_writer=None,
+    motion_writer=None,
     chat_persona_store=None,
 ):
     """
@@ -95,9 +96,17 @@ def configure_services(
         persona.set_character_store(character_store)
     if chat_persona_store is not None:
         persona.set_chat_persona_store(chat_persona_store)
+    # POST /v1/characters can optionally generate the persona in the same call
+    # (CharacterCreate.generate_persona) — reuses these same already-built instances.
+    if persona_writer is not None:
+        characters.set_persona_writer(persona_writer)
+    if chat_persona_store is not None:
+        characters.set_chat_persona_store(chat_persona_store)
     # Reels (image-to-video) — admin, Supabase-gated
     video.set_job_manager(job_manager)
     if notification_service:
         video.set_notification_service(notification_service)
     if character_image_store is not None:
         video.set_character_image_store(character_image_store)
+    if motion_writer is not None:
+        video.set_motion_writer(motion_writer)

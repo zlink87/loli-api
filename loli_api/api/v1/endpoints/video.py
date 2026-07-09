@@ -38,6 +38,7 @@ router = APIRouter(prefix="/characters", tags=["Reels"])
 _job_manager = None
 _notification_service: Optional[NotificationService] = None
 _character_image_store = None
+_motion_writer = None
 
 
 def set_job_manager(job_manager) -> None:
@@ -53,6 +54,11 @@ def set_notification_service(service: NotificationService) -> None:
 def set_character_image_store(store) -> None:
     global _character_image_store
     _character_image_store = store
+
+
+def set_motion_writer(writer) -> None:
+    global _motion_writer
+    _motion_writer = writer
 
 
 def get_job_manager():
@@ -74,18 +80,39 @@ def get_character_image_store():
     return _character_image_store
 
 
+def get_motion_writer():
+    """The Venice-backed motion interpreter, or None when it was never wired."""
+    return _motion_writer
+
+
 # ---------------------------------------------------------------------------
 # Motion presets — text descriptions injected into the WAN positive prompt.
 # ---------------------------------------------------------------------------
 MOTION_DESCRIPTIONS: Dict[MotionType, str] = {
-    MotionType.SUBTLE_IDLE: "subtle idle motion, gentle breathing, slight head movement, static camera",
-    MotionType.SLOW_TURN: "slowly turning head and shoulders toward the camera, smooth motion",
-    MotionType.HAIR_IN_WIND: "hair flowing gently in the wind, soft fabric movement, cinematic slow motion",
-    MotionType.HAIR_FLIP: "playfully flipping hair back over the shoulder, smooth natural motion",
-    MotionType.BLOW_KISS: "smiling warmly and blowing a kiss toward the camera, gentle motion",
-    MotionType.WAVE: "waving a hand at the camera with a warm friendly smile",
-    MotionType.WALK_TOWARD: "walking slowly toward the camera, confident smooth motion",
-    MotionType.LOOK_OVER_SHOULDER: "glancing back over the shoulder toward the camera, subtle turn",
+    MotionType.SUBTLE_IDLE: "subtle idle motion, gentle breathing and micro head movements, then settling into a soft smile toward the camera, static camera",
+    MotionType.SLOW_TURN: "slowly turning head and shoulders to face the camera, then holding the gaze with a soft smile",
+    MotionType.HAIR_IN_WIND: "hair flowing gently in the wind, soft fabric movement, then tucking a strand behind the ear and smiling at the camera",
+    MotionType.HAIR_FLIP: "playfully flipping hair back over the shoulder, then looking to the camera with a warm smile",
+    MotionType.BLOW_KISS: "smiling warmly, leaning slightly toward the camera and blowing a kiss",
+    MotionType.WAVE: "waving a hand at the camera, then a warm friendly smile",
+    MotionType.WALK_TOWARD: "walking slowly toward the camera, then stopping close, leaning in slightly, blinking softly and smiling at the camera",
+    MotionType.LOOK_OVER_SHOULDER: "glancing back over the shoulder, then turning to face the camera with a soft smile",
+    MotionType.WINK: "looking at the camera, smiling and giving a playful wink",
+    MotionType.LIP_BITE: "a soft sultry gaze at the camera, gently biting the lower lip, then a faint smile",
+    MotionType.BEND_TO_CAMERA: "leaning and bending toward the camera, then looking up through the lashes and smiling",
+    MotionType.HEAD_TILT: "tilting the head with curiosity, then a soft smile toward the camera",
+    MotionType.ADJUST_HAIR: "running fingers through the hair, then settling and smiling at the camera",
+    MotionType.GLANCE_UP_THROUGH_LASHES: "looking down, then slowly glancing up at the camera through the lashes with a soft smile",
+    MotionType.GENTLE_LAUGH: "a genuine, gentle laugh, then looking at the camera with a bright smile",
+    MotionType.SHOULDER_SWAY: "swaying the shoulders playfully to a rhythm, ending facing the camera with a smile",
+    MotionType.COME_HITHER: "beckoning toward the camera with a curling finger and a playful smile",
+    MotionType.TWIRL: "turning in a gentle twirl, hair and fabric flaring, then facing the camera with a smile",
+    MotionType.PEACE_SIGN: "raising a playful peace sign near the face, then a wink and a smile at the camera",
+    MotionType.TOUCH_LIPS: "softly touching the lips with a fingertip, gaze to the camera, then a faint smile",
+    MotionType.SLOW_STRETCH: "a slow graceful stretch, relaxing the shoulders, then a soft smile toward the camera",
+    MotionType.LEAN_ON_HAND: "leaning forward toward the camera, resting the chin lightly on a hand, then smiling",
+    MotionType.GAZE_AND_SMILE: "a slow, intimate gaze into the camera that softens into a warm smile",
+    MotionType.NOD_AND_SMILE: "a gentle nod of acknowledgement toward the camera, then a warm smile",
 }
 
 _MAX_LABEL_LEN = 40
@@ -98,12 +125,17 @@ def motion_label(motion: MotionType) -> str:
 
 
 def build_video_prompt(motion: MotionType, extra: Optional[str] = None) -> str:
-    """Compose the WAN positive prompt from a motion preset + identity clause."""
-    desc = MOTION_DESCRIPTIONS.get(motion, "subtle natural motion, static camera")
-    prompt = f"{desc}. {pc.VIDEO_CONSISTENCY_CLAUSE}."
+    """Compose the WAN positive prompt from a motion preset + identity clause.
+
+    When ``extra`` (custom motion text, already LLM-polished by the request path)
+    is supplied it REPLACES the preset entirely; otherwise the ``motion`` preset
+    description is used. The identity-lock ``VIDEO_CONSISTENCY_CLAUSE`` is always
+    appended in either path.
+    """
     if extra and extra.strip():
-        prompt = f"{extra.strip()}. {prompt}"
-    return prompt
+        return f"{extra.strip()}. {pc.VIDEO_CONSISTENCY_CLAUSE}."
+    desc = MOTION_DESCRIPTIONS.get(motion, "subtle natural motion, static camera")
+    return f"{desc}. {pc.VIDEO_CONSISTENCY_CLAUSE}."
 
 
 def prepare_video_workflow(
@@ -129,7 +161,7 @@ def prepare_video_workflow(
         50  WanImageToVideo  -> inputs.width/height/length
         57  KSamplerAdvanced -> inputs.noise_seed  (high-noise expert)
         58  KSamplerAdvanced -> inputs.noise_seed  (low-noise expert)
-        60  VHS_VideoCombine -> inputs.frame_rate
+        60  VideoImagesBridge -> inputs.frame_rate
     """
     wf = copy.deepcopy(template)
 
@@ -158,6 +190,57 @@ def prepare_video_workflow(
 
     if fps is not None and "60" in wf:
         wf["60"]["inputs"]["frame_rate"] = fps
+
+        # When the interpolation variant of the workflow is in use, the clip is
+        # generated at `fps` but has multiplier x more frames after FrameInterpolate;
+        # scale the output frame_rate so playback stays real-time (16fps gen x2 = 32).
+        for node in wf.values():
+            if node.get("class_type") == "FrameInterpolate":
+                multiplier = node.get("inputs", {}).get("multiplier", 1)
+                wf["60"]["inputs"]["frame_rate"] = fps * multiplier
+                break
+
+    return wf
+
+
+def prepare_flf2v_workflow(
+    template: dict,
+    source_image: str,
+    end_image: str,
+    prompt: Optional[str] = None,
+    negative_prompt: Optional[str] = None,
+    seed: Optional[int] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    length: Optional[int] = None,
+    fps: Optional[int] = None,
+) -> dict:
+    """
+    Prepare the WAN 2.2 first-last-frame workflow (workflows/wan_i2v_flf2v.json).
+
+    Identical to prepare_video_workflow but for the extra END-frame anchor: this
+    graph's node 50 is a ``WanFirstLastFrameToVideo`` (not ``WanImageToVideo``)
+    that takes both a start_image (node 52) and an end_image (node 53). All the
+    other anchors (prompt/negative/seed/dims/fps) are shared, so we delegate to
+    prepare_video_workflow and only add the node-53 end-image write here.
+
+    Anchor nodes (in addition to prepare_video_workflow's):
+        53  LoadImage  -> inputs.image  (end frame)
+    """
+    wf = prepare_video_workflow(
+        template,
+        source_image,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        width=width,
+        height=height,
+        length=length,
+        fps=fps,
+    )
+
+    if "53" in wf:
+        wf["53"]["inputs"]["image"] = end_image
 
     return wf
 
@@ -208,6 +291,19 @@ async def create_video(
     # Fill the server-side fields the worker needs.
     request.character_id = character_id
     request.source_image = source_url
+
+    # Custom motion → route the free text through Venice for a WAN-friendly
+    # description + button label. Falls back to the raw text when the writer is
+    # unwired (None) or disabled; build_video_prompt still handles the raw text.
+    if request.motionPrompt and request.motionPrompt.strip():
+        writer = get_motion_writer()
+        if writer is not None:
+            desc, label, provider = await writer.interpret(request.motionPrompt)
+            request.motionPrompt = desc
+            request.motionLabel = label
+            logger.info(
+                f"[VIDEO] motion interpreted via {provider} for character {character_id}"
+            )
 
     notification_service = get_notification_service()
     if notification_service:

@@ -47,6 +47,7 @@ from services.character_store import CharacterStore
 from services.character_image_store import CharacterImageStore
 from services.chat_persona_store import ChatPersonaStore
 from services.persona_writer import PersonaWriter
+from services.motion_writer import MotionWriter
 from services.batch_store import BatchStore
 from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
 from models.responses import HealthResponse, ErrorResponse
@@ -101,6 +102,16 @@ persona_writer = PersonaWriter(
     model=settings.PERSONA_WRITER_MODEL or settings.VENICE_MODEL,
     temperature=settings.PERSONA_WRITER_TEMPERATURE,
     max_tokens=settings.PERSONA_WRITER_MAX_TOKENS,
+)
+
+# Motion writer (Reels: interpret a custom motionPrompt). Unconditional — works
+# keyless (falls back to the raw text) and uses Venice when VENICE_API_KEY is set.
+motion_writer = MotionWriter(
+    api_key=settings.VENICE_API_KEY,
+    base_url=settings.VENICE_BASE_URL,
+    model=settings.MOTION_WRITER_MODEL or settings.VENICE_MODEL,
+    temperature=settings.MOTION_WRITER_TEMPERATURE,
+    max_tokens=settings.MOTION_WRITER_MAX_TOKENS,
 )
 
 storage_service = StorageService(
@@ -291,12 +302,16 @@ video_worker = VideoBackgroundWorker(
     job_manager=job_manager,
     comfyui_client=comfyui_client,
     storage_service=storage_service,
-    workflow_path=settings.COMFYUI_VIDEO_WORKFLOW_PATH,
+    workflow_path=settings.COMFYUI_VIDEO_INTERP_WORKFLOW_PATH or settings.COMFYUI_VIDEO_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
     runpod_client=runpod_client,
     character_image_store=character_image_store,
+    # FLF2V (first-last-frame) reel path. EMPTY (default) -> OFF: the worker's
+    # FLF2V branch is never taken even if a request sets useFlf2v. Enabling it also
+    # requires the RunPod worker image to have the WanFirstLastFrameToVideo node.
+    flf2v_workflow_path=settings.COMFYUI_VIDEO_FLF2V_WORKFLOW_PATH,
 )
 
 
@@ -390,6 +405,7 @@ async def lifespan(app: FastAPI):
         batch_store=batch_store,
         batch_orchestrator=batch_orchestrator,
         persona_writer=persona_writer,
+        motion_writer=motion_writer,
         chat_persona_store=chat_persona_store,
     )
 

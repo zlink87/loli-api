@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH: str = ""
     COMFYUI_POSE_WORKFLOW_PATH: str = "workflows/edit_pose_action.json"
     COMFYUI_VIDEO_WORKFLOW_PATH: str = "workflows/wan_i2v.json"
+    # Frame-interpolation variant of the reel workflow (RIFE/FILM 16->32fps, kills
+    # judder). EMPTY (default) -> OFF: the video worker uses COMFYUI_VIDEO_WORKFLOW_PATH.
+    # Point this at "workflows/wan_i2v_interp.json" ONLY once the RunPod worker image
+    # is confirmed to have the FrameInterpolate node + a staged RIFE/FILM weight
+    # (a deploy-side action) — otherwise generation will fail on that worker.
+    COMFYUI_VIDEO_INTERP_WORKFLOW_PATH: str = ""
+    # First-last-frame (FLF2V) variant of the reel workflow: conditions WAN on both
+    # a start frame (source still) and a controlled END frame so the clip resolves
+    # on an in-focus, camera-facing beat and identity drift drops. EMPTY (default)
+    # -> OFF: the video worker never takes the FLF2V branch regardless of the
+    # per-request useFlf2v flag. Point this at "workflows/wan_i2v_flf2v.json" ONLY
+    # once the RunPod worker image is confirmed to have the WanFirstLastFrameToVideo
+    # node (a deploy-side action) — otherwise generation will fail on that worker.
+    COMFYUI_VIDEO_FLF2V_WORKFLOW_PATH: str = ""
     COMFYUI_INPUT_DIR: str = "../ComfyUI/input"
 
     # WS4.1/4.2 — pose face-alignment diagnostics (flag-gated, default OFF).
@@ -112,6 +126,13 @@ class Settings(BaseSettings):
     PERSONA_WRITER_TEMPERATURE: float = 0.8
     PERSONA_WRITER_MAX_TOKENS: int = 1200
     PERSONA_WRITER_MODEL: str = ""
+
+    # Motion writer (Reels: interpret a custom motionPrompt into a WAN-friendly
+    # description + button label). Uses Venice above. Empty MOTION_WRITER_MODEL ->
+    # VENICE_MODEL. Works keyless (deterministic fallback = the raw user text).
+    MOTION_WRITER_MODEL: str = ""
+    MOTION_WRITER_TEMPERATURE: float = 0.7
+    MOTION_WRITER_MAX_TOKENS: int = 200
 
     # Character generation: run the second detail-refine pass by default
     # (upscale-model round trip + refine steps; same output resolution,
