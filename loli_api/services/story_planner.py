@@ -50,7 +50,20 @@ from services.venice_client import VeniceClient
 logger = logging.getLogger(__name__)
 
 # Nudity ordered from least to most exposed — used for clamping + escalation.
-_NUDITY_LADDER: List[NudityLevel] = [NudityLevel.LOW, NudityLevel.MEDIUM, NudityLevel.HIGH]
+# The canonical 5-level ladder (same order as models/enums.py's NudityLevel); the
+# index-based helpers below (_nudity_index/_nudity_ramp + the guided-ceiling clamp)
+# read positions off THIS list, so they generalize to any ladder length.
+_NUDITY_LADDER: List[NudityLevel] = [
+    NudityLevel.LOW, NudityLevel.SUGGESTIVE, NudityLevel.MEDIUM,
+    NudityLevel.REVEALING, NudityLevel.HIGH,
+]
+
+# Time-of-day ordered chronologically across a single day — used for the per-photo
+# time ramp (early_morning -> night, once per day). This IS models/enums.py's
+# TimeOfDayType declaration order (verified chronological: early_morning, morning,
+# daytime, golden_hour, sunset, evening, night); the time helpers index off it the
+# same index-based way the nudity helpers use _NUDITY_LADDER.
+_TIME_LADDER: List[TimeOfDayType] = list(TimeOfDayType)
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +90,15 @@ def _val(v) -> Optional[str]:
 def _nudity_index(level) -> int:
     try:
         return _NUDITY_LADDER.index(NudityLevel(_val(level)))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _time_index(time) -> int:
+    """Chronological position of a time_of_day on _TIME_LADDER (0 = earliest).
+    Mirrors _nudity_index; falls back to 0 (earliest) on an unknown value."""
+    try:
+        return _TIME_LADDER.index(TimeOfDayType(_val(time)))
     except (ValueError, TypeError):
         return 0
 
@@ -184,8 +206,7 @@ class DeterministicScenePlanner(StoryPlanner):
         rng = random.Random(seed)
 
         occ = _val(character.persona.occupation)
-        arcs = st.ARC_TEMPLATES.get(occ, st.GENERIC_ARCS)
-        arcs = self._select_and_size_arcs(arcs, count, controls.arc_count)
+        arcs = _plan_arcs(character, count, controls)
 
         like_kw = _keyword_set(character.likes)
         dislike_kw = _keyword_set(character.dislikes)
@@ -199,32 +220,43 @@ class DeterministicScenePlanner(StoryPlanner):
         # ramp[gidx] as each beat's level exactly; validate_and_repair reuses the same
         # ramp as a per-photo ceiling. tmpl.nudity_bias is now a legacy field (unused).
         ramp = _nudity_ramp(count, controls)
+        # Per-photo time-of-day curve (chronological, resets each day). Assigned
+        # positionally like the nudity ramp — NOT rng.choice per beat, which made
+        # time bounce within a block — but snapped to each beat's own time_pool so a
+        # curated time never overrides scene coherence (nearest-allowed fallback).
+        time_ramp = _time_ramp(count, controls.period_days)
 
         scenes: List[SceneSpec] = []
         gidx = 0
         for arc, beat_count in arcs:
             for b in range(beat_count):
                 tmpl = arc.beats[b % len(arc.beats)]
+                # Vary the caption once the arc's short beat pool wraps, so a stretched
+                # arc doesn't emit byte-identical beat_description text (verbatim repeats).
+                beat_desc = _vary_beat_description(tmpl.beat_description, b // len(arc.beats))
                 pose = self._pick_pose(tmpl, rng, like_kw, dislike_kw, controls)
                 outfit = self._pick_outfit(tmpl, rng, like_kw, dislike_kw, controls)
                 location = self._pick_location(tmpl, rng, like_kw, dislike_kw, controls)
                 nudity = ramp[gidx] if gidx < len(ramp) else NudityLevel.LOW
+                time_of_day = _nearest_time_in_pool(
+                    time_ramp[gidx] if gidx < len(time_ramp) else tmpl.time_pool[0], tmpl.time_pool
+                )
                 narrative = None
                 if story_mode:
                     mood = sv.scene_mood_phrase(character.persona.kinks, character.persona.personality)
-                    narrative = st.deterministic_beat_narrative(name, tmpl.beat_description, mood, gidx)
+                    narrative = st.deterministic_beat_narrative(name, beat_desc, mood, gidx)
                 scenes.append(
                     SceneSpec(
                         arc_id=arc.arc_id,
                         arc_title=arc.arc_title,
                         beat_index=b,
                         global_index=gidx,
-                        beat_description=tmpl.beat_description,
+                        beat_description=beat_desc,
                         pose=pose,
                         outfit=outfit,
                         nudityLevel=nudity,
                         location=location,
-                        time_of_day=rng.choice(tmpl.time_pool),
+                        time_of_day=time_of_day,
                         lighting=rng.choice(tmpl.lighting_pool),
                         mood_kinks=character.persona.kinks,
                         mood_personality=character.persona.personality,
@@ -283,21 +315,50 @@ class _BeatSlot:
     tmpl: "st.BeatTemplate"
 
 
+def _plan_arcs(character: Character, count: int, controls: BatchControls) -> List[Tuple["st.ArcTemplate", int]]:
+    """
+    The ordered (arc, beat_count) plan for the whole batch — the SINGLE source of
+    arc selection + sizing, shared by the deterministic planner (plan_scenes_sync)
+    and the beat-slot builder (_beat_slots, which feeds the Venice prompt and
+    validate_and_repair), so every path agrees on which arc fills which beat.
+
+    period_days<=1: her occupation's arc set (or GENERIC_ARCS), sized across all
+    `count` beats — the original single-day behavior, unchanged.
+
+    period_days>1: split `count` into per-day beat budgets (_day_sizes), then size
+    EACH day's OWN arc pool to that day's budget. Day 0 is her occupation day (the
+    occupation arcs, as today); days 1+ draw from the leisure/day-off pools, rotated
+    per day (st.leisure_arcs_for_day), so a multi-day batch reads as different real
+    days — a day off, errands, a night out — instead of the same workday repeated.
+    """
+    occ = _val(character.persona.occupation)
+    occ_arcs = st.ARC_TEMPLATES.get(occ, st.GENERIC_ARCS)
+    sizes = _day_sizes(count, controls.period_days)
+    if len(sizes) <= 1:
+        return DeterministicScenePlanner._select_and_size_arcs(occ_arcs, count, controls.arc_count)
+    plan: List[Tuple["st.ArcTemplate", int]] = []
+    for day_idx, day_count in enumerate(sizes):
+        if day_count <= 0:
+            continue
+        day_arcs = occ_arcs if day_idx == 0 else st.leisure_arcs_for_day(day_idx)
+        plan.extend(
+            DeterministicScenePlanner._select_and_size_arcs(day_arcs, day_count, controls.arc_count)
+        )
+    return plan
+
+
 def _beat_slots(character: Character, count: int, controls: BatchControls) -> List[_BeatSlot]:
     """
     The ordered sequence of beat slots (one per global beat index, 0..count-1)
     that the deterministic planner would use for this character/count/controls
-    — same arc selection, same sizing, same occupation lookup. Shared by the
-    Venice prompt builder (presents each beat's own allowed pools) and
-    validate_and_repair (enforces every provider's picks stay inside them), so
-    "which combinations are possible" is defined in exactly one place
-    (services/story_templates.py) regardless of which planner ran.
+    — same arc selection, same sizing, same occupation lookup, same day rotation
+    (all via _plan_arcs). Shared by the Venice prompt builder (presents each beat's
+    own allowed pools) and validate_and_repair (enforces every provider's picks stay
+    inside them), so "which combinations are possible" is defined in exactly one
+    place (services/story_templates.py) regardless of which planner ran.
     """
-    occ = _val(character.persona.occupation)
-    arcs = st.ARC_TEMPLATES.get(occ, st.GENERIC_ARCS)
-    sized = DeterministicScenePlanner._select_and_size_arcs(arcs, count, controls.arc_count)
     slots: List[_BeatSlot] = []
-    for arc, beat_count in sized:
+    for arc, beat_count in _plan_arcs(character, count, controls):
         for b in range(beat_count):
             slots.append(_BeatSlot(arc.arc_id, arc.arc_title, b, arc.beats[b % len(arc.beats)]))
     return slots
@@ -316,6 +377,22 @@ def _derive_seed(controls: BatchControls, gidx: int) -> Optional[int]:
     if strategy == "per_item":
         return ((controls.base_seed + gidx * 7919) % 1_000_000_000) or 1
     return None  # random -> worker chooses
+
+
+def _day_sizes(count: int, period_days: int) -> List[int]:
+    """
+    Beat budget per day: split `count` beats across the story's days, front-loading
+    the remainder (the same divmod idiom _select_and_size_arcs uses to size arcs).
+    Never more days than beats (a story can't have an empty day), so period_days is
+    capped at `count`. Shared by _time_ramp (the time curve) and _plan_arcs (the arc
+    rotation) so both agree on exactly where each day starts and ends.
+    """
+    n = max(count, 0)
+    if n == 0:
+        return []
+    days = max(1, min(period_days or 1, n))
+    base, rem = divmod(n, days)
+    return [base + (1 if i < rem else 0) for i in range(days)]
 
 
 def _nudity_ramp(count: int, controls: BatchControls) -> List[NudityLevel]:
@@ -354,21 +431,127 @@ def _nudity_ramp(count: int, controls: BatchControls) -> List[NudityLevel]:
     return ramp
 
 
+def _time_ramp(count: int, period_days: int) -> List[TimeOfDayType]:
+    """
+    Per-photo time-of-day curve for a batch — the chronological sibling of
+    _nudity_ramp. Returns `count` times, one per global beat index, that flow
+    early_morning -> night ONCE PER DAY and reset at each new day's first beat, so
+    a batch's time never bounces around within a block (the reported bug: the
+    deterministic planner used to pick time_of_day at random per beat).
+
+    `count` beats are split across `period_days` days (front-loaded remainder, via
+    _day_sizes). Within a day's span the walk is monotonically non-decreasing along
+    _TIME_LADDER: a day shorter than the 7-slot ladder samples it evenly (spread
+    across the whole day, not clustered at dawn — 3 beats land near dawn/midday/
+    night, not early_morning/morning/daytime); a day longer than 7 holds adjacent
+    beats on the same time (still monotonic, just repeated). A 1-beat day (incl.
+    count==1) is a single midday-ish value — a sensible representative, never a
+    crash. Used two ways: the deterministic planner assigns it per beat (snapped to
+    each beat's allowed time_pool), and validate_and_repair re-applies it as a
+    safety net for LLM output that ignored the TIME PLAN.
+    """
+    n = max(count, 0)
+    if n == 0:
+        return []
+    ladder_len = len(_TIME_LADDER)
+    ramp: List[TimeOfDayType] = []
+    for size in _day_sizes(n, period_days):
+        for j in range(size):
+            if size <= 1:
+                idx = ladder_len // 2  # a single-beat day -> one representative midday-ish time
+            else:
+                idx = round(j * (ladder_len - 1) / (size - 1))  # even spread, first->last = dawn->night
+            ramp.append(_TIME_LADDER[idx])
+    return ramp
+
+
+def _nearest_time_in_pool(target: TimeOfDayType, pool: Tuple[TimeOfDayType, ...]) -> TimeOfDayType:
+    """
+    The allowed time closest to `target` by chronological (ladder) distance — the
+    curated ramp value if the beat's own hand-authored time_pool permits it, else
+    the nearest in-pool time. Coherence wins over a perfect curve: a beat authored
+    for daytime (e.g. "cooking breakfast") is never forced to "night" just because
+    the ramp points there; it snaps to the closest time the beat actually allows.
+    Ties break toward the earlier time (deterministic). Empty pool -> `target`.
+    """
+    if not pool or target in pool:
+        return target
+    ti = _time_index(target)
+    return min(pool, key=lambda t: (abs(_time_index(t) - ti), _time_index(t)))
+
+
+def _compress_photo_runs(values, *, start_photo: int = 0) -> List[str]:
+    """
+    Run-compress a per-photo list into human ranges numbered from start_photo+1,
+    e.g. ['photos 1-3: low', 'photo 4: medium']. Shared by the NUDITY PLAN and the
+    TIME PLAN so both read the same way; each run's value is rendered via _val.
+    """
+    groups: List[str] = []
+    i0 = 0
+    for i in range(1, len(values) + 1):
+        if i == len(values) or _val(values[i]) != _val(values[i0]):
+            v = _val(values[i0])
+            a, b = start_photo + i0 + 1, start_photo + i
+            groups.append(f"photo {a}: {v}" if a == b else f"photos {a}-{b}: {v}")
+            i0 = i
+    return groups
+
+
 def _format_nudity_plan(ramp: List[NudityLevel]) -> str:
     """Compress a per-photo ramp into human ranges: 'photos 1-3: low; 4-6: medium; 7-8: high'."""
     if not ramp:
         return ""
-    groups: List[str] = []
+    return "; ".join(_compress_photo_runs(ramp))
+
+
+def _format_time_plan(time_ramp: List[TimeOfDayType], count: int, period_days: int) -> str:
+    """
+    Compress the per-photo time ramp into human ranges, grouped by day — the TIME
+    PLAN sibling of _format_nudity_plan, built from the SAME _time_ramp/_day_sizes
+    validate_and_repair enforces, so the prompt targets and the safety-net clamp
+    agree. Single day: 'photos 1-3: early_morning; ...'. Multiple days:
+    'Day 1 — photos 1-4: ...; ... Day 2 — photos 5-8: ...'.
+    """
+    if not time_ramp:
+        return ""
+    sizes = _day_sizes(count, period_days)
+    multi = sum(1 for s in sizes if s > 0) > 1
+    parts: List[str] = []
     start = 0
-    for i in range(1, len(ramp) + 1):
-        if i == len(ramp) or ramp[i] != ramp[start]:
-            lvl = _val(ramp[start])
-            if start == i - 1:
-                groups.append(f"photo {start + 1}: {lvl}")
-            else:
-                groups.append(f"photos {start + 1}-{i}: {lvl}")
-            start = i
-    return "; ".join(groups)
+    day_no = 0
+    for size in sizes:
+        if size <= 0:
+            continue
+        day_no += 1
+        runs = _compress_photo_runs(time_ramp[start:start + size], start_photo=start)
+        prefix = f"Day {day_no} — " if multi else ""
+        parts.append(prefix + "; ".join(runs))
+        start += size
+    return ". ".join(parts)
+
+
+_BEAT_CYCLE_SUFFIXES: Tuple[str, ...] = (
+    "",                            # first pass through the arc's beats: the hand-authored line, verbatim
+    ", later that day",
+    ", as the afternoon slips by",
+    ", as the day winds on",
+)
+
+
+def _vary_beat_description(desc: str, cycle: int) -> str:
+    """
+    Lightly vary a beat caption when the arc's short beat pool has WRAPPED, so a
+    re-cycled BeatTemplate (beat_in_arc >= len(arc.beats)) doesn't surface a
+    byte-identical story caption. `cycle` is the wrap count (0 on the first pass ->
+    verbatim; >=1 appends a short, identity-free temporal suffix keyed to the pass).
+    A minimal fix for the reported verbatim-repeat bug; in multi-day batches the
+    day-theme rotation already supplies fresh beats, so this mostly bites within a
+    single long day where one arc must stretch across more beats than it authored.
+    """
+    if cycle <= 0:
+        return desc
+    suffix = _BEAT_CYCLE_SUFFIXES[cycle % len(_BEAT_CYCLE_SUFFIXES)]
+    return f"{desc}{suffix}"[:280]
 
 
 def _weighted_pick(pool, rng, like_kw: set, dislike_kw: set, phrase_map: dict):
@@ -504,9 +687,13 @@ HARD RULES:
   cooking breakfast, no swimwear in an office.
 - VARIETY IS A HARD RULE: never reuse the same outfit+pose pair; consecutive beats must differ
   in activity AND in at least one of pose/location/outfit; no single outfit spans more than 2
-  beats (except a work uniform inside the work chapter).
-- FLOW: consecutive beats connect. time_of_day generally advances across the day; the setting
-  changes between chapters. Group beats into arcs as CHAPTERS of the one story.
+  beats (except a work uniform inside the work chapter). beat_description must be DISTINCT for
+  every photo — never repeat or lightly reword an earlier caption, even when the location or
+  outfit carries over or a later day revisits the same place; describe THIS photo's own moment.
+- FLOW: consecutive beats connect. time_of_day advances across the day per the TIME PLAN; the
+  setting changes between chapters. Group beats into arcs as CHAPTERS of the one story. When the
+  story spans MULTIPLE DAYS, each new day restarts in the early morning and centers on DIFFERENT
+  activities from the days before — never replay the same day twice.
 - IDENTITY IS PIXEL-LOCKED. In beat_description, setting, activity AND narrative, NEVER
   describe her face, age, ethnicity, hair, eyes, body, breasts or skin. Using her first name
   is fine. Describe places, clothes, actions, light and mood only.
@@ -681,24 +868,45 @@ class VeniceScenePlanner(StoryPlanner):
         ] if occ_raw else []
         occ_phrase = ap.phrase(ap.OCCUPATION_PHRASES, persona.occupation) or (occ_raw or "").replace("_", " ")
 
-        day_shape_lines = [
-            "DAY SHAPE (build her day like a real person's, in this order):",
-            "- Open at home: waking slow, first coffee, breakfast, getting ready.",
-        ]
-        # Drop the work bullet when the occupation is unknown or all its workplaces are blocked.
-        if occ_raw and work_locs:
-            day_shape_lines.append(
-                f"- ONE work chapter as a {occ_phrase} at {', '.join(work_locs)}, "
-                "with concrete on-the-job activities."
+        # DAY SHAPE differs by span: one wake->sleep day (as before), or N distinct
+        # days where day 1 is her occupation day and days 2+ vary the activities so a
+        # multi-day batch reads as different real days, not the same workday repeated.
+        period_days = controls.period_days
+        multi_day = period_days > 1
+        if multi_day:
+            work_bit = (
+                f"one work chapter as a {occ_phrase} at {', '.join(work_locs)}"
+                if occ_raw and work_locs else "the anchor activity that defines who she is"
             )
-        day_shape_lines.append("- An after-work unwind: home to change or shower, then head out or settle in.")
-        day_shape_lines.append(
-            "- An evening finish where the story peaks and the nudity plan reaches its height."
-        )
-        day_shape_lines.append(
-            "Example (a nurse's day): coffee -> breakfast -> hospital shift -> home -> shower -> "
-            "change -> drinks -> club."
-        )
+            day_shape_lines = [
+                f"DAY SHAPE (structure this as {period_days} DISTINCT days, in chronological order):",
+                f"- Day 1 is built around her occupation: open at home (waking, first coffee, getting "
+                f"ready), then {work_bit}, then an after-work unwind.",
+                "- Days 2+ are DIFFERENT real days — a lazy day off at home, running errands with a "
+                "cafe stop, seeing friends, a date night. Vary the activities so no two days repeat; "
+                "do NOT put her back at work every day.",
+                "- Within EACH day, time_of_day flows early morning -> night ONCE, then RESETS to "
+                "early morning for the next day; land each day's final beat on its evening/night peak.",
+            ]
+        else:
+            day_shape_lines = [
+                "DAY SHAPE (build her day like a real person's, in this order):",
+                "- Open at home: waking slow, first coffee, breakfast, getting ready.",
+            ]
+            # Drop the work bullet when the occupation is unknown or all its workplaces are blocked.
+            if occ_raw and work_locs:
+                day_shape_lines.append(
+                    f"- ONE work chapter as a {occ_phrase} at {', '.join(work_locs)}, "
+                    "with concrete on-the-job activities."
+                )
+            day_shape_lines.append("- An after-work unwind: home to change or shower, then head out or settle in.")
+            day_shape_lines.append(
+                "- An evening finish where the story peaks and the nudity plan reaches its height."
+            )
+            day_shape_lines.append(
+                "Example (a nurse's day): coffee -> breakfast -> hospital shift -> home -> shower -> "
+                "change -> drinks -> club."
+            )
         if count <= 4:
             day_shape_lines.append(
                 f"(Only {count} photos here — compress the arc: fewer beats, but keep the progression.)"
@@ -714,6 +922,19 @@ class VeniceScenePlanner(StoryPlanner):
             "photos. For photos targeted medium/high, ALWAYS choose an outfit (never null)."
         )
 
+        # TIME PLAN — per-photo chronological targets from the SAME _time_ramp
+        # validate_and_repair enforces (its safety net), so the prompt and the clamp
+        # agree, exactly like the NUDITY PLAN above pairs with the nudity clamp.
+        time_plan = _format_time_plan(_time_ramp(count, period_days), count, period_days)
+        time_block = (
+            f"TIME PLAN (per-photo time_of_day targets): {time_plan}. Follow the per-photo targets so "
+            "the day moves forward; you may deviate slightly for scene coherence, but the overall day "
+            + (
+                "must flow early morning -> night within EACH day, then reset for the next."
+                if multi_day else "must flow early morning -> night across the set."
+            )
+        )
+
         variety_line = (
             f"VARIETY: never repeat an outfit+pose combination; use at least {min(count, 5)} distinct "
             f"locations and at least {min(count, 6)} distinct outfits across the set."
@@ -724,12 +945,19 @@ class VeniceScenePlanner(StoryPlanner):
         )
 
         arc_hint = str(controls.arc_count) if controls.arc_count else "3-5"
+        plan_line = (
+            f"PLAN: Write ONE cohesive {period_days}-day story for {persona.name} as {count} photos, "
+            "grouped into chapters (arcs) — treat each day as its own run of chapters."
+            if multi_day else
+            f"PLAN: Write ONE cohesive day-in-the-life story for {persona.name} as {count} photos, "
+            f"grouped into {arc_hint} chapters (arcs)."
+        )
         return (
             "CHARACTER:\n" + "\n".join(summary_parts) + "\n\n"
-            f"PLAN: Write ONE cohesive day-in-the-life story for {persona.name} as {count} photos, "
-            f"grouped into {arc_hint} chapters (arcs).\n\n"
+            + plan_line + "\n\n"
             + day_shape_block + "\n\n"
             + nudity_block + "\n\n"
+            + time_block + "\n\n"
             + variety_line + "\n"
             + mood_line + "\n\n"
             "ALLOWED VALUES (choose freely, keep each scene internally coherent):\n"
@@ -1120,11 +1348,13 @@ def validate_and_repair(
     enforce_beat_pool: bool = True,
     enforce_nudity_ramp: bool = True,
     enforce_variety: bool = True,
+    enforce_time_ramp: bool = True,
 ) -> List[SceneSpec]:
     """
     Coerce/repair enums, clamp nudity, enforce allow/block, enforce beat-pool
     coherence (pose/outfit/location stay within the hand-authored combination
-    for that beat position), and guarantee exactly `count`.
+    for that beat position), curate time_of_day onto the day-flow ramp, and
+    guarantee exactly `count`.
 
     ``enforce_beat_pool`` gates only the coherence repair. Set False for
     admin-supplied manual scenes: those are an intentional exact override
@@ -1137,12 +1367,17 @@ def validate_and_repair(
     ``enforce_nudity_ramp`` clamps each photo DOWN to the per-photo guided-ceiling
     ramp (and auto-fills an outfit for a medium/high scene that has none, since
     nudity renders only through the outfit step). ``enforce_variety`` runs the
-    set-level dedup pass. Both default True (venice/deterministic/fallback); the
-    manual path passes both False so an admin's exact scene list is left intact.
+    set-level dedup pass. ``enforce_time_ramp`` overrides each photo's time_of_day
+    to the per-photo chronological ramp (_time_ramp) so the day flows forward and
+    resets per day — the safety net for LLM output that ignored the TIME PLAN,
+    exactly parallel to how the nudity ramp backs the NUDITY PLAN. All three default
+    True (venice/deterministic/fallback); the manual path passes them False so an
+    admin's exact scene list is left intact.
     """
     max_idx = _nudity_index(controls.max_nudity)
     slots = _beat_slots(character, count, controls) if enforce_beat_pool else []
     ramp = _nudity_ramp(count, controls) if enforce_nudity_ramp else []
+    time_ramp = _time_ramp(count, controls.period_days) if enforce_time_ramp else []
     repaired: List[SceneSpec] = []
     for i, scene in enumerate(scenes[:count]):
         s = scene.model_copy(deep=True)
@@ -1191,6 +1426,18 @@ def validate_and_repair(
         # dropped, since a concrete in-pool scene beats a missing one.
         if i < len(slots):
             s = _enforce_beat_pool(s, slots[i], controls, seed=(controls.base_seed or 0) + i)
+
+        # Time-of-day curation — override each photo's time onto the per-photo
+        # chronological ramp so the day flows forward and resets per day (the safety
+        # net for LLM output that ignored the TIME PLAN, parallel to the nudity ramp).
+        # When the beat pool is enforced, snap to the nearest ramp target THIS beat's
+        # own time_pool permits — coherence beats a perfect curve, so a daytime-only
+        # beat is never forced to night; with no pool (director path) set it outright.
+        if enforce_time_ramp and i < len(time_ramp):
+            if i < len(slots):
+                s.time_of_day = _nearest_time_in_pool(time_ramp[i], slots[i].tmpl.time_pool)
+            else:
+                s.time_of_day = time_ramp[i]
 
         # Outfit-fill: a medium/high scene renders its nudity ONLY through the outfit
         # step, so a non-LOW scene with outfit=None would silently drop to dressed/blank.
@@ -1373,6 +1620,7 @@ async def plan_scenes(
             validate_and_repair(
                 scenes, character, count, controls,
                 enforce_beat_pool=False, enforce_nudity_ramp=False, enforce_variety=False,
+                enforce_time_ramp=False,
             ),
             "manual",
         )

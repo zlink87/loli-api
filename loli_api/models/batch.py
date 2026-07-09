@@ -81,6 +81,11 @@ class BatchControls(BaseModel):
     arc_count: Optional[int] = Field(
         default=None, ge=1, le=8, description="Number of narrative arcs; None = auto from count"
     )
+    period_days: int = Field(
+        default=1, ge=1, le=7,
+        description=("Days the story spans. 1 = a single wake->sleep day; N = N day-cycles "
+                     "with varied activities. time_of_day is curated across the whole span."),
+    )
     pipeline_order: Optional[List[str]] = Field(
         default=None, description="Override pipeline step order forwarded to each item"
     )
@@ -129,6 +134,7 @@ class BatchCreate(BaseModel):
                     "content_rating": "nsfw",
                     "escalation": "building",
                     "arc_count": 4,
+                    "period_days": 1,
                     "seed_strategy": "per_item",
                     "base_seed": 42,
                     "photo_style": "polished",

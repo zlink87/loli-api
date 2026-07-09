@@ -6,10 +6,19 @@ from enum import Enum
 
 
 class NudityLevel(str, Enum):
-    """Nudity level for outfit editing."""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
+    """
+    Nudity level for outfit editing — a 5-level ladder, ordered least to most
+    explicit: LOW < SUGGESTIVE < MEDIUM < REVEALING < HIGH.
+
+    The low/medium/high string values are unchanged from the original 3-level
+    scheme for back-compat (existing stored jsonb/controls still parse as-is);
+    SUGGESTIVE and REVEALING are additive values slotted between them.
+    """
+    LOW = "low"                # fully clothed
+    SUGGESTIVE = "suggestive"  # clothed but teasing: tight/short, cleavage, hint of skin
+    MEDIUM = "medium"          # partial nudity: unbuttoned/lingerie, some exposure
+    REVEALING = "revealing"    # mostly nude: largely exposed, covering little
+    HIGH = "high"              # full nudity
 
 
 class JobStatus(str, Enum):

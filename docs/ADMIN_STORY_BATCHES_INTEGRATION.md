@@ -167,11 +167,12 @@ published), `created_at`, `updated_at`.
   "likes": ["coffee", "silk", "rainy days"],   // bias scenes toward these
   "dislikes": ["gyms", "neon clubs"],          // soft-excluded from scenes
   "controls": {
-    "max_nudity": "medium",    // low | medium | high — hard ceiling, never exceeded
+    "max_nudity": "medium",    // low | suggestive | medium | revealing | high — hard ceiling, never exceeded
     "sfw_only": false,         // true forces nudity=low and drops the "naked" outfit
     "content_rating": "nsfw",  // nsfw | sfw
     "escalation": "building",  // building (nudity rises across the set) | flat
     "photo_style": "polished", // polished (default) | studio | candid_phone (legacy raw look)
+    "period_days": 1,          // NEW 2026-07-09 — 1–7; days the story spans (default 1, see addendum)
     "arc_count": 4,            // optional 1–8; capped by available story arcs
     "seed_strategy": "per_item", // per_item | fixed | random
     "base_seed": 42,           // optional; enables reproducible plans/images
@@ -186,7 +187,7 @@ published), `created_at`, `updated_at`.
 ```
 
 `controls` is optional — omit it for sensible defaults (max_nudity=medium, blocks
-"naked", building escalation, per_item seeds, polished finish).
+"naked", building escalation, per_item seeds, polished finish, period_days=1).
 
 **`photo_style`** applies the photographic finish to every generated photo:
 `polished` = retouched editorial glamour (matches the hero-card generation look),
@@ -767,3 +768,50 @@ config, not an admin-panel input, but if outfit changes look weak or absent acro
 batch, ask backend ops to check `GET /debug/workflow-config` (debug builds only)
 before reaching for `outfit_denoise` / `outfit_prompt_mode` — a batch stuck on the
 `v1` tier needs a deployment fix, not a stronger prompt.
+
+---
+
+## Addendum (2026-07-09): 5-level nudity scale + `period_days` (multi-day story) control
+
+### Nudity scale expanded to 5 levels
+
+`NudityLevel` (used by `controls.max_nudity` / `controls.start_nudity` and returned in
+each item's `scene_spec.nudityLevel`) now has **5** values instead of 3. `low` /
+`medium` / `high` are unchanged — same values, same meaning, fully back-compatible.
+`suggestive` and `revealing` are new, slotting in as finer steps:
+
+| value | admin label | meaning |
+|---|---|---|
+| `low` | Fully clothed | fully dressed |
+| `suggestive` | Suggestive | clothed but teasing — tight/short, cleavage, hint of skin |
+| `medium` | Partial nudity | unbuttoned/lingerie, some exposure |
+| `revealing` | Mostly nude | largely exposed, covering little |
+| `high` | Full nudity | full nudity |
+
+This is the same scale documented in full in
+`docs/ADMIN_GENERATION_NUDITY_INTEGRATION.md` (2026-07-09 addendum there) — the two
+surfaces (single-photo generation and story batches) now share one 5-stop scale.
+Everywhere `max_nudity` / `start_nudity` are set (§4.3) or `scene_spec.nudityLevel` is
+displayed (§4.4), all 5 values are valid; the nudity-arc semantics from the addendum
+above (guided ceiling, monotonically non-decreasing) are unchanged — just walking a
+finer-grained 5-stop ladder instead of 3.
+
+### `controls.period_days` — how many days the story spans
+
+```jsonc
+"controls": {
+  "period_days": 3   // NEW — optional int, 1–7, default 1
+}
+```
+
+- `period_days: 1` (default) — today's behavior, unchanged: a single curated
+  wake→sleep day (early morning through night).
+- `period_days: N` (2–7) — N day-cycles, each with **different** activities, so the
+  batch reads like a real multi-day life (a workday, a day off, errands, a night out)
+  instead of one day's beats stretched thin.
+- `time_of_day` across the batch is now curated as a **monotonic progression** for the
+  whole span — it no longer bounces around within a day. For `period_days > 1`, the
+  early_morning → night progression repeats once per day-cycle.
+
+Omitting `period_days` (or sending `1`) is fully back-compatible with today's
+single-day planning — this is purely additive.

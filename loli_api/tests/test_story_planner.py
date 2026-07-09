@@ -487,6 +487,162 @@ def test_manual_path_bypasses_ramp_and_variety():
     assert out[0].pose == out[1].pose == PoseType.STANDING_LEANING  # variety bypassed
 
 
+# --- time ramp derivation (period_days timeline) ---
+def test_time_ramp_single_day_is_monotonic_dawn_to_night():
+    ramp = sp._time_ramp(8, period_days=1)
+    assert len(ramp) == 8
+    idxs = [sp._time_index(t) for t in ramp]
+    assert idxs == sorted(idxs), f"time bounced: {idxs}"     # monotonic non-decreasing
+    assert ramp[0] == TimeOfDayType.EARLY_MORNING            # starts at dawn
+    assert ramp[-1] == TimeOfDayType.NIGHT                   # ends at night
+
+
+def test_time_ramp_multi_day_resets_each_day():
+    ramp = sp._time_ramp(24, period_days=3)
+    assert len(ramp) == 24
+    sizes = sp._day_sizes(24, 3)
+    assert sizes == [8, 8, 8]
+    start = 0
+    for size in sizes:
+        seg = ramp[start:start + size]
+        idxs = [sp._time_index(t) for t in seg]
+        assert seg[0] == TimeOfDayType.EARLY_MORNING         # each day resets to dawn
+        assert seg[-1] == TimeOfDayType.NIGHT                # each day ends at night
+        assert idxs == sorted(idxs)                          # monotonic within the day
+        start += size
+    # across a day boundary the time DROPS (late -> dawn), proving the reset.
+    assert sp._time_index(ramp[8]) < sp._time_index(ramp[7])
+
+
+def test_time_ramp_short_days_spread_and_reset():
+    # count < 7*period_days: still monotonic per day, spread across the ladder.
+    ramp = sp._time_ramp(6, period_days=2)
+    assert len(ramp) == 6
+    for start in (0, 3):
+        seg = ramp[start:start + 3]
+        idxs = [sp._time_index(t) for t in seg]
+        assert idxs == sorted(idxs)                          # monotonic within the day
+        assert seg[0] == TimeOfDayType.EARLY_MORNING
+        assert seg[-1] == TimeOfDayType.NIGHT
+        assert len(set(idxs)) == 3                           # a 3-beat day spreads, not clustered
+
+
+def test_time_ramp_count_one_is_single_reasonable_value():
+    ramp = sp._time_ramp(1, period_days=1)
+    assert len(ramp) == 1
+    assert ramp[0] in set(TimeOfDayType)                     # a real time, no crash / no None
+
+
+def test_nearest_time_in_pool_snaps_to_closest_allowed():
+    T = TimeOfDayType
+    assert sp._nearest_time_in_pool(T.NIGHT, (T.EVENING, T.NIGHT)) == T.NIGHT       # exact -> as-is
+    assert sp._nearest_time_in_pool(T.NIGHT, (T.MORNING, T.DAYTIME)) == T.DAYTIME   # absent -> nearest
+    assert sp._nearest_time_in_pool(T.DAYTIME, (T.MORNING, T.GOLDEN_HOUR)) == T.MORNING  # tie -> earlier
+    assert sp._nearest_time_in_pool(T.DAYTIME, ()) == T.DAYTIME                     # empty -> unchanged
+
+
+# --- deterministic planner: chronological time_of_day (the reported bug) ---
+def test_deterministic_time_of_day_non_decreasing_single_day():
+    # Core regression: time_of_day used to be rng.choice per beat and BOUNCED within a
+    # block. Curated onto the day ramp, it must now flow forward — non-decreasing across
+    # the whole single-day run.
+    char = _character()
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 12, BatchControls(base_seed=7))
+    idxs = [sp._time_index(s.time_of_day) for s in scenes]
+    assert idxs == sorted(idxs), f"time bounced: {[s.time_of_day.value for s in scenes]}"
+    assert idxs[0] == sp._time_index(TimeOfDayType.EARLY_MORNING)  # opens at dawn
+
+
+def test_deterministic_time_stays_in_beat_pool():
+    # Coherence guard: the curated time never leaves the beat's own hand-authored pool
+    # (nearest-allowed fallback), so no incoherent forced value.
+    char = _character(occupation="nurse")
+    controls = BatchControls(base_seed=3)
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 20, controls)
+    slots = sp._beat_slots(char, 20, controls)
+    for s, slot in zip(scenes, slots):
+        assert s.time_of_day in slot.tmpl.time_pool
+
+
+def test_deterministic_multi_day_resets_and_rotates_arcs():
+    char = _character(occupation="nurse")
+    controls = BatchControls(base_seed=7, period_days=3)
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 24, controls)
+    assert len(scenes) == 24
+    sizes = sp._day_sizes(24, 3)
+    bounds = []
+    acc = 0
+    for size in sizes:
+        bounds.append(acc)
+        acc += size
+    # Each new day resets time downward from the previous day's late finish.
+    for k in range(1, len(sizes)):
+        first_of_day = bounds[k]
+        last_of_prev = bounds[k] - 1
+        assert sp._time_index(scenes[first_of_day].time_of_day) < \
+            sp._time_index(scenes[last_of_prev].time_of_day), "no time reset at day boundary"
+    # Day 1 is the occupation day; days 2+ draw from the leisure pools -> NOT all one set.
+    day1_arc_ids = {scenes[i].arc_id for i in range(bounds[0], bounds[1])}
+    assert not all(s.arc_id in day1_arc_ids for s in scenes), "days 2+ reused the day-1 arcs"
+    all_arc_ids = {s.arc_id for s in scenes}
+    assert all_arc_ids & {"lazy_day_home", "errands_and_cafe", "friends_and_date"}, \
+        "no leisure arc appeared on the later days"
+
+
+def test_deterministic_wrapped_beats_are_not_verbatim_repeats():
+    # A short arc stretched over more beats than it authored used to emit byte-identical
+    # beat_description text (the reported verbatim-repeat bug). The wrapped cycle now
+    # gets a light positional variation so no two captions in the run are identical.
+    char = _character(occupation="nurse")  # morning_home arc has 3 beats, sized 6 -> wraps
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 12, BatchControls(base_seed=7))
+    within_arc = [s.beat_description for s in scenes if s.arc_id == "morning_home"]
+    assert len(within_arc) > len(set(within_arc[:3]))       # the arc really does wrap
+    assert len(within_arc) == len(set(within_arc))          # yet every caption is distinct
+
+
+# --- validate_and_repair time enforcement (safety net) ---
+def test_validate_enforces_time_ramp_and_manual_bypasses():
+    char = _character()
+    # Six flat home scenes all wrongly stamped NIGHT (an LLM ignoring the TIME PLAN).
+    scattered = [
+        SceneSpec(arc_id="a", arc_title="A", beat_index=i, global_index=i, beat_description="b",
+                  location=LocationType.HOME_BEDROOM, time_of_day=TimeOfDayType.NIGHT)
+        for i in range(6)
+    ]
+    controls = BatchControls(base_seed=1)
+    # enforce_beat_pool=False (director path) -> no pool constrains time, ramp applied outright.
+    on = validate_and_repair([s.model_copy(deep=True) for s in scattered], char, 6, controls,
+                             enforce_beat_pool=False)
+    assert [s.time_of_day for s in on] == sp._time_ramp(6, 1)   # curated onto the ramp
+    assert any(s.time_of_day != TimeOfDayType.NIGHT for s in on)
+    # Manual path (enforce_time_ramp=False) leaves the times exactly as supplied.
+    off = validate_and_repair([s.model_copy(deep=True) for s in scattered], char, 6, controls,
+                              enforce_beat_pool=False, enforce_nudity_ramp=False,
+                              enforce_variety=False, enforce_time_ramp=False)
+    assert all(s.time_of_day == TimeOfDayType.NIGHT for s in off)
+
+
+# --- nudity ladder fix (5-level) regression ---
+def test_nudity_ramp_reaches_revealing_after_ladder_fix():
+    # The stale 3-level ladder silently collapsed 'revealing' to an all-LOW ramp.
+    ramp = _nudity_ramp(5, BatchControls(max_nudity="revealing", escalation="building"))
+    idxs = [_nudity_index(x) for x in ramp]
+    assert idxs == sorted(idxs)                       # graded, non-decreasing
+    assert ramp[0] == NudityLevel.LOW
+    assert ramp[-1] == NudityLevel.REVEALING          # actually reaches revealing (not LOW)
+    assert len(set(idxs)) > 1                          # a real ramp, not collapsed
+
+
+def test_nudity_ramp_spans_suggestive_to_high():
+    # start=suggestive, max=high spans the new 5-level ladder end to end.
+    ramp = _nudity_ramp(5, BatchControls(start_nudity="suggestive", max_nudity="high"))
+    assert ramp[0] == NudityLevel.SUGGESTIVE
+    assert ramp[-1] == NudityLevel.HIGH
+    idxs = [_nudity_index(x) for x in ramp]
+    assert idxs == sorted(idxs)
+    assert NudityLevel.REVEALING in ramp               # traverses the new mid-high level
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

@@ -18,7 +18,13 @@ from services import scene_vocab as sv
 from services import attribute_phrases as ap
 from services import prompt_constants as pc
 
-_NUDITY_LADDER = [NudityLevel.LOW, NudityLevel.MEDIUM, NudityLevel.HIGH]
+_NUDITY_LADDER = [
+    NudityLevel.LOW,
+    NudityLevel.SUGGESTIVE,
+    NudityLevel.MEDIUM,
+    NudityLevel.REVEALING,
+    NudityLevel.HIGH,
+]
 
 
 def _val(v):

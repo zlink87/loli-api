@@ -3,7 +3,7 @@
 **Audience:** the agent/developer building the **admin panel frontend** (separate repo).
 **Backend status:** shipped and on `main` (commit `248a343d`). API is additive and back-compatible — the current admin panel keeps working unchanged; this work order only *adds* controls that expose new capability.
 
-**Source of truth for the contract:** [`docs/ADMIN_STORY_BATCHES_INTEGRATION.md`](./ADMIN_STORY_BATCHES_INTEGRATION.md) — read §3 (endpoints), §4 (request/response shapes), §7 (enums), and the **Addendum (2026-07-09)** at the bottom. `/openapi.json` is canonical for enum option lists. This work order tells you *what UI to build*; that doc tells you *the exact field shapes*.
+**Source of truth for the contract:** [`docs/ADMIN_STORY_BATCHES_INTEGRATION.md`](./ADMIN_STORY_BATCHES_INTEGRATION.md) — read §3 (endpoints), §4 (request/response shapes), §7 (enums), and the **Addenda (2026-07-09)** at the bottom (there are two: "nudity arc, structured description channels, outfit strength" and "5-level nudity scale + `period_days`"). `/openapi.json` is canonical for enum option lists. This work order tells you *what UI to build*; that doc tells you *the exact field shapes*.
 
 ---
 
@@ -27,11 +27,12 @@ All additions live on `controls` (in `BatchCreate`) or in each item's `scene_spe
 
 | New field | Where | Type / range | Purpose |
 |---|---|---|---|
-| `start_nudity` | `controls` | `"low"｜"medium"｜"high"｜null` | Photo 1's nudity; ramps up to `max_nudity`. **The nudity-arc START handle.** |
+| `start_nudity` | `controls` | `"low"｜"suggestive"｜"medium"｜"revealing"｜"high"｜null` | Photo 1's nudity; ramps up to `max_nudity`. **The nudity-arc START handle.** (5-stop scale — see the 2026-07-09 "5-level nudity scale" addendum.) |
 | `outfit_denoise` | `controls` | `float 0.5–0.95｜null` | Outfit-change strength (advanced). |
 | `outfit_prompt_mode` | `controls` | `"standard"｜"replace"` | "replace" = remove current clothing first (advanced). |
 | `outfit_detail` | item `scene_spec` | `string｜null` (≤160) | Concrete garment description for that photo (display only). |
 | `expression` | item `scene_spec` | `string｜null` (≤80) | That photo's facial expression/mood (display only). |
+| `period_days` | `controls` | `int 1–7` (default `1`) | Number of day-cycles the story spans. **See WI-7.** |
 
 `max_nudity` already existed and is now **both** the hard ceiling **and** the nudity-arc FINISH handle.
 
@@ -41,18 +42,18 @@ All additions live on `controls` (in `BatchCreate`) or in each item's `scene_spe
 
 ### WI-1 — Nudity arc control (**required**; this is the headline feature)
 
-**Build:** in the **Batch launch modal**, replace the single `max_nudity` dropdown with a **two-handle "Nudity arc" control**: a **Start** handle and a **Finish** handle over three stops.
+**Build:** in the **Batch launch modal**, replace the single `max_nudity` dropdown with a **two-handle "Nudity arc" control**: a **Start** handle and a **Finish** handle over five stops.
 
-- Stops (3): `low` = **Fully clothed** · `medium` = **Partial nudity** · `high` = **Full nudity**. (Use these labels — they match the generation-nudity admin doc.)
+- Stops (5, least→most explicit): `low` = **Fully clothed** · `suggestive` = **Suggestive** · `medium` = **Partial nudity** · `revealing` = **Mostly nude** · `high` = **Full nudity**. (Use these labels — they match the generation-nudity admin doc's 2026-07-09 addendum.)
 - **Start handle → `controls.start_nudity`**, **Finish handle → `controls.max_nudity`**.
-- **Constraint:** Start ≤ Finish (never allow Start above Finish).
+- **Constraint:** Start ≤ Finish on the 5-stop scale (never allow Start above Finish).
 - **Send both values explicitly** on submit. You may leave `escalation` at its default `"building"` — an explicit `start_nudity` overrides the escalation derivation anyway.
 - **Copy under the control:** "The story stays at the Start level and builds up to the Finish level across the set. It can stay lower when a scene calls for it (e.g. at work), but never escalates past the per-photo target." (This is the *guided-ceiling* semantics — see the 07-09 addendum.)
-- **Presets** (nice UX): "No nudity" (low→low), "Slow build" (low→high), "Spicy throughout" (medium→high), "Constant" (X→X). These are just handle positions.
+- **Presets** (nice UX): "No nudity" (low→low), "Slow build" (low→high), "Spicy throughout" (medium→high), "Constant" (X→X). These are just handle positions — with 5 stops available you can also offer finer ones, e.g. "Tease" (low→suggestive) or "Bare it all" (revealing→high).
 - **`sfw_only` toggle interaction:** when `sfw_only` is ON (or `content_rating: "sfw"`), force both handles to `low` and disable the control.
 
 **Acceptance criteria:**
-- Launching low→high on an 8-photo batch and opening the dry-run storyboard shows `scene_spec.nudityLevel` **non-decreasing**, starting `low`, reaching `high` by the end.
+- Launching low→high on an 8-photo batch and opening the dry-run storyboard shows `scene_spec.nudityLevel` **non-decreasing** across all 5 stops, starting `low`, reaching `high` by the end.
 - Setting Start = Finish = `medium` yields all-`medium` items.
 - `sfw_only` forces every item to `low` regardless of handle positions.
 
@@ -71,7 +72,7 @@ All additions live on `controls` (in `BatchCreate`) or in each item's `scene_spe
 **Build:** on each storyboard/item card (dry-run preview **and** results grid), in addition to the existing `outfit · pose · narrative`, surface from `scene_spec`:
 - **`outfit_detail`** as the garment caption when present (fall back to the `outfit` enum label when `null`).
 - **`expression`** as a small mood tag when present.
-- **`nudityLevel`** as a small badge (Fully clothed / Partial / Full) — this makes the arc *visible* as you scan the set.
+- **`nudityLevel`** as a small badge (Fully clothed / Suggestive / Partial nudity / Mostly nude / Full nudity) — this makes the arc *visible* as you scan the set.
 
 **Notes:** both new fields are `null` on the deterministic-fallback planner (only the Venice story director authors them) — render nothing when `null`, never show "null". Occasionally (~1 in 8) the LLM's `outfit_detail` may not perfectly match the `outfit` enum; the enum label is the reliable one, so prefer it if you only show one.
 
@@ -92,6 +93,19 @@ The fields already exist in `PersonaOptions` (§4.1 of the contract doc) — no 
 ### WI-6 — Tier/health awareness (optional; ops-facing)
 
 If outfit changes look weak/absent across a whole batch, that's usually a backend deployment issue (the outfit step running on the weak `v1` tier), **not** something `outfit_denoise` fixes. Backend ops can check `GET /debug/workflow-config` (debug builds only). If you want, surface a subtle "outfit rendering degraded" admin banner when support flags it — but this is not a required input.
+
+### WI-7 — Period / days control (recommended; small UX addition)
+
+**Build:** in the **Batch launch modal**, add a small stepper or segmented control labeled e.g. "Story length" for `controls.period_days`, ranging **1–7** (default **1**), sending `controls.period_days` on submit (omit or send `1` for today's behavior).
+
+- `1` — a single curated day (wake → sleep, early morning through night). Today's behavior, unchanged.
+- `2`–`7` — that many day-cycles, each with **different** activities (e.g. a workday, a day off, errands, a night out) rather than one day's beats stretched thin.
+- Helper copy: "How many days this story spans. More days means more variety — each day gets its own activities."
+- The storyboard's `time_of_day` tags now flow chronologically across the whole span (they no longer bounce within a day); for `period_days > 1` the early_morning→night progression repeats once per day-cycle. This is a scene-planning consequence of the control, not a separate field to build.
+
+**Acceptance criteria:**
+- Omitting `period_days` (or sending `1`) behaves identically to today.
+- Launching with `period_days: 3` and opening the dry-run storyboard shows `time_of_day` tags progressing chronologically and repeating that progression roughly once per day-cycle, with visibly different activities/locations per cycle rather than one stretched-out day.
 
 ---
 
@@ -139,7 +153,7 @@ Recommended flow stays the same: **Preview** (`dry_run:true`) → render storybo
 
 - **Never send appearance/identity text into a batch.** No face/hair/body/age/ethnicity descriptions anywhere. Identity is pixel-locked to the hero photo; the backend scrubs stray appearance words. The admin only picks *controls* and *traits*; the planner authors the scenes.
 - **The admin never inputs scene enums** (outfit/pose/location per photo) for story batches — the planner chooses them. `allowed_/blocked_` lists are the only scene-vocab levers, and they already exist.
-- **`start_nudity` ≤ `max_nudity`** always.
+- **`start_nudity` ≤ `max_nudity`** always (compared on the 5-stop scale: low < suggestive < medium < revealing < high).
 - **Everything additive** — if the panel sends no new fields, batches behave exactly as before.
 
 ---
@@ -152,10 +166,11 @@ Pull option lists from `/openapi.json → components.schemas`: `NudityLevel`, `O
 
 ## 6. Definition of done
 
-- [ ] Nudity-arc two-handle control (WI-1) sends `start_nudity` + `max_nudity`; verified via dry-run storyboard (non-decreasing arc; `sfw_only` forces low).
+- [ ] Nudity-arc two-handle control (WI-1, 5-stop: low/suggestive/medium/revealing/high) sends `start_nudity` + `max_nudity`; verified via dry-run storyboard (non-decreasing arc; `sfw_only` forces low).
 - [ ] Advanced outfit controls (WI-2) present, default to Auto/Standard, omitted/`null` when untouched.
 - [ ] Storyboard cards show `outfit_detail` / `expression` / `nudityLevel` when present, degrade cleanly when `null` (WI-3).
 - [ ] Character form surfaces occupation/relationship/personality/kinks with the "shapes her story" hint (WI-4).
 - [ ] Likes/dislikes re-sent on every launch (WI-5).
+- [ ] Period/days control (WI-7) sends `controls.period_days` (1–7); omitted or `1` behaves identically to today.
 - [ ] No appearance text ever enters a batch request; existing batches (no new fields) still work.
 ```

@@ -39,7 +39,7 @@ Three **new, optional** fields on the request body — all top-level (siblings o
 
 | Field         | Type              | Default   | Meaning |
 |---------------|-------------------|-----------|---------|
-| `nudityLevel` | enum string       | `"low"`   | `low` = fully clothed · `medium` = partial exposure · `high` = nude |
+| `nudityLevel` | enum string       | `"low"`   | 5-level scale, least→most explicit: `low` = fully clothed · `suggestive` = teasing · `medium` = partial · `revealing` = mostly nude · `high` = nude (full table in the 2026-07-09 addendum) |
 | `outfit`      | enum string \| null | `null`  | Specific outfit to generate in. `null` → a neutral outfit at the chosen `nudityLevel` |
 | `accessories` | array of enum strings (max 5) \| null | `null` | Accessories to add |
 
@@ -49,10 +49,12 @@ they now attach to the generation form instead of the edit form.
 
 ### Enum values (identical to the Outfit Edit tab)
 
-`nudityLevel` (radio — mirror the edit tab's labels):
-- `low` — "Low · Suggestive / clothed"
-- `medium` — "Medium · Partial nudity"
-- `high` — "High · Full nudity"
+`nudityLevel` (radio — mirror the edit tab's labels; 5 stops, least→most explicit):
+- `low` — "Fully clothed"
+- `suggestive` — "Suggestive"
+- `medium` — "Partial nudity"
+- `revealing` — "Mostly nude"
+- `high` — "Full nudity"
 
 `accessories` (multi-select chips, max 5): `necklace`, `earrings`, `glasses`, `hat`,
 `sunglasses`
@@ -83,7 +85,7 @@ Add a section (or reuse the Outfit-tab layout) with, in order:
 
 1. **Outfit** — dropdown, optional. Include an explicit "Auto / none" option that maps
    to omitting `outfit` (or sending `null`). Label it e.g. "Default (auto)".
-2. **Nudity Level** — radio, three options, default **Low**. Same labels/order as the
+2. **Nudity Level** — radio, five options, default **Low**. Same labels/order as the
    Outfit Edit tab.
 3. **Accessories** — up to 5 chips (same component as the edit tab).
 
@@ -132,8 +134,13 @@ Response and polling are unchanged (`202` + `jobId` → poll `GET /v1/jobs/{jobI
 - **`low`** → character is fully clothed; the backend also suppresses nudity in the
   negative prompt. Skimpy-but-clothed outfits (bikini, sheer summer dress, lace
   bodysuit) still render correctly — only actual body exposure is suppressed.
+- **`suggestive`** → clothed but teasing: tight/short fits, cleavage, a hint of skin.
+  Sits between `low` and `medium` — more revealing than plainly clothed, still no real
+  exposure.
 - **`medium`** → partial exposure per the outfit's mid-level description; only explicit
   full-frontal nudity is suppressed.
+- **`revealing`** → largely exposed, covering little. Sits between `medium` and
+  `high` — more exposed than partial, short of full nudity.
 - **`high`** (or `outfit: "naked"`) → nude output; nothing suppressed.
 - **`outfit` omitted** → neutral outfit at the chosen level (clothed at `low`).
 - **`outfit` + `nudityLevel` together** → the outfit is rendered at that nudity grade
@@ -157,10 +164,33 @@ Response and polling are unchanged (`202` + `jobId` → poll `GET /v1/jobs/{jobI
 ## 6. Definition of done
 
 - [ ] Generation form renders Outfit dropdown (with an "auto/none" option), Nudity radio
-      (default Low), and Accessories chips (max 5) — reusing the Outfit Edit tab
+      (5-stop, default Low), and Accessories chips (max 5) — reusing the Outfit Edit tab
       components.
 - [ ] The three fields are sent on `POST /v1/generate/image` (omitted/null when unset).
 - [ ] NSFW gating (if any) applies to `nudityLevel=high` and `outfit=naked` consistently
       with the Outfit Edit tab.
 - [ ] Existing `context` free-text box retained.
 - [ ] Options sourced from `/openapi.json` where practical rather than hard-coded.
+
+---
+
+## Addendum (2026-07-09): nudity scale expanded to 5 levels
+
+`nudityLevel` now has **5** values instead of 3. `low` / `medium` / `high` are
+unchanged — same enum values, same meaning — so any existing integration keeps
+working untouched. `suggestive` and `revealing` are new, slotting in as a finer step
+between `low`↔`medium` and `medium`↔`high` respectively:
+
+| value | admin label | meaning |
+|---|---|---|
+| `low` | Fully clothed | fully dressed |
+| `suggestive` | Suggestive | clothed but teasing — tight/short, cleavage, hint of skin |
+| `medium` | Partial nudity | unbuttoned/lingerie, some exposure |
+| `revealing` | Mostly nude | largely exposed, covering little |
+| `high` | Full nudity | full nudity |
+
+Update the Nudity Level radio (§2) and any other `nudityLevel` UI to all 5 stops, in
+this order, using the admin labels above. This is the same 5-value scale used by Story
+Batches' nudity-arc control (`max_nudity` / `start_nudity` in
+`docs/ADMIN_STORY_BATCHES_INTEGRATION.md`) — both surfaces should read as one
+consistent scale to the admin.

@@ -286,9 +286,23 @@ NUDITY_SUPPRESSION = {
         "exposed nipples, bare breasts, exposed genitals, exposed vulva, "
         "exposed buttocks, bare ass, full frontal nudity"
     ),
+    # Between low and medium: still fully blocks explicit/overt nudity (nipples,
+    # genitals, total nudity) but drops low's broader breast/buttocks terms so a
+    # still-clothed SUGGESTIVE outfit can show tease — cleavage, sideboob, bare skin.
+    "suggestive": (
+        "nude, naked, fully nude, exposed nipples, exposed genitals, "
+        "exposed vulva, full frontal nudity"
+    ),
     "medium": (
         "full frontal nudity, fully nude, completely naked, exposed genitals, "
         "exposed vulva, spread legs, explicit"
+    ),
+    # Between medium and high: only the core genital/full-frontal block remains —
+    # lighter than medium (drops "fully nude", "completely naked", "spread legs",
+    # "explicit"), heavier than high's empty string. Matches REVEALING's "mostly
+    # nude, covering little" — a last sliver of coverage may still remain.
+    "revealing": (
+        "exposed genitals, exposed vulva, full frontal nudity"
     ),
     "high": "",
 }

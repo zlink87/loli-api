@@ -295,6 +295,132 @@ NIGHT_OUT_ARC = ArcTemplate(
 )
 
 
+# --- Leisure / day-off arcs (multi-day stories) ------------------------------
+# Drawn on days 2+ of a period_days>1 batch (see leisure_arcs_for_day). Day 1 stays
+# built around her occupation (ARC_TEMPLATES); these are the OTHER real days — a day
+# off, errands, a night out with friends — so a multi-day story doesn't just repeat
+# the same workday. Same structural shape/conventions as the shared arcs above.
+LAZY_DAY_HOME_ARC = ArcTemplate(
+    arc_id="lazy_day_home",
+    arc_title="A lazy day off at home",
+    beats=(
+        BeatTemplate(
+            "Sleeping in, tangled in soft sheets",
+            (P.LYING_STOMACH, P.LYING_BACK, P.SITTING),
+            (O.SILK_PAJAMAS, O.SATIN_ROBE, O.OVERSIZED_STREETWEAR),
+            (L.HOME_BEDROOM,),
+            (T.EARLY_MORNING, T.MORNING),
+            (Li.NATURAL_SOFT, Li.OVERCAST),
+            "low",
+        ),
+        BeatTemplate(
+            "A slow brunch, still in comfies",
+            (P.EATING, P.STANDING_LEANING, P.SITTING),
+            (O.GRAPHIC_TEE_SHORTS, O.HOODIE_JOGGERS, O.SILK_PAJAMAS),
+            (L.HOME_KITCHEN, L.HOME_LIVING_ROOM),
+            (T.MORNING, T.DAYTIME),
+            (Li.NATURAL_SOFT, Li.BRIGHT_DAYLIGHT),
+            "low",
+        ),
+        BeatTemplate(
+            "Lazing on the sofa with a book",
+            (P.SOFA, P.LYING_BACK, P.HANDS_BEHIND_HEAD),
+            (O.OVERSIZED_STREETWEAR, O.GRAPHIC_TEE_SHORTS, O.SATIN_SLIP_DRESS),
+            (L.HOME_LIVING_ROOM, L.HOME_BALCONY),
+            (T.DAYTIME, T.GOLDEN_HOUR),
+            (Li.NATURAL_SOFT, Li.GOLDEN_WARM),
+            "low",
+        ),
+        BeatTemplate(
+            "A long soak as the day winds down",
+            (P.SITTING, P.LYING_BACK, P.KNEELING),
+            (O.SATIN_ROBE, O.LACE_BODYSUIT, O.SILK_PAJAMAS),
+            (L.HOME_BATHROOM, L.HOME_BEDROOM),
+            (T.EVENING, T.NIGHT),
+            (Li.CANDLELIT, Li.MOODY_DIM),
+            "escalate",
+        ),
+    ),
+)
+
+ERRANDS_CAFE_ARC = ArcTemplate(
+    arc_id="errands_and_cafe",
+    arc_title="Errands and a cafe afternoon",
+    beats=(
+        BeatTemplate(
+            "Heading out to run errands",
+            (P.STANDING_LEANING, P.JOGGING),
+            (O.DENIM_JACKET_JEANS, O.CROP_TOP_CARGO, O.WHITE_SUMMER_DRESS),
+            (L.CITY_STREET, L.PARK),
+            (T.MORNING, T.DAYTIME),
+            (Li.BRIGHT_DAYLIGHT, Li.NATURAL_SOFT),
+            "low",
+        ),
+        BeatTemplate(
+            "Coffee and people-watching at a cafe",
+            (P.SITTING, P.EATING, P.STANDING_LEANING),
+            (O.WHITE_SUMMER_DRESS, O.CROP_TOP_CARGO, O.FLORAL_MAXI_DRESS),
+            (L.CAFE, L.RESTAURANT),
+            (T.DAYTIME, T.GOLDEN_HOUR),
+            (Li.NATURAL_SOFT, Li.GOLDEN_WARM),
+            "low",
+        ),
+        BeatTemplate(
+            "A wander through the park as the light turns gold",
+            (P.STANDING_LEANING, P.HANDS_BEHIND_HEAD, P.SITTING),
+            (O.FLORAL_MAXI_DRESS, O.SATIN_SLIP_DRESS, O.DENIM_JACKET_JEANS),
+            (L.PARK, L.GARDEN, L.ROOFTOP),
+            (T.GOLDEN_HOUR, T.SUNSET),
+            (Li.GOLDEN_WARM, Li.BACKLIT_RIM),
+            "medium",
+        ),
+    ),
+)
+
+FRIENDS_DATE_NIGHT_ARC = ArcTemplate(
+    arc_id="friends_and_date",
+    arc_title="Friends, then a date night",
+    beats=(
+        BeatTemplate(
+            "Getting ready for the evening",
+            (P.STANDING_LEANING, P.HANDS_BEHIND_HEAD, P.SITTING),
+            (O.SATIN_SLIP_DRESS, O.LITTLE_BLACK_DRESS, O.COCKTAIL_DRESS),
+            (L.HOME_BEDROOM, L.HOTEL_ROOM),
+            (T.EVENING,),
+            (Li.MOODY_DIM, Li.GOLDEN_WARM),
+            "low",
+        ),
+        BeatTemplate(
+            "Drinks and laughter with friends",
+            (P.SITTING, P.STANDING_LEANING),
+            (O.COCKTAIL_DRESS, O.SEQUIN_TOP_SKIRT, O.LITTLE_BLACK_DRESS),
+            (L.BAR, L.LUXURY_LOUNGE, L.RESTAURANT),
+            (T.EVENING, T.NIGHT),
+            (Li.MOODY_DIM, Li.NEON),
+            "low",
+        ),
+        BeatTemplate(
+            "An intimate dinner for two",
+            (P.SITTING, P.EATING, P.STANDING_LEANING),
+            (O.VELVET_DRESS, O.BODYCON_DRESS, O.SATIN_SLIP_DRESS),
+            (L.RESTAURANT,),
+            (T.NIGHT,),
+            (Li.CANDLELIT, Li.MOODY_DIM),
+            "medium",
+        ),
+        BeatTemplate(
+            "Back home, the night turns private",
+            (P.LYING_BACK, P.KNEELING, P.SITTING_LEGS_WIDE_OPEN),
+            (O.LACE_BODYSUIT, O.SATIN_ROBE, O.SATIN_SLIP_DRESS),
+            (L.HOME_BEDROOM, L.HOTEL_ROOM),
+            (T.NIGHT,),
+            (Li.CANDLELIT, Li.MOODY_DIM),
+            "escalate",
+        ),
+    ),
+)
+
+
 GENERIC_ARCS: Tuple[ArcTemplate, ...] = (
     MORNING_HOME_ARC,
     OUT_AND_ABOUT_ARC,
@@ -332,6 +458,33 @@ ARC_TEMPLATES: Dict[str, Tuple[ArcTemplate, ...]] = {
     "maid": (MORNING_HOME_ARC, OUT_AND_ABOUT_ARC, EVENING_UNWIND_ARC),
     "flight_attendant": (OUT_AND_ABOUT_ARC, NIGHT_OUT_ARC, EVENING_UNWIND_ARC),
 }
+
+
+# Leisure/day-off pool for the non-first days of a multi-day story. Day 1 stays on
+# the occupation arcs (ARC_TEMPLATES); days 2+ rotate through THESE so each day feels
+# like a different real day (see leisure_arcs_for_day / story_planner._plan_arcs).
+LEISURE_ARCS: Tuple[ArcTemplate, ...] = (
+    LAZY_DAY_HOME_ARC,
+    ERRANDS_CAFE_ARC,
+    FRIENDS_DATE_NIGHT_ARC,
+)
+
+
+def leisure_arcs_for_day(day_index: int) -> Tuple[ArcTemplate, ...]:
+    """
+    The leisure/day-off arc pool for a non-first day, rotated so consecutive days
+    LEAD with a different theme (a lazy day, then errands, then a night out...) —
+    a multi-day batch reads as different real days, not the same day off repeated.
+
+    ``day_index`` is 0-based over the whole story where day 0 is her occupation day
+    (handled by the caller); this is only called for day_index >= 1. Rotation is a
+    pure function of the index (offset = (day_index-1) mod len), so a batch replans
+    identically. Empty pool would fall back to GENERIC_ARCS (defensive).
+    """
+    if not LEISURE_ARCS:
+        return GENERIC_ARCS
+    offset = (day_index - 1) % len(LEISURE_ARCS)
+    return LEISURE_ARCS[offset:] + LEISURE_ARCS[:offset]
 
 
 # ---------------------------------------------------------------------------
