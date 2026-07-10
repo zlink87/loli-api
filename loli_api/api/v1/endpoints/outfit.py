@@ -196,6 +196,7 @@ def build_prompt(
     prompt_mode: str = "standard",
     lighting: Optional[str] = None,
     detail_dominant: bool = False,
+    identity_anchors: Optional[str] = None,
 ) -> str:
     """
     Build the positive prompt from outfit and accessories.
@@ -259,6 +260,16 @@ def build_prompt(
             for every level above LOW so the nudity still renders without naming a garment.
             NAKED and empty-detail calls ignore this flag (unchanged behavior); default
             False everywhere else.
+        identity_anchors: Optional concrete identity-attribute phrase for THIS
+            character (e.g. from services.scene_mapper.identity_anchor_text —
+            "straight blonde hair, green eyes, curvy build with medium breasts").
+            D1: the outfit step re-diffuses the body region too, so a concrete
+            hair/build anchor helps identity fidelity there as well as at the pose
+            step. When set, appended right after ``pc.identity_clause(...)`` (on
+            BOTH the NAKED and dressed branches) as "she has {anchors}, kept
+            exactly unchanged". None/empty (interactive /v1/edit/outfit and any
+            caller without a character profile) appends nothing — unchanged
+            behavior.
 
     Returns:
         Complete prompt string
@@ -270,6 +281,13 @@ def build_prompt(
         outfit_desc = str(outfit.value)
 
     lighting_text = sv.lighting_phrase(lighting)
+    # D1: concrete per-character identity anchor, appended right after
+    # pc.identity_clause(...) on BOTH branches below (computed once here).
+    anchors_clause = (
+        f"she has {identity_anchors.strip()}, kept exactly unchanged"
+        if identity_anchors and identity_anchors.strip()
+        else None
+    )
 
     if outfit == OutfitType.NAKED:
         if prompt_mode == "nude_base":
@@ -290,8 +308,10 @@ def build_prompt(
         prompt_parts = [
             lead,
             pc.identity_clause("the clothing and covering"),
-            "only change the clothing and covering, nothing else",
         ]
+        if anchors_clause:
+            prompt_parts.append(anchors_clause)
+        prompt_parts.append("only change the clothing and covering, nothing else")
     else:
         # Dressed branch. In detail-dominant mode the garment description IS the caption
         # alone: the enum's tier prose named a DIFFERENT garment than the caption, so
@@ -326,8 +346,10 @@ def build_prompt(
         prompt_parts = [
             lead,
             pc.identity_clause("the outfit and clothing"),
-            "only change the clothing, nothing else",
         ]
+        if anchors_clause:
+            prompt_parts.append(anchors_clause)
+        prompt_parts.append("only change the clothing, nothing else")
 
     if accessories:
         accessory_parts = [

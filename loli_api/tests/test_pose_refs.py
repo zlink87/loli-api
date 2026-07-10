@@ -12,6 +12,13 @@ Covers:
   t4  B1 regression: pipeline _build_step_workflow("pose", ...) sets node 114 to
       build_pose_prompt(request.pose) (NOT the template's baked-in string), and an
       outfit step appends no pose reference entry.
+  t5  W3 regression: _build_step_workflow threads request.lighting/timeOfDay into
+      the pose step's node 114 prompt, and request.lighting into the outfit
+      step's node 16 prompt; a bare request (no attrs) stays byte-identical.
+  t6  D1/D2 regression: _build_step_workflow threads request.identityAnchors into
+      the pose step's node 114 prompt, and request.reactorRestoreVisibility /
+      reactorCodeformerWeight into node 200 (falling back to the settings
+      default, itself a -1.0 sentinel, when the request omits them).
 
 Runs under pytest AND under plain ``python tests/test_pose_refs.py`` (the
 __main__ block invokes each test function; pytest is not required).
@@ -63,12 +70,16 @@ def _fake_pose_template() -> dict:
     """
     Minimal pose workflow template with the nodes prepare_pose_workflow touches.
     Node 114 carries a distinctive baked-in string so t4 can prove it is replaced.
+    Node 200 carries the template's baked ReActor defaults (0.8/0.25, matching the
+    real edit_pose_action.json — see test_pose_debug.py) so t6 can prove the D2
+    reactor knobs override them.
     """
     return {
         "109": {"inputs": {"image": "PLACEHOLDER_SOURCE"}},
         "170": {"inputs": {"image": "PLACEHOLDER_REF"}},
         "114": {"inputs": {"prompt": "TEMPLATE_BAKED_IN_POSE_TEXT"}},
         "3": {"inputs": {"seed": 0, "steps": 4}},
+        "200": {"inputs": {"face_restore_visibility": 0.8, "codeformer_weight": 0.25}},
     }
 
 
@@ -345,6 +356,68 @@ def test_pipeline_step_workflow_threads_lighting_and_time_of_day():
 
 
 # ---------------------------------------------------------------------------
+# t6 — D1/D2 regression: pipeline pose step threads request.identityAnchors into
+# node 114 and request.reactorRestoreVisibility/reactorCodeformerWeight into
+# node 200 (falling back to the settings default — a -1.0 sentinel meaning
+# "leave the template's baked value alone" — when the request omits them).
+# ---------------------------------------------------------------------------
+def test_pipeline_pose_step_threads_identity_anchors_and_reactor_knobs():
+    from config import settings
+
+    worker = _make_pipeline_worker()
+    pose = PoseType.SITTING
+    ref_name = pose_assets.worker_filename(pose)
+
+    orig_visibility = settings.POSE_REACTOR_RESTORE_VISIBILITY
+    orig_weight = settings.POSE_REACTOR_CODEFORMER_WEIGHT
+    try:
+        # Pin the settings default to the -1.0 "no override" sentinel so the
+        # "omitted on the request" branch below is deterministic regardless of
+        # ambient .env configuration.
+        settings.POSE_REACTOR_RESTORE_VISIBILITY = -1.0
+        settings.POSE_REACTOR_CODEFORMER_WEIGHT = -1.0
+
+        request = _FakePipelineRequest(pose=pose)
+        request.identityAnchors = "straight blonde hair, green eyes, curvy build with medium breasts"
+        request.reactorRestoreVisibility = 0.6
+        request.reactorCodeformerWeight = 0.1
+
+        wf = worker._build_step_workflow(
+            "pose", request, "pipe_pose_src.png", seed=99, job_id="jobAnchors",
+            pose_ref_name=ref_name,
+        )
+        # identityAnchors reaches node 114, exactly as a direct build_pose_prompt call would.
+        assert wf["114"]["inputs"]["prompt"] == build_pose_prompt(
+            pose, identity_anchors=request.identityAnchors,
+        )
+        assert request.identityAnchors in wf["114"]["inputs"]["prompt"]
+
+        # reactor knobs on the request override the template's baked 0.8 / 0.25.
+        assert wf["200"]["inputs"]["face_restore_visibility"] == 0.6
+        assert wf["200"]["inputs"]["codeformer_weight"] == 0.1
+
+        # Omitted on the request (the pre-D1/D2 shape) -> node 114 has no anchors
+        # sentence, and node 200 falls back to the settings default (pinned to
+        # -1.0 above -> template's baked values left untouched).
+        bare_request = _FakePipelineRequest(pose=pose)
+        bare_wf = worker._build_step_workflow(
+            "pose", bare_request, "pipe_pose_src.png", seed=99, job_id="jobBareReactor",
+            pose_ref_name=ref_name,
+        )
+        assert bare_wf["114"]["inputs"]["prompt"] == build_pose_prompt(pose)
+        assert bare_wf["200"]["inputs"]["face_restore_visibility"] == 0.8
+        assert bare_wf["200"]["inputs"]["codeformer_weight"] == 0.25
+    finally:
+        settings.POSE_REACTOR_RESTORE_VISIBILITY = orig_visibility
+        settings.POSE_REACTOR_CODEFORMER_WEIGHT = orig_weight
+
+    print(
+        "t6 OK: identityAnchors reaches node 114; reactor knobs reach node 200; "
+        "omitted knobs fall back to the settings default"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -354,6 +427,7 @@ def _run_all():
         test_payload_under_cap,
         test_pipeline_pose_step_carries_prompt_and_no_ref_on_outfit,
         test_pipeline_step_workflow_threads_lighting_and_time_of_day,
+        test_pipeline_pose_step_threads_identity_anchors_and_reactor_knobs,
     ]
     failures = 0
     for fn in tests:

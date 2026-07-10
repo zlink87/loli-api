@@ -8,7 +8,7 @@ validator (which requires at least one of pose/outfit/prompt) never rejects.
 
 Pure and side-effect free -> unit-testable and safe to run in dry-run mode.
 """
-from typing import Optional
+from typing import List, Optional
 
 from models.enums import NudityLevel, OutfitType
 from models.batch import BatchControls, SeedStrategy
@@ -78,6 +78,73 @@ def _clean_scene_part(text: Optional[str]) -> Optional[str]:
     if not cleaned or pc.has_banned_style_words(cleaned):
         return None
     return cleaned
+
+
+def _norm_attr(v) -> Optional[str]:
+    """Raw enum-ish value -> plain text, with underscores normalized to spaces
+    (e.g. ``BreastSize.EXTRA_LARGE`` / "extra_large" -> "extra large"). None-safe."""
+    val = _val(v)
+    if not val:
+        return None
+    return str(val).replace("_", " ")
+
+
+def identity_anchor_text(character) -> Optional[str]:
+    """
+    Compact, concrete identity-anchor phrase built from ``character.persona``'s
+    drift-prone attributes: hair style+color, eye color, body type+breast size.
+
+    D1: across a story batch the pose step fully re-diffuses the frame guided only
+    by a GENERIC clause (prompt_constants.POSE_IDENTITY_CLAUSE — "keep the original
+    ... hair style, hair color, eye color ..."), which binds weakly on a distilled
+    edit model; hair structure/color and body proportions drift photo-to-photo as a
+    result. This helper turns the character's OWN attribute values into a short
+    factual list (e.g. "straight blonde hair, green eyes, curvy build with medium
+    breasts") that build_pose_prompt / outfit.build_prompt append as a concrete
+    per-character anchor alongside that generic clause.
+
+    Values are the raw enum-value strings with underscores normalized to spaces,
+    NOT the flowery attribute_phrases.py catalog — so any attribute value degrades
+    to plain text instead of silently vanishing when it isn't in a hand-curated map.
+
+    Deliberately excludes persona.name/age/ethnicity: those aren't the attributes
+    that drift frame-to-frame (hair/eyes/build are — see the PR6 background), and
+    age/ethnicity are already governed elsewhere (ADULT_APPEARANCE_NEGATIVE; the
+    locked ETHNICITY_PHRASES block at generation time).
+
+    Each of the three parts (hair / eyes / build+breasts) is included only when at
+    least one of its source attributes is present, so a partial profile degrades
+    gracefully. Returns None when ``character``/``character.persona`` is missing,
+    or none of the five attributes are set, so callers can skip the clause entirely
+    rather than emit an empty one.
+    """
+    persona = getattr(character, "persona", None)
+    if persona is None:
+        return None
+
+    hair_style = _norm_attr(getattr(persona, "hairStyle", None))
+    hair_color = _norm_attr(getattr(persona, "hairColor", None))
+    eye_color = _norm_attr(getattr(persona, "eyeColor", None))
+    body_type = _norm_attr(getattr(persona, "bodyType", None))
+    breast_size = _norm_attr(getattr(persona, "breastSize", None))
+
+    parts: List[str] = []
+    if hair_style and hair_color:
+        parts.append(f"{hair_style} {hair_color} hair")
+    elif hair_style or hair_color:
+        parts.append(f"{hair_style or hair_color} hair")
+
+    if eye_color:
+        parts.append(f"{eye_color} eyes")
+
+    if body_type and breast_size:
+        parts.append(f"{body_type} build with {breast_size} breasts")
+    elif body_type:
+        parts.append(f"{body_type} build")
+    elif breast_size:
+        parts.append(f"{breast_size} breasts")
+
+    return ", ".join(parts) if parts else None
 
 
 def resolve_seed(controls: BatchControls, scene_index: int) -> Optional[int]:
@@ -214,9 +281,21 @@ def scene_to_pipeline_request(
         lighting=_val(scene.lighting),
         timeOfDay=_val(scene.time_of_day),
         location=_val(scene.location),
+        # D1: concrete per-character identity anchors (hair/eyes/build), threaded to
+        # BOTH the pose and outfit steps. Unlike lighting/timeOfDay/location above,
+        # this is NOT identity-free — it carries the character's own attribute
+        # values so the pose step's full re-diffusion binds to something concrete
+        # instead of only the generic "keep the same hair…" clause. None when the
+        # persona has none of the five source attributes set.
+        identityAnchors=identity_anchor_text(character),
         prompt=background_text or None,
         negativePrompt=None,
         seed=seed,
         pipeline_order=controls.pipeline_order,
         photoStyle=controls.photo_style,
+        # D2: admin-tunable pose-step ReActor knobs (node 200). None = engine/
+        # settings default (see BatchControls.reactor_restore_visibility /
+        # reactor_codeformer_weight docstrings).
+        reactorRestoreVisibility=controls.reactor_restore_visibility,
+        reactorCodeformerWeight=controls.reactor_codeformer_weight,
     )

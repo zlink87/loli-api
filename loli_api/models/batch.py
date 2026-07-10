@@ -110,6 +110,26 @@ class BatchControls(BaseModel):
             "one scene per photo). Additive metadata only — never affects render fields."
         ),
     )
+    reactor_restore_visibility: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Pose-step ReActor face-restore knob (node 200 face_restore_visibility, "
+            "0.0-1.0). None = template default (~0.8). Pose-step ReActor face-restore "
+            "knobs — lower codeformer weight = less 'beautification' drift between items."
+        ),
+    )
+    reactor_codeformer_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Pose-step ReActor face-restore knob (node 200 codeformer_weight, "
+            "0.0-1.0). None = template default (~0.25). Pose-step ReActor face-restore "
+            "knobs — lower codeformer weight = less 'beautification' drift between items."
+        ),
+    )
 
 
 class BatchCreate(BaseModel):

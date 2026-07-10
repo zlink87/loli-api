@@ -690,6 +690,46 @@ class PipelineEditRequest(BaseModel):
             "active; ignored otherwise."
         ),
     )
+    identityAnchors: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional concrete identity-attribute phrase for THIS character (e.g. from "
+            "services.scene_mapper.identity_anchor_text — 'straight blonde hair, green "
+            "eyes, curvy build with medium breasts'), sourced from the character's own "
+            "persona attributes (hair/eyes/build) — never name/age/ethnicity. Appended "
+            "to BOTH the pose step's identity clause and the outfit step's identity "
+            "clause as a concrete per-character anchor: hair structure/color and body "
+            "proportions are the attributes that drift frame-to-frame on a distilled "
+            "edit model, and a generic 'keep the same hair' instruction binds far more "
+            "weakly than the character's actual hair color (D1). None (interactive "
+            "callers / no character profile) leaves both prompts unchanged."
+        ),
+    )
+    reactorRestoreVisibility: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional override for the pose step's ReActor face_restore_visibility "
+            "knob (node 200, 0.0-1.0). None = server default "
+            "(settings.POSE_REACTOR_RESTORE_VISIBILITY, itself a -1.0 sentinel meaning "
+            "'leave the template's baked ~0.8 alone' unless the deployment configures "
+            "it). D2."
+        ),
+    )
+    reactorCodeformerWeight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional override for the pose step's ReActor codeformer_weight knob "
+            "(node 200, 0.0-1.0). None = server default "
+            "(settings.POSE_REACTOR_CODEFORMER_WEIGHT, itself a -1.0 sentinel meaning "
+            "'leave the template's baked ~0.25 alone' unless the deployment configures "
+            "it). Lower = less 'beautification' drift between batch items. D2."
+        ),
+    )
     outfit: Optional[OutfitType] = Field(
         default=None,
         description="Outfit type to apply. If set, outfit step runs."

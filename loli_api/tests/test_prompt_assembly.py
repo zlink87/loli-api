@@ -43,6 +43,13 @@ Covers:
   c24 outfit build_prompt: lighting phrase-ified and appended after
       outfit_detail (both branches: dressed and NAKED); same graceful
       None/unrecognized back-compat.
+  c32 build_pose_prompt: identity_anchors (D1) appended immediately after
+      pose_identity_clause() as "She has {anchors}; keep these and her body
+      proportions and build exactly as in image 1, completely unchanged.";
+      absent (byte-identical base prompt) when None/empty.
+  c33 outfit build_prompt: identity_anchors (D1) appended right after
+      pc.identity_clause(...) on BOTH branches (NAKED and dressed) as "she has
+      {anchors}, kept exactly unchanged"; absent when None/empty.
 
 (c7, c8, c15 covered `has_contradiction`/`MAX_SCENE_WORDS`/`scene_preserves_hint`
 — all removed with the Venice generation-scene-writer on 2026-07-08. c11 is the
@@ -892,6 +899,70 @@ def test_outfit_detail_dominant_renders_caption_alone():
 
 
 # ---------------------------------------------------------------------------
+# c32 — build_pose_prompt: identity_anchors (D1) appended immediately after
+# pose_identity_clause(); absent when None/empty (back-compat).
+# ---------------------------------------------------------------------------
+def test_pose_prompt_identity_anchors_appended():
+    base = pose_ep.build_pose_prompt(PoseType.SITTING)
+    anchors = "straight blonde hair, green eyes, curvy build with medium breasts"
+
+    anchored = pose_ep.build_pose_prompt(PoseType.SITTING, identity_anchors=anchors)
+    expected_clause = (
+        f"She has {anchors}; keep these and her body proportions and build "
+        f"exactly as in image 1, completely unchanged."
+    )
+    assert expected_clause in anchored
+    # Placed immediately adjacent to the generic pose_identity_clause().
+    clause = pc.pose_identity_clause()
+    assert anchored.index(clause) < anchored.index(expected_clause)
+    assert f"{clause}. {expected_clause}" in anchored
+    # And still ahead of "The new pose should match image 2 accurately."
+    assert anchored.index(expected_clause) < anchored.index("The new pose should match image 2 accurately.")
+
+    # None/empty -> byte-identical to the base prompt (back-compat).
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, identity_anchors=None) == base
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, identity_anchors="   ") == base
+    print("c32 OK: identity_anchors appended right after pose_identity_clause(); absent when None/empty")
+
+
+# ---------------------------------------------------------------------------
+# c33 — outfit build_prompt: identity_anchors (D1) appended right after
+# pc.identity_clause(...) on BOTH branches; absent when None/empty.
+# ---------------------------------------------------------------------------
+def test_outfit_prompt_identity_anchors_appended():
+    anchors = "straight blonde hair, green eyes, curvy build with medium breasts"
+    expected_clause = f"she has {anchors}, kept exactly unchanged"
+
+    # Dressed branch.
+    base_dressed = outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW)
+    dressed = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, identity_anchors=anchors,
+    )
+    assert expected_clause in dressed
+    identity = pc.identity_clause("the outfit and clothing")
+    assert dressed.index(identity) < dressed.index(expected_clause)
+    assert outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, identity_anchors=None,
+    ) == base_dressed
+    assert outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, identity_anchors="   ",
+    ) == base_dressed
+
+    # NAKED branch.
+    base_naked = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH)
+    naked = outfit_ep.build_prompt(
+        OutfitType.NAKED, None, NudityLevel.HIGH, identity_anchors=anchors,
+    )
+    assert expected_clause in naked
+    naked_identity = pc.identity_clause("the clothing and covering")
+    assert naked.index(naked_identity) < naked.index(expected_clause)
+    assert outfit_ep.build_prompt(
+        OutfitType.NAKED, None, NudityLevel.HIGH, identity_anchors=None,
+    ) == base_naked
+    print("c33 OK: identity_anchors appended right after pc.identity_clause(...) on both branches; absent when None/empty")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -925,6 +996,8 @@ def _run_all():
         test_outfit_continuity_text,
         test_outfit_dress_mode_lead,
         test_outfit_detail_dominant_renders_caption_alone,
+        test_pose_prompt_identity_anchors_appended,
+        test_outfit_prompt_identity_anchors_appended,
     ]
     failures = 0
     for fn in tests:

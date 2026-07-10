@@ -3,6 +3,8 @@ Tests for scene_mapper.scene_to_pipeline_request (pure mapping logic).
 
 Runs under pytest or directly: python loli_api/tests/test_scene_mapper.py
 """
+from types import SimpleNamespace
+
 import models.requests as _mr
 
 # The mapper builds a PipelineEditRequest whose source_image is SSRF-validated.
@@ -18,7 +20,7 @@ from models.requests import PersonaOptions
 from models.batch import BatchControls, SeedStrategy
 from models.scene import SceneSpec
 from services import scene_vocab as sv
-from services.scene_mapper import scene_to_pipeline_request, resolve_seed
+from services.scene_mapper import scene_to_pipeline_request, resolve_seed, identity_anchor_text
 # Use the REAL planner dataclass (not a stand-in) so the mapper<->orchestrator
 # attribute contract (hero_photo_url) is exercised exactly as at runtime.
 from services.story_planner import Character
@@ -427,6 +429,100 @@ def test_outfit_detail_dominant_threaded_onto_request():
     # Defaults False when the scene didn't set it.
     req2 = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
     assert req2.outfitDetailDominant is False
+
+
+# ---------------------------------------------------------------------------
+# D1: identity_anchor_text — concrete per-character identity anchors from the
+# persona's hair/eye/body attributes (drift-prone), never name/age/ethnicity
+# ---------------------------------------------------------------------------
+def test_identity_anchor_text_full_profile():
+    # _character(): hairStyle=straight, hairColor=blonde, eyeColor=green,
+    # bodyType=curvy, breastSize=medium.
+    char = _character()
+    assert (
+        identity_anchor_text(char)
+        == "straight blonde hair, green eyes, curvy build with medium breasts"
+    )
+
+
+def test_identity_anchor_text_normalizes_underscores():
+    # BreastSize.EXTRA_LARGE ("extra_large") exercises the underscore-normalize
+    # contract for enum-ish values that aren't a single word.
+    persona = PersonaOptions(
+        ethnicity="caucasian", age=28, hairStyle="straight", hairColor="blonde",
+        eyeColor="green", bodyType="curvy", breastSize="extra_large", name="Estella",
+    )
+    char = Character(persona=persona, hero_photo_url="https://x.supabase.co/img.png")
+    text = identity_anchor_text(char)
+    assert "extra large breasts" in text
+    assert "extra_large" not in text
+
+
+def test_identity_anchor_text_partial_profile_skips_missing():
+    # Duck-typed persona exposing only SOME of the five attributes — a real
+    # PersonaOptions always has bodyType/breastSize defaults (never None), so a
+    # plain namespace stand-in is used to exercise "skip missing gracefully".
+    persona = SimpleNamespace(
+        hairStyle=None, hairColor="blonde", eyeColor=None, bodyType=None, breastSize=None,
+    )
+    char = SimpleNamespace(persona=persona)
+    assert identity_anchor_text(char) == "blonde hair"
+
+
+def test_identity_anchor_text_empty_profile_is_none():
+    persona = SimpleNamespace(
+        hairStyle=None, hairColor=None, eyeColor=None, bodyType=None, breastSize=None,
+    )
+    assert identity_anchor_text(SimpleNamespace(persona=persona)) is None
+    # No persona attribute at all -> None, not an AttributeError.
+    assert identity_anchor_text(SimpleNamespace()) is None
+
+
+def test_identity_anchor_text_never_includes_name_age_ethnicity():
+    char = _character()
+    text = identity_anchor_text(char)
+    assert "Estella" not in text
+    assert "28" not in text
+    assert "caucasian" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# D1/D2: identityAnchors + ReActor knobs threaded onto the request
+# ---------------------------------------------------------------------------
+def test_identity_anchors_threaded_onto_request():
+    char = _character()
+    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
+    assert req.identityAnchors == "straight blonde hair, green eyes, curvy build with medium breasts"
+
+
+def test_identity_anchors_none_when_character_attrs_missing():
+    persona = SimpleNamespace(
+        hairStyle=None, hairColor=None, eyeColor=None, bodyType=None, breastSize=None,
+        occupation=None, relationship=None,
+    )
+    char = SimpleNamespace(
+        persona=persona, hero_photo_url="https://x.supabase.co/img.png", nude_base_url=None,
+    )
+    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
+    assert req.identityAnchors is None
+
+
+def test_reactor_knobs_threaded_from_controls():
+    char = _character()
+    controls = BatchControls(reactor_restore_visibility=0.6, reactor_codeformer_weight=0.1)
+    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), controls)
+    assert req.reactorRestoreVisibility == 0.6
+    assert req.reactorCodeformerWeight == 0.1
+
+
+def test_reactor_knobs_default_to_none():
+    # BatchControls.reactor_restore_visibility/reactor_codeformer_weight default to
+    # None -> the request carries None -> pipeline_worker falls back to the
+    # settings-level default (see test_pose_refs.py's D2 coverage).
+    char = _character()
+    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
+    assert req.reactorRestoreVisibility is None
+    assert req.reactorCodeformerWeight is None
 
 
 if __name__ == "__main__":

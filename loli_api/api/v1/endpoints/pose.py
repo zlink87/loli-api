@@ -103,6 +103,7 @@ def build_pose_prompt(
     outfit_text: Optional[str] = None,
     location: Optional[str] = None,
     pose_detail: Optional[str] = None,
+    identity_anchors: Optional[str] = None,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
@@ -183,6 +184,18 @@ def build_pose_prompt(
             None/empty (or companion-only after the scrub) falls back to
             POSE_DESCRIPTIONS[pose] exactly as today. Everything else in the prompt
             (keep-background, solo, outfit continuity, …) is unchanged.
+        identity_anchors: Optional concrete identity-attribute phrase for THIS
+            character (e.g. from services.scene_mapper.identity_anchor_text —
+            "straight blonde hair, green eyes, curvy build with medium breasts").
+            D1: the pose step fully re-diffuses the frame guided only by the generic
+            pose_identity_clause() ("keep the original ... hair style, hair color,
+            eye color ..."), which binds weakly on this distilled model — hair
+            structure/color and body proportions drift photo-to-photo as a result.
+            When set, appended right after that clause as "She has {anchors}; keep
+            these and her body proportions and build exactly as in image 1,
+            completely unchanged." None/empty (interactive /v1/edit/pose and any
+            caller without a character profile) appends nothing — unchanged
+            behavior.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
@@ -201,6 +214,17 @@ def build_pose_prompt(
     prompt = (
         f"Make the person in image 1 do the exact same pose of the person in image 2. "
         f"The target pose is: {desc}. {clause}. "
+    )
+    # D1: concrete per-character identity anchors, placed immediately adjacent to
+    # the generic pose_identity_clause() above — a real hair color / eye color /
+    # build binds far better on this distilled model than the clause's generic
+    # "keep the original ... hair style, hair color ..." instruction alone.
+    if identity_anchors and identity_anchors.strip():
+        prompt += (
+            f"She has {identity_anchors.strip()}; keep these and her body "
+            f"proportions and build exactly as in image 1, completely unchanged. "
+        )
+    prompt += (
         f"The new pose should match image 2 accurately. "
         f"Keep the same background, location and environment as image 1, adjusting "
         f"only perspective to fit the new pose."

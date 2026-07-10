@@ -297,6 +297,18 @@ class PipelineBackgroundWorker:
         ``photo_style`` below for why. ``is_final_step`` is still accepted
         (``batch_pipeline_worker.py`` threads it through) but no longer gates
         photo style.
+
+        D1: ``request.identityAnchors`` (a concrete per-character hair/eyes/build
+        phrase, e.g. from services.scene_mapper.identity_anchor_text) is read the
+        same defensive way and routed to BOTH the pose step's ``build_pose_prompt``
+        and the outfit step's ``build_prompt`` — both steps re-diffuse the body
+        region, so a concrete anchor helps identity fidelity in each.
+
+        D2: ``request.reactorRestoreVisibility``/``reactorCodeformerWeight``
+        (pose-step ReActor node-200 tuning, 0.0-1.0) override the server-wide
+        ``settings.POSE_REACTOR_RESTORE_VISIBILITY`` / ``POSE_REACTOR_CODEFORMER_WEIGHT``
+        defaults when set; None (the common case) keeps the settings value,
+        preserving the pre-D2 behavior exactly.
         """
         # Optional photographic-finish clause, routed to the person-RENDERING
         # steps (pose, outfit) UNCONDITIONALLY: those are the steps that actually
@@ -354,14 +366,27 @@ class PipelineBackgroundWorker:
                         else None
                     ),
                     location=getattr(request, "location", None),
+                    # D1: concrete per-character identity anchor (hair/eyes/build);
+                    # None (interactive callers / no character profile) appends
+                    # nothing, same as every other getattr-defensive field above.
+                    identity_anchors=getattr(request, "identityAnchors", None),
                 ),
                 photo_style,
             )
+            # D2: per-request ReActor overrides win when set; None (the common
+            # case) falls back to the server-wide settings default exactly as
+            # before D2 existed.
+            reactor_restore_visibility = getattr(request, "reactorRestoreVisibility", None)
+            if reactor_restore_visibility is None:
+                reactor_restore_visibility = settings.POSE_REACTOR_RESTORE_VISIBILITY
+            reactor_codeformer_weight = getattr(request, "reactorCodeformerWeight", None)
+            if reactor_codeformer_weight is None:
+                reactor_codeformer_weight = settings.POSE_REACTOR_CODEFORMER_WEIGHT
             return prepare_pose_workflow(
                 self._pose_template, source_name, pose_ref_name, prompt=prompt, seed=seed,
                 debug_save_pre_reactor=settings.POSE_DEBUG_SAVE_PRE_REACTOR,
-                reactor_restore_visibility=settings.POSE_REACTOR_RESTORE_VISIBILITY,
-                reactor_codeformer_weight=settings.POSE_REACTOR_CODEFORMER_WEIGHT,
+                reactor_restore_visibility=reactor_restore_visibility,
+                reactor_codeformer_weight=reactor_codeformer_weight,
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(
@@ -381,6 +406,10 @@ class PipelineBackgroundWorker:
                     # the outfit step composites the person back over the source,
                     # so this mainly affects the regenerated crop, not a full relight.
                     lighting=getattr(request, "lighting", None),
+                    # D1: concrete per-character identity anchor (hair/eyes/build) —
+                    # the outfit step re-diffuses the body region too, so it benefits
+                    # from the same anchor as the pose step. None = unchanged.
+                    identity_anchors=getattr(request, "identityAnchors", None),
                 ),
                 photo_style,
             )
