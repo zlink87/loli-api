@@ -59,9 +59,16 @@ def test_apply_polished_appends_clause():
 
 
 def test_suffixes_never_touch_identity():
+    # "face" is intentionally allowed ONLY inside the "skin tone even and
+    # consistent with the face" clause (natural/polished) — it anchors body-skin
+    # tone to the (separately identity-locked) face rather than altering it.
+    # Strip that one known-safe occurrence before the sweep so the guard still
+    # catches any OTHER accidental identity language.
+    safe_clause = "skin tone even and consistent with the face"
     for suffix in EDIT_PHOTO_STYLE_SUFFIXES.values():
+        text = suffix.lower().replace(safe_clause, "")
         for banned in ("face", "hair", "eye", "identity", "features"):
-            assert banned not in suffix.lower(), f"'{banned}' in style clause: {suffix}"
+            assert banned not in text, f"'{banned}' in style clause: {suffix}"
 
 
 # --- worker wiring ---------------------------------------------------------
@@ -95,24 +102,50 @@ def _positive_prompt(workflow: dict, step: str) -> str:
     return workflow["16"]["inputs"]["positive"]
 
 
-def test_build_step_workflow_wraps_all_steps_when_polished():
+def test_build_step_workflow_wraps_person_rendering_steps_when_polished():
+    # Pose and outfit ALWAYS get the photo-style clause — they're the
+    # steps that actually re-diffuse the person's body, so this holds even on
+    # a full request (pose + outfit + background all active).
     w = _worker()
     req = _request(photoStyle=PhotoStyleType.POLISHED)
-    for step in ("pose", "outfit", "background"):
+    for step in ("pose", "outfit"):
         wf = w._build_step_workflow(step, req, "src.png", 42, "job-1", pose_ref_name="ref.png")
         prompt = _positive_prompt(wf, step)
         assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] in prompt, f"{step} missing polished clause"
 
 
+def test_build_step_workflow_wraps_background_only_when_sole_step():
+    # Background is masked out and composited back untouched whenever a
+    # pose/outfit step is also active, so wrapping it there would only dress up
+    # discarded pixels -> no clause. A background-only edit (no outfit/pose on
+    # the request) has no mask/composite to skip, so it keeps the legacy
+    # behavior of receiving the clause.
+    w = _worker()
+
+    full_req = _request(photoStyle=PhotoStyleType.POLISHED)  # outfit + pose also set
+    wf_full = w._build_step_workflow(
+        "background", full_req, "src.png", 42, "job-1", pose_ref_name="ref.png"
+    )
+    assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] not in _positive_prompt(wf_full, "background")
+
+    bg_only_req = _request(photoStyle=PhotoStyleType.POLISHED, outfit=None, pose=None)
+    wf_bg_only = w._build_step_workflow("background", bg_only_req, "src.png", 42, "job-1")
+    assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] in _positive_prompt(wf_bg_only, "background")
+
+
 def test_pipeline_defaults_to_polished():
     # The unified /v1/edit pipeline now DEFAULTS to POLISHED (was None) so a pipeline
-    # edit matches the generated hero's retouched finish across all steps.
+    # edit matches the generated hero's retouched finish on the person-rendering
+    # steps. The default request has outfit+pose set, so background stays
+    # unwrapped (see test_build_step_workflow_wraps_background_only_when_sole_step).
     assert _request().photoStyle == PhotoStyleType.POLISHED
     w = _worker()
     req = _request()  # unset -> POLISHED default
-    for step in ("pose", "outfit", "background"):
+    for step in ("pose", "outfit"):
         wf = w._build_step_workflow(step, req, "src.png", 42, "job-1", pose_ref_name="ref.png")
         assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] in _positive_prompt(wf, step)
+    wf_bg = w._build_step_workflow("background", req, "src.png", 42, "job-1", pose_ref_name="ref.png")
+    assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] not in _positive_prompt(wf_bg, "background")
 
 
 def test_build_step_workflow_explicit_none_or_candid_is_legacy_no_style():

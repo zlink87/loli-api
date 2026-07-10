@@ -48,8 +48,21 @@ IDENTITY_NEGATIVE = (
 # composited/stitched back byte-exact and those terms fought the retouched finish.
 # These SKIN/body terms are safe (they never touch the preserved face) and suppress
 # the waxy, over-smoothed body-region look the POLISHED finish can otherwise induce.
+#
+# Anti-shine terms: rendered skin was coming out oily/glossy "glamour"
+# instead of natural matte realism. No skin-TONE words here (no
+# "bronzed"/"tan"/"pale") — a tone negative would push a dark-skinned character's
+# body lighter than their protected, byte-stitched-back face.
+# NOTE: negative prompts only take effect on cfg>1 graphs (the 2511 outfit step).
+# The v1 background and pose graphs sample at cfg 1.0, where negative
+# conditioning is mathematically inert (nothing is subtracted from the
+# unconditional branch) — don't try to fix those steps' skin rendering via this
+# negative, it has no effect there; route it through positive prompt language
+# (EDIT_PHOTO_STYLE_SUFFIXES) instead.
 EDIT_SKIN_NEGATIVE = (
-    "airbrushed skin, waxy skin, over-smoothed skin, overprocessed, blurry skin texture"
+    "airbrushed skin, waxy skin, over-smoothed skin, overprocessed, blurry skin texture, "
+    "oily skin, glossy skin, glistening skin, shiny skin, wet-look skin, oiled body, "
+    "greasy sheen"
 )
 
 # Positive identity-preservation clause appended to edit prompts. {what} is the
@@ -217,13 +230,14 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
     "natural": (
         "Keep the photo looking like a real, unstaged photo: accurate natural "
         "exposure, true-to-life color, light that matches the scene's own light "
-        "sources, and realistic skin with visible fine texture and pores."
+        "sources, and realistic skin with visible fine texture and pores, skin "
+        "tone even and consistent with the face."
     ),
     "polished": (
         "Render it as an ultra-realistic photograph, 85mm lens, crisp sharp focus, "
         "true-to-life neutral color with accurate exposure, and natural skin with "
-        "clearly visible fine texture and pores; keep every fine detail of the "
-        "clothing crisp and intact."
+        "clearly visible fine texture and pores, skin tone even and consistent "
+        "with the face; keep every fine detail of the clothing crisp and intact."
     ),
     "studio": (
         "Give the photo a high-end portrait finish: controlled softbox lighting, "

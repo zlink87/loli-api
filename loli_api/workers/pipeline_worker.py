@@ -290,13 +290,34 @@ class PipelineBackgroundWorker:
         person back over the source, so it mostly affects the regenerated
         crop). Both builders phrase-ify the raw value via
         ``services.scene_vocab`` and no-op on None/unrecognized values.
+
+        ``request.photoStyle`` is routed to the person-RENDERING steps
+        (pose, outfit) unconditionally, and to the background step only when
+        background is the sole active step — see the comment above
+        ``photo_style`` below for why. ``is_final_step`` is still accepted
+        (``batch_pipeline_worker.py`` threads it through) but no longer gates
+        photo style.
         """
-        # Optional photographic-finish clause. Applied ONLY on the last active
-        # step: earlier revisions applied it at every step, and 2-3 re-diffusions
-        # of the same "warm grade / bokeh" language each compounded the effect
-        # into oversaturated, plastic-looking output. One application at the end
-        # gives a consistent finish without the re-diffusion pileup.
-        photo_style = getattr(request, "photoStyle", None) if is_final_step else None
+        # Optional photographic-finish clause, routed to the person-RENDERING
+        # steps (pose, outfit) UNCONDITIONALLY: those are the steps that actually
+        # re-diffuse the body, so the natural-skin/anti-glamour finish has to
+        # land there to have any effect. The background step masks the person
+        # OUT and composites them back untouched, so wrapping background too
+        # would only dress up the discarded scene pixels — UNLESS background is
+        # the only active step (a background-only edit has no mask/composite to
+        # skip, so it keeps today's legacy behavior of getting the clause).
+        #
+        # Earlier revisions gated this on `is_final_step` (apply once, on
+        # whichever step ran last) to avoid 2-3 re-diffusions of the same "warm
+        # grade" language compounding into oversaturated, plastic output. That
+        # worked for a typical interactive edit (one step) but broke nude-base
+        # jobs, whose steps are outfit -> background: background ran last, so
+        # the natural-skin suffix landed on the masked-out background instead of
+        # ever reaching the body render. `is_final_step` is kept as a parameter
+        # for caller compatibility but no longer gates photo style here.
+        photo_style = getattr(request, "photoStyle", None)
+        if step_name == "background" and (request.outfit is not None or request.pose is not None):
+            photo_style = None
 
         if step_name == "pose":
             logger.info(f"[PIPELINE] {job_id} | pose | Reference: {pose_ref_name}")

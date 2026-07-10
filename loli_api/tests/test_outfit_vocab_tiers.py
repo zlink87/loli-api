@@ -13,6 +13,8 @@ that gap reopens — e.g. a new OutfitType added without all 5 tiers.
 
 Runs under pytest or directly: python tests/test_outfit_vocab_tiers.py
 """
+import re
+
 from models.enums import OutfitType, NudityLevel
 from services.outfit_vocab import OUTFIT_DESCRIPTIONS, _GENERATION_DEFAULT_CLOTHING
 
@@ -129,6 +131,32 @@ def test_revealing_tier_is_longer_or_equal_signal_than_medium():
         levels = OUTFIT_DESCRIPTIONS[outfit]
         assert len(levels[NudityLevel.REVEALING]) >= _MIN_LEN
         assert levels[NudityLevel.REVEALING] != levels[NudityLevel.MEDIUM]
+
+
+# ---------------------------------------------------------------------------
+# De-greased SKIN vocabulary regression guard. The product's
+# rendered skin was coming out oily/glossy "glamour" instead of natural matte
+# realism; part of the cause was liquid/sheen language sprinkled across several
+# outfits' upper tiers ("glistening skin", "dripping pussy", "wet folds",
+# "clings wetly", ...). This sweeps every tier of every outfit so a future
+# addition can't reintroduce that vocabulary. Anatomy/exposure explicitness is
+# untouched by design — only liquid-sheen-on-skin and sexual-fluid wording is
+# banned.
+# ---------------------------------------------------------------------------
+_SHEEN_RE = re.compile(
+    r"glisten|oiled|oily|wet[- ]look|dripping|clings wetly|wet pussy|wet folds",
+    re.IGNORECASE,
+)
+
+
+def test_no_outfit_description_contains_skin_sheen_language():
+    hits = [
+        (outfit.value, level.value, text)
+        for outfit in OutfitType
+        for level, text in OUTFIT_DESCRIPTIONS[outfit].items()
+        if _SHEEN_RE.search(text)
+    ]
+    assert not hits, f"sheen/wet-skin language found: {hits}"
 
 
 # ---------------------------------------------------------------------------
