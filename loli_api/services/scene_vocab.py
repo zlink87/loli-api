@@ -133,13 +133,22 @@ def build_scene_background_text(
     mood_kinks=None,
     mood_personality=None,
     free_text: Optional[str] = None,
+    lead_text: Optional[str] = None,
 ) -> str:
     """
     Compose location + time + lighting (+ optional mood + free text) into the
     scene free-text consumed by background.build_background_prompt(). Contains NO
     persona identity language.
+
+    ``lead_text`` (opt-in, C3 setting-led scenery): an AI-authored scene sentence —
+    the story director's ``setting`` — placed FIRST, so the authored description
+    LEADS the composition and the location enum phrase follows as an anchor, then
+    time/lighting/mood as before. Only scene_mapper passes it (story batches);
+    every other caller omits it and gets the location-first composition unchanged.
     """
     parts: List[str] = []
+    if lead_text and lead_text.strip():
+        parts.append(lead_text.strip())
     loc = location_phrase(location)
     if loc:
         parts.append(loc)

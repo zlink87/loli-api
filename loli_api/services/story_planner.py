@@ -22,6 +22,7 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import math
 import random
 import re
 from abc import ABC, abstractmethod
@@ -671,9 +672,10 @@ Output ONLY valid JSON of the form:
 
 Each BEAT is:
 {"beat_description":"short concrete caption for this photo (scene only)",
- "setting":"ONE sentence describing the PLACE/environment for this photo (scene only)",
+ "setting":"ONE sentence describing the PLACE/environment for this photo — a concrete VISUAL place description (scene only, no people)",
  "activity":"short phrase: what she is DOING in this photo (e.g. 'pouring coffee', 'stretching by the window')",
- "outfit_detail":"<=12 words naming the clothing concretely (colors/fabric/fit), matching the chosen outfit + nudityLevel",
+ "pose_detail":"ONE sentence: her exact body position and what her body is doing (e.g. 'curled up on the sofa, mug in both hands, knees tucked'), consistent with the chosen pose",
+ "outfit_detail":"<=12 words naming the clothing concretely (colors/fabric/fit/state, e.g. 'faded blue oversized band t-shirt, off one shoulder'), matching the chosen outfit + nudityLevel",
  "expression":"<=6 words: her facial expression/mood ONLY (e.g. 'sleepy soft smile')",
  "narrative":"1-3 sentences of THIRD-PERSON, PRESENT-TENSE story prose (gallery only)",
  "pose":<pose|null>,"outfit":<outfit|null>,"nudityLevel":"low|medium|high",
@@ -694,6 +696,9 @@ HARD RULES:
   "outfit_detail" MUST describe the SAME garment as that chosen "outfit" enum at this beat's
   nudityLevel — never a different garment class (do NOT pick outfit "satin_robe" and then
   write "leather crop top and jeans"). The enum and the words must always agree.
+  "outfit_detail" is REQUIRED on EVERY beat and IS the exact garment text the render paints
+  (the enum only gates the step), so write it like a wardrobe card — colors, fabric, fit and
+  state (e.g. 'faded blue oversized band t-shirt, off one shoulder') at this beat's nudityLevel.
 - COHERENCE IS YOUR JOB now (no menu enforces it): outfit, location, activity and time must
   make sense together in each beat — no gym clothes in a nightclub, no cocktail dress while
   cooking breakfast, no swimwear in an office.
@@ -706,13 +711,21 @@ HARD RULES:
   setting changes between chapters. Group beats into arcs as CHAPTERS of the one story. When the
   story spans MULTIPLE DAYS, each new day restarts in the early morning and centers on DIFFERENT
   activities from the days before — never replay the same day twice.
-- IDENTITY IS PIXEL-LOCKED. In beat_description, setting, activity AND narrative, NEVER
-  describe her face, age, ethnicity, hair, eyes, body, breasts or skin. Using her first name
-  is fine. Describe places, clothes, actions, light and mood only.
+- IDENTITY IS PIXEL-LOCKED. In beat_description, setting, activity, pose_detail AND narrative,
+  NEVER describe her face, age, ethnicity, hair, eyes, body, breasts or skin. Using her first
+  name is fine. Describe places, clothes, actions, light and mood only.
 - "outfit_detail" describes ONLY clothing (garment, colors, fabric, fit) — the SAME garment
   as the chosen "outfit" enum at this nudityLevel (per the OUTFIT RULE); "expression" is her
   expression/mood ONLY (e.g. 'soft sleepy smile') — NEVER facial features (eyes, lips, jaw,
   nose, chin, face shape).
+- "pose_detail" (REQUIRED on every beat): ONE concrete, identity-free sentence describing her
+  body position and what her body is doing in THIS photo (e.g. 'curled up on the sofa, mug in
+  both hands, knees tucked'), consistent with the chosen "pose" enum — the enum still selects
+  the pose reference image; your sentence is the target-pose text the render follows. Body and
+  action only: no other people, no facial-feature language.
+- "setting" (REQUIRED on every beat): ONE concrete visual sentence describing the PLACE itself
+  — surfaces, furniture, light, weather — it LEADS the rendered background text. No people, no
+  persona name, no actions (those belong in "activity" and "pose_detail").
 - "narrative": keep the EXACT SAME third-person present voice for EVERY beat; continue directly
   from the previous beat; reflect her personality/likes/persona-context; avoid her dislikes.
 - NUDITY: follow the per-photo targets in the user message's NUDITY PLAN. Never exceed a photo's
@@ -1092,6 +1105,10 @@ def _raw_beat_to_scene(
     # Render-safe channel (folded into the background prompt) — scrub identity here too.
     setting = _scrub_scene_text(raw.get("setting"), 400)
     activity = _scrub_scene_text(raw.get("activity"), 200)
+    # Freeform pose text (C1a): drives the pose step's target-pose sentence; the pose
+    # ENUM still selects the reference image. Companion-scrubbed in validate_and_repair
+    # (same treatment as activity).
+    pose_detail = _scrub_scene_text(raw.get("pose_detail"), 200)
     # Structured description channels (WS2): outfit_detail sharpens the outfit step,
     # expression drives the pose step. Both are identity-scrubbed; expression also has
     # facial-FEATURE tokens stripped (it must carry an expression/mood only).
@@ -1115,6 +1132,7 @@ def _raw_beat_to_scene(
             mood_personality=_coerce_enum(PersonalityType, raw.get("mood_personality")),
             setting=setting,
             activity=activity,
+            pose_detail=pose_detail,
             outfit_detail=outfit_detail,
             expression=expression,
             narrative=narrative,
@@ -1149,6 +1167,10 @@ def _enforce_beat_pool(s: SceneSpec, slot: _BeatSlot, controls: BatchControls, s
     pose_pool = _allowed_pose_pool(slot.tmpl, controls)
     if s.pose is not None and s.pose not in pose_pool:
         s.pose = rng.choice(pose_pool) if pose_pool else None
+        # The freeform pose_detail was authored for the ORIGINAL pose; after a re-pick
+        # it would describe a body position the new reference image doesn't show, so
+        # drop it and let the enum description drive (see build_pose_prompt).
+        s.pose_detail = None
 
     outfit_pool = _allowed_outfit_pool(slot.tmpl, controls)
     if s.outfit is not None and s.outfit not in outfit_pool:
@@ -1532,6 +1554,9 @@ def _enforce_variety(
                     if prev is not None and pv == _val(prev.pose) and _val(s.location) == _val(prev.location):
                         continue
                     s.pose = p
+                    # The freeform pose_detail described the OLD pose — stale after a
+                    # re-pick, so drop it (enum description drives; see build_pose_prompt).
+                    s.pose_detail = None
                     break
             dup, over, consec = _offenses(s, prev, slot)
             # Then repair outfit (fixes dup/over; respects the usage cap; never NAKED).
@@ -1559,6 +1584,100 @@ def _enforce_variety(
         pair = _pair_of(s)
         if pair is not None:
             seen_pairs.add(pair)
+    return scenes
+
+
+def _cap_location_candidates(scene: SceneSpec, slot, controls: BatchControls) -> List[LocationType]:
+    """
+    Locations a usage-cap re-pick may move `scene` to: the beat position's own
+    hand-authored pool when a slot constrains it (mirrors _variety_pose_candidates),
+    else the full controls-filtered enum — always kept coherent with the scene's
+    current pose/outfit via the location guards, so a cap re-pick never strands a
+    "cooking" pose outside a kitchen or a bikini in an office.
+    """
+    if slot is not None:
+        base = _allowed_location_pool(slot.tmpl, controls)
+    else:
+        base = [
+            loc for loc in LocationType
+            if loc not in (controls.blocked_locations or [])
+            and (not controls.allowed_locations or loc in controls.allowed_locations)
+        ]
+    return [loc for loc in base if _pose_ok_at(scene.pose, loc) and _outfit_ok_at(scene.outfit, loc)]
+
+
+def _enforce_usage_caps(
+    scenes: List[SceneSpec], slots: List[_BeatSlot], controls: BatchControls
+) -> List[SceneSpec]:
+    """
+    Per-batch pose/location usage caps (C1b) — the anti-monoculture guard behind the
+    reported "pose standing_leaning 8x in a 24-photo batch". No single pose enum may
+    be used more than max(2, ceil(count/8)) times and no single location more than
+    max(2, ceil(count/6)) times across the set.
+
+    Ordered walk with running counts: the first cap-many uses of a value keep it;
+    each overflow use is re-picked deterministically (seeded per beat, the same
+    base_seed-derived pattern as the outfit fill_rng) from the allowed pool —
+    slot-pool-constrained when a beat pool applies, controls-filtered otherwise,
+    respecting blocked_poses/blocked_locations/allowed_locations and the
+    pose/outfit<->location coherence guards (_pose_ok_at/_outfit_ok_at) — choosing
+    among the LEAST-USED options so the overflow spreads across the vocabulary
+    instead of dogpiling onto the next value.
+
+    A re-picked POSE also clears pose_detail: that freeform sentence was authored
+    for the OLD pose, and keeping it would describe a body position the new
+    reference image doesn't show — with it gone, build_pose_prompt falls back to
+    the new enum's own description, so the target text and the reference image
+    always agree. Nothing else on the scene is touched.
+
+    Runs AFTER the nudity clamp/fill and the pair-dedup pass (_enforce_variety) so
+    it never fights those repairs; an unresolvable overflow (pool exhausted — e.g. a
+    work chapter whose beat pool is a single location) is left as-is and logged,
+    mirroring _enforce_variety's unresolved-beat behavior.
+    """
+    n = len(scenes)
+    if n == 0:
+        return scenes
+    pose_cap = max(2, math.ceil(n / 8))
+    location_cap = max(2, math.ceil(n / 6))
+
+    pose_counts: Dict[str, int] = {}
+    location_counts: Dict[str, int] = {}
+    for i, s in enumerate(scenes):
+        slot = slots[i] if i < len(slots) else None
+
+        # Pose cap (checked first, so the location re-pick below sees the final pose).
+        if s.pose is not None and pose_counts.get(_val(s.pose), 0) >= pose_cap:
+            candidates = [
+                p for p in _variety_pose_candidates(s, slot, controls)
+                if _val(p) != _val(s.pose) and pose_counts.get(_val(p), 0) < pose_cap
+            ]
+            if candidates:
+                rng = random.Random((controls.base_seed or 0) + 900007 * (i + 1))
+                least = min(pose_counts.get(_val(p), 0) for p in candidates)
+                s.pose = rng.choice([p for p in candidates if pose_counts.get(_val(p), 0) == least])
+                # Stale freeform text: pose_detail described the OLD pose (see docstring).
+                s.pose_detail = None
+            else:
+                logger.debug("usage caps: pose overflow unresolved at beat %d", i)
+        if s.pose is not None:
+            pose_counts[_val(s.pose)] = pose_counts.get(_val(s.pose), 0) + 1
+
+        # Location cap (location is required, so every scene counts).
+        if location_counts.get(_val(s.location), 0) >= location_cap:
+            candidates = [
+                loc for loc in _cap_location_candidates(s, slot, controls)
+                if _val(loc) != _val(s.location) and location_counts.get(_val(loc), 0) < location_cap
+            ]
+            if candidates:
+                rng = random.Random((controls.base_seed or 0) + 1100003 * (i + 1))
+                least = min(location_counts.get(_val(c), 0) for c in candidates)
+                s.location = rng.choice(
+                    [c for c in candidates if location_counts.get(_val(c), 0) == least]
+                )
+            else:
+                logger.debug("usage caps: location overflow unresolved at beat %d", i)
+        location_counts[_val(s.location)] = location_counts.get(_val(s.location), 0) + 1
     return scenes
 
 
@@ -1590,7 +1709,9 @@ def validate_and_repair(
     ``enforce_nudity_ramp`` clamps each photo DOWN to the per-photo guided-ceiling
     ramp (and auto-fills an outfit for a medium/high scene that has none, since
     nudity renders only through the outfit step). ``enforce_variety`` runs the
-    set-level dedup pass. ``enforce_time_ramp`` overrides each photo's time_of_day
+    set-level dedup pass plus the per-batch pose/location usage caps
+    (_enforce_usage_caps: no pose more than max(2, ceil(count/8)) times, no
+    location more than max(2, ceil(count/6))). ``enforce_time_ramp`` overrides each photo's time_of_day
     to the per-photo chronological ramp (_time_ramp) so the day flows forward and
     resets per day — the safety net for LLM output that ignored the TIME PLAN,
     exactly parallel to how the nudity ramp backs the NUDITY PLAN. All three default
@@ -1700,6 +1821,21 @@ def validate_and_repair(
         # Runs right after the fill (a just-filled enum already matches its detail -> no-op).
         _reconcile_outfit(s, controls)
 
+        # Caption-first outfits (C2): the director's garment caption is ALWAYS the rendered
+        # garment text now — whenever a scene carries an outfit_detail (and a real,
+        # non-NAKED outfit gates the step), mark it detail-dominant so the outfit step
+        # renders the caption ALONE and the enum's tier prose only supplies the
+        # garment-neutral exposure clause (the nudity ramp) via the existing
+        # detail-dominant mechanism. This widens the earlier unmapped/conflict-only rule
+        # (the fill/reconcile settings above remain in place — now subsumed but harmless).
+        # EXCEPTION: a caption that confidently names a BLOCKED/disallowed garment stays
+        # enum-driven — rendering that caption alone would re-introduce the blocked type
+        # (the same allow/block-wins rule the fill above applies).
+        if s.outfit is not None and s.outfit != OutfitType.NAKED and s.outfit_detail:
+            derived = _outfit_from_detail(s.outfit_detail)
+            if derived is None or _outfit_allowed(derived, controls):
+                s.outfit_detail_dominant = True
+
         # Scrub identity tokens from free-text (defense-in-depth).
         if s.background_text:
             s.background_text = _scrub_identity(s.background_text)
@@ -1711,9 +1847,14 @@ def validate_and_repair(
         if s.activity:
             # strip_companions in addition to the identity scrub so the STORED activity is
             # already solo (no "with a partner"/crowd tail); the pose-step scrub in
-            # build_pose_prompt stays as a backstop, and _render_free_text scrubs again at
+            # build_pose_prompt stays as a backstop, and the scene mapper scrubs again at
             # map time for the pose-absent (activity -> background) path.
             s.activity = sv.strip_companions(_scrub_scene_text(s.activity, 200))
+        if s.pose_detail:
+            # Same treatment as activity: pose_detail steers the pose step's full-frame
+            # re-diffusion, so the STORED text must already be solo + identity-free; the
+            # strip_companions in build_pose_prompt stays as a backstop.
+            s.pose_detail = sv.strip_companions(_scrub_scene_text(s.pose_detail, 200))
         if s.outfit_detail:
             s.outfit_detail = _scrub_scene_text(s.outfit_detail, 160)
         if s.expression:
@@ -1737,6 +1878,10 @@ def validate_and_repair(
     # Set-level variety pass (after padding so the final set is what gets deduped).
     if enforce_variety:
         repaired = _enforce_variety(repaired, slots, controls)
+        # Per-batch pose/location usage caps (C1b), after the pair-dedup and the nudity
+        # clamp above so the cap re-picks never fight those repairs (they only move
+        # pose/location, and clear a now-stale pose_detail).
+        repaired = _enforce_usage_caps(repaired, slots, controls)
 
     # Re-index global order so downstream ordering is contiguous.
     for i, s in enumerate(repaired):

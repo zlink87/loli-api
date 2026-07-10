@@ -326,6 +326,11 @@ class PipelineBackgroundWorker:
                     request.pose,
                     activity=getattr(request, "activity", None),
                     expression=getattr(request, "expression", None),
+                    # C1a: freeform director pose text replaces the canned enum
+                    # description in "The target pose is:" (the enum still picked
+                    # the reference image); None (interactive/legacy requests)
+                    # keeps the enum description exactly as before.
+                    pose_detail=getattr(request, "poseDetail", None),
                     # W3 lighting fix: the pose step is the only step that fully
                     # re-diffuses the frame, so it's the one place a lighting/
                     # time-of-day clause can actually re-light the person (the

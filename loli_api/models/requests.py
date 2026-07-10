@@ -678,6 +678,18 @@ class PipelineEditRequest(BaseModel):
         default=None,
         description="Target pose to apply. If set, pose step runs."
     )
+    poseDetail: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional identity-free body-position/action sentence (e.g. from "
+            "SceneSpec.pose_detail) that REPLACES the pose enum's canned description in "
+            "the pose step's 'The target pose is:' sentence. The pose enum still selects "
+            "the reference image; this text only sharpens the described target. "
+            "Companion-scrubbed at the pose step. Only has an effect when a pose step is "
+            "active; ignored otherwise."
+        ),
+    )
     outfit: Optional[OutfitType] = Field(
         default=None,
         description="Outfit type to apply. If set, outfit step runs."

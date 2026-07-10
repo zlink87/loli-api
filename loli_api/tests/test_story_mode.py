@@ -249,6 +249,52 @@ def test_parser_maps_and_scrubs_outfit_detail_and_expression():
         assert feature not in expr, f"facial feature survived in expression: {feature!r}"
 
 
+# --- freeform pose text (C1a): parse, scrub, persistence round-trip ---
+def test_parser_maps_and_scrubs_pose_detail():
+    # pose_detail carries an identity phrase AND a companion tail: the parse-time
+    # identity scrub plus the plan-time strip_companions must leave only the solo,
+    # identity-free body-position text.
+    raw = (
+        '{"story_title":"S","arcs":[{"arc_id":"a","arc_title":"A","beats":[{'
+        '"beat_description":"x","location":"home_living_room","pose":"sofa",'
+        '"pose_detail":"the young woman curled up on the sofa with a partner"}]}]}'
+    )
+    scenes = validate_and_repair(
+        _parse_arcs_json(raw), _character(), 1, BatchControls(), enforce_beat_pool=False
+    )
+    s = scenes[0]
+    assert s.pose_detail == "curled up on the sofa"
+    for banned in ("young", "woman", "partner"):
+        assert banned not in s.pose_detail
+
+
+def test_pose_detail_round_trips_and_defaults_none_on_legacy():
+    # The batch reconciler reconstructs SceneSpec(**item.scene_spec) from jsonb.
+    s = SceneSpec(
+        arc_id="a", arc_title="A", beat_index=0, global_index=0, beat_description="b",
+        location=list(LocationType)[0], pose=list(PoseType)[0],
+        pose_detail="kneeling on the rug, back arched",
+    )
+    dumped = s.model_dump(mode="json")
+    assert dumped["pose_detail"] == "kneeling on the rug, back arched"
+    assert SceneSpec.model_validate(dumped).pose_detail == "kneeling on the rug, back arched"
+    # Legacy jsonb written before this field existed has no key -> defaults None.
+    legacy = {k: v for k, v in dumped.items() if k != "pose_detail"}
+    assert SceneSpec(**legacy).pose_detail is None
+
+
+def test_director_system_prompt_declares_pose_detail_and_setting_rules():
+    # C1a/C3: the BEAT schema and HARD RULES carry the new freeform-pose and
+    # concrete-setting instructions.
+    p = STORY_DIRECTOR_SYSTEM_PROMPT
+    assert '"pose_detail"' in p
+    assert '"pose_detail" (REQUIRED on every beat)' in p
+    assert "the enum still selects" in p and "the pose reference image" in p
+    assert "no other people, no facial-feature language" in p
+    assert '"setting" (REQUIRED on every beat)' in p
+    assert "LEADS the rendered background text" in p
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

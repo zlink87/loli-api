@@ -75,6 +75,17 @@ class SceneSpec(BaseModel):
         max_length=200,
         description="Identity-free short action phrase (what she is doing); folded into the background prompt",
     )
+    pose_detail: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Identity-free body-position/action sentence (e.g. 'curled up on the sofa, mug "
+            "in both hands, knees tucked'); REPLACES the pose enum's canned description in "
+            "the pose step's target-pose text. The `pose` enum still selects the reference "
+            "image. Body position ONLY — no other people, never facial features. Defaults "
+            "None (legacy jsonb without this key parses back to enum-description prose)."
+        ),
+    )
     outfit_detail: Optional[str] = Field(
         default=None,
         max_length=160,

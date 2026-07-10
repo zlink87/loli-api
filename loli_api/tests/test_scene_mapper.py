@@ -17,6 +17,7 @@ from models.enums import (
 from models.requests import PersonaOptions
 from models.batch import BatchControls, SeedStrategy
 from models.scene import SceneSpec
+from services import scene_vocab as sv
 from services.scene_mapper import scene_to_pipeline_request, resolve_seed
 # Use the REAL planner dataclass (not a stand-in) so the mapper<->orchestrator
 # attribute contract (hero_photo_url) is exercised exactly as at runtime.
@@ -360,6 +361,58 @@ def test_companion_phrasing_never_survives_into_the_request_prompt():
     assert "partner" not in (req.prompt or "")
     assert "a quiet cafe" in req.prompt          # setting retained (companion stripped)
     assert "practicing a new dance" in req.prompt  # activity retained (companion stripped)
+
+
+# ---------------------------------------------------------------------------
+# C1a: pose_detail is threaded from the scene onto the request (poseDetail)
+# ---------------------------------------------------------------------------
+def test_pose_detail_threaded_onto_request():
+    char = _character()
+    scene = _scene(pose=PoseType.SITTING, pose_detail="perched on a stool, ankles crossed")
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert req.poseDetail == "perched on a stool, ankles crossed"
+    # None when the scene omits it (interactive/legacy behavior unchanged).
+    req2 = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
+    assert req2.poseDetail is None
+
+
+# ---------------------------------------------------------------------------
+# C3: the director's setting LEADS the composed background text; the location
+# enum phrase follows as an anchor. The shared helper keeps its location-first
+# ordering for every caller that doesn't opt in via lead_text.
+# ---------------------------------------------------------------------------
+def test_setting_leads_background_prompt_with_location_anchor():
+    char = _character()
+    scene = _scene(pose=None, setting="a rain-streaked corner booth by the window")
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    # The authored setting sentence comes FIRST …
+    assert req.prompt.startswith("a rain-streaked corner booth by the window")
+    # … and the location enum phrase still anchors the scene right after it.
+    loc_phrase = sv.location_phrase(scene.location)
+    assert loc_phrase in req.prompt
+    assert req.prompt.index("a rain-streaked corner booth") < req.prompt.index(loc_phrase)
+
+
+def test_build_scene_background_text_default_order_unchanged():
+    # Callers that don't pass lead_text (everything except the batch scene mapper)
+    # keep the historical location-first composition byte-for-byte.
+    text = sv.build_scene_background_text(
+        location=LocationType.CAFE,
+        time_of_day=TimeOfDayType.NIGHT,
+        lighting=LightingType.CANDLELIT,
+        free_text="a marked free-text tail",
+    )
+    assert text.startswith(sv.location_phrase(LocationType.CAFE))
+    assert text.endswith("a marked free-text tail")
+    # And opting in simply prepends the lead — the rest of the order is untouched.
+    led = sv.build_scene_background_text(
+        location=LocationType.CAFE,
+        time_of_day=TimeOfDayType.NIGHT,
+        lighting=LightingType.CANDLELIT,
+        free_text="a marked free-text tail",
+        lead_text="a marked lead sentence",
+    )
+    assert led == "a marked lead sentence, " + text
 
 
 # ---------------------------------------------------------------------------

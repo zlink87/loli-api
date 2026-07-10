@@ -102,6 +102,7 @@ def build_pose_prompt(
     time_of_day: Optional[str] = None,
     outfit_text: Optional[str] = None,
     location: Optional[str] = None,
+    pose_detail: Optional[str] = None,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
@@ -172,11 +173,27 @@ def build_pose_prompt(
             sentence as "The scene is {location phrase}." to re-anchor the scene the
             full re-diffusion must stay in. None, or a value absent from the map,
             appends nothing (never injects a raw enum string).
+        pose_detail: Optional identity-free freeform body-position/action sentence
+            (e.g. SceneSpec.pose_detail via PipelineEditRequest.poseDetail). When it
+            survives strip_companions (same defensive scrub as ``activity``), it
+            REPLACES the canned POSE_DESCRIPTIONS[pose] text in the "The target pose
+            is: {…}" sentence — the pose ENUM still picks the reference image
+            (image 2); the freeform text only sharpens the described target so the
+            director's own wording drives the render instead of ~16 baked phrases.
+            None/empty (or companion-only after the scrub) falls back to
+            POSE_DESCRIPTIONS[pose] exactly as today. Everything else in the prompt
+            (keep-background, solo, outfit continuity, …) is unchanged.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
     """
     desc = POSE_DESCRIPTIONS.get(pose, "natural pose")
+    # Freeform pose text (C1a): the director's own body-position sentence replaces
+    # the canned enum description; companion-scrubbed like `activity` so a stray
+    # "… with a partner" can't paint an extra person into the solo frame.
+    pose_detail_clean = sv.strip_companions(pose_detail)
+    if pose_detail_clean and pose_detail_clean.strip():
+        desc = pose_detail_clean.strip()
     clause = pc.pose_identity_clause()
     # Keep-the-background instruction REPLACES the former "Adapt the background and
     # environment to suit the pose naturally." — that sentence was the licence the

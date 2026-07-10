@@ -714,6 +714,42 @@ def test_pose_prompt_keep_background_solo_and_location():
 
 
 # ---------------------------------------------------------------------------
+# c27b — build_pose_prompt pose_detail (C1a): the freeform director sentence
+# REPLACES the enum description in "The target pose is: {…}" (the enum still
+# picks the reference image); None/empty/companion-only falls back to the enum
+# text exactly; companion phrasing is stripped from a mixed detail.
+# ---------------------------------------------------------------------------
+def test_pose_prompt_pose_detail_replaces_enum_description():
+    base = pose_ep.build_pose_prompt(PoseType.SITTING)
+    enum_desc = pose_ep.POSE_DESCRIPTIONS[PoseType.SITTING]
+    assert f"The target pose is: {enum_desc}." in base
+
+    # The freeform sentence replaces the enum description — and ONLY it: the rest
+    # of the prompt (keep-background, solo, …) is byte-identical.
+    custom = "curled up on the sofa, mug in both hands, knees tucked"
+    detailed = pose_ep.build_pose_prompt(PoseType.SITTING, pose_detail=custom)
+    assert f"The target pose is: {custom}." in detailed
+    assert enum_desc not in detailed
+    assert detailed == base.replace(enum_desc, custom)
+
+    # Fallback: None / empty / whitespace -> the enum text exactly as today.
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, pose_detail=None) == base
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, pose_detail="   ") == base
+
+    # Companion phrasing is stripped from the detail before it lands (solo frame).
+    danced = pose_ep.build_pose_prompt(
+        PoseType.SITTING, pose_detail="slow dancing barefoot with a partner"
+    )
+    assert "The target pose is: slow dancing barefoot." in danced
+    assert "partner" not in danced
+    # A companion-only detail contributes nothing -> enum-text fallback.
+    assert pose_ep.build_pose_prompt(
+        PoseType.SITTING, pose_detail="with a group of friends"
+    ) == base
+    print("c27b OK: pose_detail replaces the enum description; None/companion-only fall back; companions stripped")
+
+
+# ---------------------------------------------------------------------------
 # c28 — build_pose_prompt outfit continuity: a plain garment reads "wearing X …",
 # a NAKED-tier text reads "she is completely naked … keep her state of dress" (never
 # "wearing completely naked").
@@ -884,6 +920,7 @@ def _run_all():
         test_outfit_nude_base_mode_neutral_body,
         test_strip_companions,
         test_pose_prompt_keep_background_solo_and_location,
+        test_pose_prompt_pose_detail_replaces_enum_description,
         test_pose_prompt_outfit_continuity_phrasing,
         test_outfit_continuity_text,
         test_outfit_dress_mode_lead,

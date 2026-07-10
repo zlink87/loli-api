@@ -229,6 +229,50 @@ def test_reconcile_noop_when_no_outfit_or_no_detail():
 
 
 # ---------------------------------------------------------------------------
+# C2: caption-first outfits — ANY scene with a garment caption renders the caption
+# (detail-dominant), not the enum's tier prose; the enum only gates the step and
+# carries the nudity ramp. Widens the earlier unmapped/conflict-only rule.
+# ---------------------------------------------------------------------------
+def test_any_caption_marks_detail_dominant_after_repair():
+    # Caption and enum agree perfectly — previously enum-driven, now caption-first.
+    scene = _scene(outfit=OutfitType.SILK_PAJAMAS, outfit_detail="champagne silk pajama set")
+    out = validate_and_repair([scene], _character(), 1, BatchControls(base_seed=1),
+                              enforce_beat_pool=False)
+    assert out[0].outfit == OutfitType.SILK_PAJAMAS
+    assert out[0].outfit_detail_dominant is True
+
+
+def test_no_caption_stays_enum_driven():
+    # Without a caption there is nothing to be dominant with — tier prose renders.
+    scene = _scene(outfit=OutfitType.SILK_PAJAMAS)
+    out = validate_and_repair([scene], _character(), 1, BatchControls(base_seed=1),
+                              enforce_beat_pool=False)
+    assert out[0].outfit_detail_dominant is False
+
+
+def test_naked_outfit_never_marked_dominant():
+    # NAKED keeps enum-driven prose (build_prompt ignores the flag there anyway; a
+    # "caption" would fight the removal lead).
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, start_nudity=NudityLevel.HIGH,
+                             blocked_outfits=[], base_seed=1)
+    scene = _scene(outfit=OutfitType.NAKED, nudityLevel=NudityLevel.HIGH,
+                   outfit_detail="nothing but a thin gold chain")
+    out = validate_and_repair([scene], _character(), 1, controls, enforce_beat_pool=False)
+    assert out[0].outfit == OutfitType.NAKED
+    assert out[0].outfit_detail_dominant is False
+
+
+def test_blocked_caption_with_enum_stays_enum_driven():
+    # A caption that confidently names a BLOCKED garment must not become dominant —
+    # rendering it alone would re-introduce the blocked type (allow/block wins).
+    controls = BatchControls(blocked_outfits=[OutfitType.NAKED, OutfitType.BIKINI], base_seed=1)
+    scene = _scene(outfit=OutfitType.SATIN_ROBE, outfit_detail="a tiny bikini")
+    out = validate_and_repair([scene], _character(), 1, controls, enforce_beat_pool=False)
+    assert out[0].outfit == OutfitType.SATIN_ROBE
+    assert out[0].outfit_detail_dominant is False
+
+
+# ---------------------------------------------------------------------------
 # Batch default flip
 # ---------------------------------------------------------------------------
 def test_batch_controls_defaults_outfit_prompt_mode_to_replace():
@@ -244,6 +288,9 @@ def test_director_prompt_requires_non_null_outfit_matching_detail():
     p = STORY_DIRECTOR_SYSTEM_PROMPT
     assert "every beat MUST set a non-null" in p         # outfit is mandatory on every beat
     assert "MUST describe the SAME garment" in p         # outfit_detail matches the outfit enum
+    # C2: a concrete garment caption is required on EVERY beat and IS the rendered text.
+    assert '"outfit_detail" is REQUIRED on EVERY beat and IS the exact garment text' in p
+    assert "faded blue oversized band t-shirt, off one shoulder" in p  # colors/fit/state example
 
 
 def test_director_user_prompt_reinforces_mandatory_outfit():

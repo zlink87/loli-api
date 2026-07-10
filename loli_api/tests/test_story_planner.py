@@ -488,6 +488,88 @@ def test_manual_path_bypasses_ramp_and_variety():
     assert out[0].pose == out[1].pose == PoseType.STANDING_LEANING  # variety bypassed
 
 
+# --- per-batch pose/location usage caps (C1b) ---
+def _monoculture_scenes(n, pose=PoseType.STANDING_LEANING,
+                        location=LocationType.HOME_LIVING_ROOM, pose_detail=None):
+    return [
+        SceneSpec(arc_id="a", arc_title="A", beat_index=i, global_index=i,
+                  beat_description=f"b{i}", pose=pose, location=location,
+                  pose_detail=pose_detail, nudityLevel=NudityLevel.LOW)
+        for i in range(n)
+    ]
+
+
+def test_usage_caps_break_pose_and_location_monoculture():
+    # The reported failure: a real 24-item batch used pose "standing_leaning" 8x and
+    # parked whole runs in one location. Feed the repairer that exact monoculture
+    # (director path: enforce_beat_pool=False, no slot pools constrain the re-picks).
+    controls = BatchControls(base_seed=11)
+    detail = "leaning against the doorframe, arms crossed"
+    scenes = _monoculture_scenes(24, pose_detail=detail)
+    out = validate_and_repair([s.model_copy(deep=True) for s in scenes], _character(), 24,
+                              controls, enforce_beat_pool=False)
+    pose_counts: dict = {}
+    loc_counts: dict = {}
+    for s in out:
+        if s.pose is not None:
+            pose_counts[s.pose.value] = pose_counts.get(s.pose.value, 0) + 1
+        loc_counts[s.location.value] = loc_counts.get(s.location.value, 0) + 1
+    assert max(pose_counts.values()) <= 3, pose_counts   # max(2, ceil(24/8)) = 3
+    assert max(loc_counts.values()) <= 4, loc_counts     # max(2, ceil(24/6)) = 4
+    # A re-picked pose drops its now-stale freeform pose_detail (it was authored for
+    # the OLD pose, and the new reference image no longer shows that body position);
+    # a kept pose keeps its detail.
+    changed = kept = 0
+    for orig, rep in zip(scenes, out):
+        if rep.pose != orig.pose:
+            changed += 1
+            assert rep.pose_detail is None
+        else:
+            kept += 1
+            assert rep.pose_detail == detail
+    assert changed and kept                              # both branches exercised
+    # Deterministic: same input + base_seed -> identical repair.
+    out2 = validate_and_repair([s.model_copy(deep=True) for s in scenes], _character(), 24,
+                               controls, enforce_beat_pool=False)
+    assert [(s.pose, s.location, s.pose_detail) for s in out] == \
+        [(s.pose, s.location, s.pose_detail) for s in out2]
+
+
+def test_usage_caps_respect_blocked_lists():
+    # Cap re-picks draw from the controls-filtered vocab only: a blocked pose or
+    # location is never introduced to satisfy a cap.
+    controls = BatchControls(
+        base_seed=5, blocked_poses=[PoseType.SITTING],
+        blocked_locations=[LocationType.BEACH, LocationType.POOLSIDE],
+    )
+    out = validate_and_repair(_monoculture_scenes(12), _character(), 12, controls,
+                              enforce_beat_pool=False)
+    for s in out:
+        assert s.pose != PoseType.SITTING
+        assert s.location not in (LocationType.BEACH, LocationType.POOLSIDE)
+    pose_counts: dict = {}
+    loc_counts: dict = {}
+    for s in out:
+        if s.pose is not None:
+            pose_counts[s.pose.value] = pose_counts.get(s.pose.value, 0) + 1
+        loc_counts[s.location.value] = loc_counts.get(s.location.value, 0) + 1
+    assert max(pose_counts.values()) <= 2                # max(2, ceil(12/8)) = 2
+    assert max(loc_counts.values()) <= 2                 # max(2, ceil(12/6)) = 2
+
+
+def test_usage_caps_skipped_on_manual_path():
+    # The manual path (enforce_variety=False) keeps an admin's exact repeats intact —
+    # the caps ride the variety gate, like the pair-dedup pass.
+    controls = BatchControls(base_seed=1)
+    out = validate_and_repair(
+        _monoculture_scenes(12), _character(), 12, controls,
+        enforce_beat_pool=False, enforce_nudity_ramp=False, enforce_variety=False,
+        enforce_time_ramp=False,
+    )
+    assert all(s.pose == PoseType.STANDING_LEANING for s in out)
+    assert all(s.location == LocationType.HOME_LIVING_ROOM for s in out)
+
+
 # --- time ramp derivation (period_days timeline) ---
 def test_time_ramp_single_day_is_monotonic_dawn_to_night():
     ramp = sp._time_ramp(8, period_days=1)

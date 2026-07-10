@@ -55,46 +55,29 @@ def _effective_outfit(scene: SceneSpec, controls: BatchControls) -> Optional[Out
     return outfit
 
 
-def _render_free_text(scene: SceneSpec, include_activity: bool) -> Optional[str]:
+def _clean_scene_part(text: Optional[str]) -> Optional[str]:
     """
-    The AI-authored, identity-free scene text folded into the background prompt so the
-    planned "day" actually reaches the render instead of collapsing to bare
-    location/time/lighting phrases. Draws from the story-director's ``setting`` (the place
-    the director purpose-writes for the render environment) and, when no pose step consumes
-    it, ``activity`` (what she is doing) — deduped, and each part dropped (not appended) if
-    it contains generic glamour/stock-photo filler (see
+    Clean ONE AI-authored, identity-free scene part (``setting``/``activity``) for the
+    background prompt. Run through scene_vocab.strip_companions so a stray "with a
+    partner"/crowd tail can't paint extra people into the background (returns None when
+    nothing meaningful survives), then dropped entirely (None, not word-surgered) if it
+    contains generic glamour/stock-photo filler (see
     prompt_constants.has_banned_style_words): that filler fights the scene's own
     location/lighting attributes rather than describing it, and word-surgery on an
-    already-written sentence leaves broken grammar, so the safer move is to skip a bad part
-    entirely and keep the rest. Each surviving part is run through
-    scene_vocab.strip_companions so a stray "with a partner"/crowd tail can't paint extra
-    people into the background.
+    already-written sentence leaves broken grammar, so the safer move is to skip a bad
+    part and keep the rest of the composition.
 
-    ``beat_description`` is deliberately NOT read here: it is the human-facing narrative
-    caption (persona name, actions, companions — e.g. "Lily practices a new dance with a
-    partner"), which leaks narrative/people into the scene render. ``setting`` is the field
-    the director writes for the render; the caption stays gallery-only.
-
-    ``include_activity``: False when a pose step is active for this scene — the
-    activity phrase then rides the pose step's own prompt instead (see
-    api.v1.endpoints.pose.build_pose_prompt), so folding it into the background text
-    too would say the same thing on two separate render channels. True (today's
-    behavior) when there's no pose step, so the activity isn't lost entirely.
-
-    NOTE: ``scene.narrative`` (free story prose) is deliberately NOT read here — it stays
-    gallery-only so it can never leak identity/style into a render.
+    ``beat_description`` is deliberately NEVER fed through here: it is the human-facing
+    narrative caption (persona name, actions, companions — e.g. "Lily practices a new
+    dance with a partner"), which leaks narrative/people into the scene render.
+    ``setting`` is the field the director writes for the render; the caption stays
+    gallery-only. ``scene.narrative`` (free story prose) likewise stays gallery-only so
+    it can never leak identity/style into a render.
     """
-    parts = (scene.activity, scene.setting) if include_activity else (scene.setting,)
-    kept: list[str] = []
-    for part in parts:
-        # strip_companions returns None when nothing meaningful survives (the whole part
-        # was a companion/crowd phrase); it also trims/normalizes whitespace.
-        text = sv.strip_companions(part)
-        if not text or pc.has_banned_style_words(text):
-            continue
-        if text not in kept:  # de-dup identical parts
-            kept.append(text)
-    return ", ".join(kept) or None
+    cleaned = sv.strip_companions(text)
+    if not cleaned or pc.has_banned_style_words(cleaned):
+        return None
+    return cleaned
 
 
 def resolve_seed(controls: BatchControls, scene_index: int) -> Optional[int]:
@@ -149,13 +132,26 @@ def scene_to_pipeline_request(
     else:
         outfit_prompt_mode = controls.outfit_prompt_mode
 
+    # C3 setting-led scenery: the director's ``setting`` sentence LEADS the composed
+    # background text (lead_text), with the location enum phrase following as an anchor,
+    # then time/lighting/mood — so the authored place description drives the render
+    # instead of trailing ~30 canned location phrases. ``activity`` is dual-routed: it
+    # rides the pose step's own prompt when a pose step is active (see
+    # api.v1.endpoints.pose.build_pose_prompt) — folding it into the background too
+    # would say the same thing on two separate render channels — and only falls back to
+    # the background free-text tail when there is no pose step, so it isn't lost.
+    setting_text = _clean_scene_part(scene.setting)
+    activity_text = _clean_scene_part(scene.activity) if pose is None else None
+    if activity_text and activity_text == setting_text:
+        activity_text = None  # de-dup identical parts
     background_text = scene.background_text or sv.build_scene_background_text(
         location=scene.location,
         time_of_day=scene.time_of_day,
         lighting=scene.lighting,
         mood_kinks=scene.mood_kinks,
         mood_personality=scene.mood_personality,
-        free_text=_render_free_text(scene, include_activity=(pose is None)),
+        free_text=activity_text,
+        lead_text=setting_text,
     )
 
     # Guarantee at least one active step (PipelineEditRequest requires >=1).
@@ -181,6 +177,12 @@ def scene_to_pipeline_request(
         # today (populated by a later agent) -> falls back to the hero photo unchanged.
         source_image=getattr(character, "nude_base_url", None) or character.hero_photo_url,
         pose=pose,
+        # C1a freeform pose text: identity-free and single-consumer (read only by the
+        # pose step's build_pose_prompt, which simply doesn't run when the step is
+        # absent), so it passes straight through unconditionally — same treatment as
+        # outfitDetail/expression below. getattr keeps back-compat with legacy
+        # scene_spec jsonb / test stand-ins that predate the field.
+        poseDetail=getattr(scene, "pose_detail", None),
         outfit=outfit,
         # WS2 structured description channels: outfit_detail/expression are
         # identity-free and single-consumer (read only by the outfit/pose step
