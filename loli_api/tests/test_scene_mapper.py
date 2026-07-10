@@ -269,6 +269,50 @@ def test_outfit_prompt_mode_defaults_to_replace():
 
 
 # ---------------------------------------------------------------------------
+# B2: additive dressing on a nude base overrides the (incoherent) replace mode
+# ---------------------------------------------------------------------------
+def test_nude_base_source_forces_dress_mode_for_garment():
+    # A populated nude_base_url makes the swap SOURCE a bare body, where "replace"
+    # ("remove the current outfit…") is incoherent — the mapper forces "dress".
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
+    assert req.source_image == "https://x.supabase.co/nude.png"
+    assert req.outfitPromptMode == "dress"  # overrides controls' "replace"
+
+
+def test_no_nude_base_keeps_controls_prompt_mode():
+    # Without a nude base (hero-photo source) the controls value passes straight through.
+    char = _character()  # nude_base_url defaults to None
+    req = scene_to_pipeline_request(
+        char, _scene(outfit=OutfitType.BUSINESS_SUIT),
+        BatchControls(outfit_prompt_mode="standard"),
+    )
+    assert req.outfitPromptMode == "standard"
+
+
+def test_nude_base_naked_outfit_is_not_dressed():
+    # NAKED never gets "dress" (nothing to additively add) even on a nude source —
+    # the controls value is kept. blocked_outfits cleared so NAKED reaches the request.
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    controls = BatchControls(blocked_outfits=[], outfit_prompt_mode="replace")
+    req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.NAKED), controls)
+    assert req.outfit == OutfitType.NAKED
+    assert req.outfitPromptMode == "replace"  # NOT "dress"
+
+
+# ---------------------------------------------------------------------------
+# B1: location (raw enum value) is threaded onto the request for the pose step
+# ---------------------------------------------------------------------------
+def test_location_threaded_onto_request():
+    char = _character()
+    scene = _scene(pose=PoseType.SITTING, location=LocationType.BEACH)
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert req.location == "beach"  # raw enum-value string, phrase-ified at the pose step
+
+
+# ---------------------------------------------------------------------------
 # W3 prep: lighting / timeOfDay flow from the scene onto the request (additive)
 # ---------------------------------------------------------------------------
 def test_lighting_and_time_of_day_mapped_from_scene():

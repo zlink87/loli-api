@@ -119,6 +119,60 @@ def _outfit_replace_lead(outfit: OutfitType, outfit_desc: str) -> str:
     )
 
 
+def _outfit_dress_lead(outfit: OutfitType, outfit_desc: str) -> str:
+    """
+    Lead sentence for dressing a NUDE source (PR3 additive dressing).
+
+    Selected via ``prompt_mode="dress"`` — set by the batch mapper when the swap
+    SOURCE is the character's nude base (a bare body) and the target is a real
+    garment. On a nude body the "replace" lead ("remove the current clothing …")
+    is incoherent: there is no garment to remove, so it no-ops for some outfits and
+    leaves the body bare. This lead instead states the body is currently nude and
+    instructs the model to render the new clothing straight onto it (additive).
+    ``outfit`` is accepted for signature stability, mirroring the other lead helpers.
+    """
+    return (
+        f"The person is currently completely nude; dress them in: {outfit_desc}; "
+        f"render the clothing fully and realistically on the body exactly as described"
+    )
+
+
+def outfit_continuity_text(
+    outfit: Optional[OutfitType],
+    nudity_level: NudityLevel,
+    outfit_detail: Optional[str],
+) -> Optional[str]:
+    """
+    The garment text the POSE step should preserve (state-of-dress continuity).
+
+    The pose step fully re-diffuses the frame with no outfit language of its own, so
+    it stochastically strips or re-invents clothing. build_pose_prompt takes this
+    text and tells the model to keep exactly that state of dress. This helper is the
+    single source of what "that state" is, matching what the outfit step actually
+    rendered:
+
+      * ``outfit_detail`` (stripped) when non-empty — the concrete garment the outfit
+        step was sharpened with wins over the generic tier prose;
+      * else the ``OUTFIT_DESCRIPTIONS[outfit][nudity_level]`` tier prose, with the
+        SAME fallbacks build_prompt uses (missing level -> the LOW tier; an outfit
+        absent from the map -> ``str(outfit.value)``);
+      * ``None`` when ``outfit`` is None — there was no outfit step, so there is no
+        state of dress to assert.
+
+    Deliberately dumb and side-effect-free: it only selects text, never phrases the
+    continuity sentence (build_pose_prompt does that, because NAKED-tier prose needs
+    different phrasing than a garment — see its ``outfit_text`` param).
+    """
+    if outfit is None:
+        return None
+    if outfit_detail and outfit_detail.strip():
+        return outfit_detail.strip()
+    outfit_levels = OUTFIT_DESCRIPTIONS.get(outfit)
+    if outfit_levels:
+        return outfit_levels.get(nudity_level, outfit_levels[NudityLevel.LOW])
+    return str(outfit.value)
+
+
 def build_prompt(
     outfit: OutfitType,
     accessories: Optional[List[AccessoryType]],
@@ -156,9 +210,14 @@ def build_prompt(
               lead to explicitly clear any stray garment/bra/strap/underwear (the
               leftover-strap failure). On the dressed branch it falls through to
               the "standard" lead (nude_base is only ever paired with NAKED).
-            Any unrecognized value behaves like "standard". (A "dress" mode is
-            planned for a following PR; the dressed-branch else-arm below is left
-            structured so adding it is a one-line addition.)
+            * "dress" — dressed-branch only (PR3 additive dressing): swaps the
+              lead-in for ``_outfit_dress_lead`` ("the person is currently
+              completely nude; dress them in: …"). Set by the batch mapper when the
+              swap SOURCE is the character's nude base, where the "replace" removal
+              lead is incoherent (nothing to remove) and no-ops the garment. The
+              NAKED branch IGNORES "dress" (dressing a NAKED target is a
+              contradiction) — it falls through to the standard removal lead.
+            Any unrecognized value behaves like "standard".
         lighting: Optional raw lighting enum-VALUE string (e.g.
             PipelineEditRequest.lighting, sourced from SceneSpec.lighting —
             values like "moody_dim"/"candlelit"/"neon"). Phrase-ified via
@@ -206,11 +265,13 @@ def build_prompt(
         ]
     else:
         # Dressed branch. "replace" opts into the explicit remove-then-replace
-        # lead; every other mode ("standard", "nude_base", or an unrecognized
-        # value) uses the neutral change lead. A future "dress" mode slots in as
-        # another arm here.
+        # lead; "dress" (nude-base source) opts into the additive dress-onto-bare-
+        # body lead; every other mode ("standard", "nude_base", or an unrecognized
+        # value) uses the neutral change lead.
         if prompt_mode == "replace":
             lead = _outfit_replace_lead(outfit, outfit_desc)
+        elif prompt_mode == "dress":
+            lead = _outfit_dress_lead(outfit, outfit_desc)
         else:
             lead = _outfit_change_lead(outfit, outfit_desc)
         if outfit_detail and outfit_detail.strip():

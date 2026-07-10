@@ -78,6 +78,8 @@ from models.requests import PersonaOptions, OutfitEditRequest, PoseEditRequest  
 from services import attribute_phrases as ap  # noqa: E402
 from services import prompt_constants as pc  # noqa: E402
 from services import prompt_generator as pg  # noqa: E402
+from services import scene_vocab as sv  # noqa: E402
+from services.outfit_vocab import OUTFIT_DESCRIPTIONS  # noqa: E402
 from api.v1.endpoints import outfit as outfit_ep  # noqa: E402
 from api.v1.endpoints import pose as pose_ep  # noqa: E402
 from api.v1.endpoints import background as background_ep  # noqa: E402
@@ -152,7 +154,13 @@ def test_pose_prompt_identity_and_framing():
     # Surrounding sentences preserved.
     assert "Make the person in image 1 do the exact same pose" in prompt
     assert "The new pose should match image 2 accurately." in prompt
-    assert "Adapt the background and environment to suit the pose naturally." in prompt
+    # B1: the old "Adapt the background…" licence-to-re-invent sentence is REPLACED
+    # by an explicit keep-the-background instruction.
+    assert (
+        "Keep the same background, location and environment as image 1, adjusting "
+        "only perspective to fit the new pose." in prompt
+    )
+    assert "Adapt the background and environment to suit the pose naturally." not in prompt
     # The pose-specific clause is what supplies the identity terms.
     assert pc.pose_identity_clause() in prompt
     print("c4 OK: pose prompt has body proportion + outfit + eye color + framing")
@@ -637,6 +645,164 @@ def test_outfit_nude_base_mode_neutral_body():
 
 
 # ---------------------------------------------------------------------------
+# c26 — scene_vocab.strip_companions: companion truncation, crowd-noun removal
+# with dangling-word cleanup, clean passthrough, None/empty handling.
+# ---------------------------------------------------------------------------
+def test_strip_companions():
+    # 1. Companion tail truncation — everything from "with <someone>" is dropped.
+    assert sv.strip_companions("practicing a new dance with a partner") == "practicing a new dance"
+    assert sv.strip_companions("dancing with a partner") == "dancing"
+    assert sv.strip_companions("chatting with a couple of colleagues") == "chatting"
+    assert sv.strip_companions("reading a book with her friends in a cafe") == "reading a book"
+
+    # 2. Crowd nouns removed with the dangling connector ("full of"/"with") trimmed —
+    # NOT left as "a lively street full of".
+    assert sv.strip_companions("a lively street full of passersby") == "a lively street"
+    assert sv.strip_companions("a busy plaza with onlookers") == "a busy plaza"
+
+    # 3. Nothing meaningful left -> None.
+    assert sv.strip_companions("with a group of friends") is None
+    assert sv.strip_companions("surrounded by a crowd") is None
+
+    # 4. Clean passthrough (no companion/crowd phrasing) is unchanged.
+    assert sv.strip_companions("pouring her first coffee") == "pouring her first coffee"
+    assert sv.strip_companions("standing by the window at dawn") == "standing by the window at dawn"
+
+    # 5. None / empty / whitespace-only -> None.
+    assert sv.strip_companions(None) is None
+    assert sv.strip_companions("") is None
+    assert sv.strip_companions("   ") is None
+    print("c26 OK: strip_companions truncates companions, removes crowds w/ cleanup, passes clean text, handles None/empty")
+
+
+# ---------------------------------------------------------------------------
+# c27 — build_pose_prompt B1 guards: keep-background sentence (NOT "Adapt the
+# background"), always-on solo constraint (even bare interactive call), location
+# phrase rendered when given, activity companion-stripping.
+# ---------------------------------------------------------------------------
+def test_pose_prompt_keep_background_solo_and_location():
+    base = pose_ep.build_pose_prompt(PoseType.SITTING)
+
+    # Keep-background REPLACES the old adapt-the-background licence.
+    assert (
+        "Keep the same background, location and environment as image 1, adjusting "
+        "only perspective to fit the new pose." in base
+    )
+    assert "Adapt the background and environment to suit the pose naturally." not in base
+
+    # Solo constraint ALWAYS present — even the bare interactive /v1/edit/pose call.
+    solo = "She is completely alone in the frame — exactly one person, no other people."
+    assert solo in base
+
+    # Location phrase appended right after the keep-background sentence when given
+    # (raw enum value -> phrase; the raw string never leaks).
+    located = pose_ep.build_pose_prompt(PoseType.SITTING, location="home_bedroom")
+    assert "The scene is a cozy sunlit bedroom with soft bedding and warm decor." in located
+    assert "home_bedroom" not in located
+    # Unknown/None location -> no clause, byte-identical to base.
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, location="not_a_location") == base
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, location=None) == base
+
+    # Activity companion-stripping: "dancing with a partner" -> "dancing" (no "partner").
+    danced = pose_ep.build_pose_prompt(PoseType.SITTING, activity="dancing with a partner")
+    assert ", while dancing" in danced
+    assert "partner" not in danced
+    # A companion-only activity contributes no clause at all.
+    companions_only = pose_ep.build_pose_prompt(PoseType.SITTING, activity="with a group of friends")
+    assert companions_only == base
+    print("c27 OK: keep-background replaces adapt; solo always present; location rendered; activity companion-stripped")
+
+
+# ---------------------------------------------------------------------------
+# c28 — build_pose_prompt outfit continuity: a plain garment reads "wearing X …",
+# a NAKED-tier text reads "she is completely naked … keep her state of dress" (never
+# "wearing completely naked").
+# ---------------------------------------------------------------------------
+def test_pose_prompt_outfit_continuity_phrasing():
+    base = pose_ep.build_pose_prompt(PoseType.SITTING)
+
+    # Plain garment -> "wearing {text}; keep her state of dress and every garment …".
+    garment = "a tailored charcoal business suit"
+    g = pose_ep.build_pose_prompt(PoseType.SITTING, outfit_text=garment)
+    assert f"In image 1 she is wearing {garment}; keep her state of dress and every garment exactly as in image 1, fully intact." in g
+
+    # NAKED-tier text (starts with a state-of-dress word) -> "she is {text}; keep her
+    # state of dress exactly …" — must NOT become "wearing completely naked".
+    naked_tier = OUTFIT_DESCRIPTIONS[OutfitType.NAKED][NudityLevel.HIGH]
+    assert naked_tier.startswith("completely naked")
+    n = pose_ep.build_pose_prompt(PoseType.SITTING, outfit_text=naked_tier)
+    assert f"In image 1 she is {naked_tier}; keep her state of dress exactly as in image 1." in n
+    assert "wearing completely naked" not in n
+
+    # "topless"/"wearing"-led texts also take the state-word phrasing.
+    topless_tier = OUTFIT_DESCRIPTIONS[OutfitType.NAKED][NudityLevel.MEDIUM]
+    assert topless_tier.startswith("topless")
+    t = pose_ep.build_pose_prompt(PoseType.SITTING, outfit_text=topless_tier)
+    assert f"In image 1 she is {topless_tier}; keep her state of dress exactly as in image 1." in t
+    assert "wearing topless" not in t
+
+    # None -> no continuity sentence, byte-identical to base.
+    assert pose_ep.build_pose_prompt(PoseType.SITTING, outfit_text=None) == base
+    print("c28 OK: outfit continuity uses 'wearing X' for garments and 'she is X' for NAKED-tier text")
+
+
+# ---------------------------------------------------------------------------
+# c29 — outfit_continuity_text: detail wins over tier prose; tier-prose fallback;
+# None outfit -> None.
+# ---------------------------------------------------------------------------
+def test_outfit_continuity_text():
+    # outfit_detail (stripped) wins over the generic tier prose.
+    assert (
+        outfit_ep.outfit_continuity_text(
+            OutfitType.BUSINESS_SUIT, NudityLevel.LOW, "  charcoal wool pantsuit  "
+        )
+        == "charcoal wool pantsuit"
+    )
+    # No detail -> the OUTFIT_DESCRIPTIONS tier prose at the requested level.
+    assert (
+        outfit_ep.outfit_continuity_text(OutfitType.BUSINESS_SUIT, NudityLevel.HIGH, None)
+        == OUTFIT_DESCRIPTIONS[OutfitType.BUSINESS_SUIT][NudityLevel.HIGH]
+    )
+    # Empty/whitespace detail is treated as absent -> tier prose.
+    assert (
+        outfit_ep.outfit_continuity_text(OutfitType.BIKINI, NudityLevel.LOW, "   ")
+        == OUTFIT_DESCRIPTIONS[OutfitType.BIKINI][NudityLevel.LOW]
+    )
+    # None outfit -> None (no outfit step, nothing to preserve).
+    assert outfit_ep.outfit_continuity_text(None, NudityLevel.LOW, None) is None
+    assert outfit_ep.outfit_continuity_text(None, NudityLevel.HIGH, "ignored") is None
+    print("c29 OK: outfit_continuity_text: detail wins, tier-prose fallback, None outfit -> None")
+
+
+# ---------------------------------------------------------------------------
+# c30 — build_prompt prompt_mode="dress" (additive dressing on a nude source):
+# dressed branch uses the dress lead; NAKED+dress falls back to the removal lead.
+# ---------------------------------------------------------------------------
+def test_outfit_dress_mode_lead():
+    dressed = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, prompt_mode="dress",
+    )
+    assert "The person is currently completely nude; dress them in:" in dressed
+    assert "render the clothing fully and realistically on the body exactly as described" in dressed
+    # It is a distinct lead from standard/replace on the dressed branch.
+    assert "Change the person's outfit to:" not in dressed
+    assert "Remove the person's current clothing completely and replace it with:" not in dressed
+    # Rest of the dressed-branch prompt (identity clause, "only change") intact.
+    assert "only change the clothing, nothing else" in dressed
+
+    # NAKED IGNORES "dress" (dressing a NAKED target is a contradiction): it falls
+    # through to the standard removal lead, byte-identical to the default NAKED call.
+    naked_default = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH)
+    naked_dress = outfit_ep.build_prompt(
+        OutfitType.NAKED, None, NudityLevel.HIGH, prompt_mode="dress",
+    )
+    assert naked_dress == naked_default
+    assert naked_dress.startswith("Remove all clothing")
+    assert "dress them in" not in naked_dress
+    print("c30 OK: dress mode uses the nude-source dress lead; NAKED+dress falls back to the removal lead")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -663,6 +829,11 @@ def _run_all():
         test_pose_prompt_time_of_day_appended_and_combines_with_lighting,
         test_outfit_prompt_lighting_appended_after_outfit_detail,
         test_outfit_nude_base_mode_neutral_body,
+        test_strip_companions,
+        test_pose_prompt_keep_background_solo_and_location,
+        test_pose_prompt_outfit_continuity_phrasing,
+        test_outfit_continuity_text,
+        test_outfit_dress_mode_lead,
     ]
     failures = 0
     for fn in tests:

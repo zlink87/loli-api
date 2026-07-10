@@ -28,7 +28,7 @@ from services.image_cache_service import ImageCacheService
 from models.enums import JobStatus
 
 # Import helpers from existing endpoint modules
-from api.v1.endpoints.outfit import build_prompt, prepare_outfit_workflow
+from api.v1.endpoints.outfit import build_prompt, prepare_outfit_workflow, outfit_continuity_text
 from api.v1.endpoints.pose import build_pose_prompt, prepare_pose_workflow
 from api.v1.endpoints.background import build_background_prompt, prepare_background_workflow
 
@@ -334,6 +334,21 @@ class PipelineBackgroundWorker:
                     # build_pose_prompt phrase-ifies them via scene_vocab.
                     lighting=getattr(request, "lighting", None),
                     time_of_day=getattr(request, "timeOfDay", None),
+                    # B1 fidelity: because this last step re-diffuses the whole frame,
+                    # feed it the state-of-dress it must preserve (else clothing is
+                    # stripped stochastically) and the location it must stay in (else
+                    # the scene is re-invented). outfit_text is None when no outfit
+                    # step ran (nothing to preserve); location no-ops on None/unknown.
+                    outfit_text=(
+                        outfit_continuity_text(
+                            request.outfit,
+                            request.nudityLevel,
+                            getattr(request, "outfitDetail", None),
+                        )
+                        if request.outfit is not None
+                        else None
+                    ),
+                    location=getattr(request, "location", None),
                 ),
                 photo_style,
             )

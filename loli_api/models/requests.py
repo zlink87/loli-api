@@ -764,6 +764,18 @@ class PipelineEditRequest(BaseModel):
             "prompt unchanged."
         ),
     )
+    location: Optional[str] = Field(
+        default=None,
+        max_length=60,
+        description=(
+            "Optional scene-location descriptor (e.g. from SceneSpec.location, an enum "
+            "value like 'home_bedroom'/'beach'/'cafe'). Phrase-ified (via services.scene_vocab) "
+            "and appended to the pose step's prompt as the scene the reposed frame must keep — "
+            "the pose step is the only step that re-diffuses the whole frame, so it is the one "
+            "place the location can be re-anchored. Unrecognized values or None leave the "
+            "prompt unchanged."
+        ),
+    )
     prompt: Optional[str] = Field(
         default=None,
         max_length=2000,

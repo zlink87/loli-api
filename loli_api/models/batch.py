@@ -68,7 +68,10 @@ class BatchControls(BaseModel):
             "then describe the new outfit) | 'standard' (append the outfit description only). "
             "Batch source avatars are dressed-by-default, so removal must be explicit or the "
             "swap tends to reconstruct the original garment. The admin UI should align its "
-            "default to 'replace' (or omit the field so this backend default applies)."
+            "default to 'replace' (or omit the field so this backend default applies). "
+            "NOTE: when the character has an active nude base, the mapper automatically "
+            "overrides this to 'dress' (additive dress-onto-bare-body) for garment scenes — "
+            "'replace' on a nude source is incoherent (there is no current clothing to remove)."
         ),
     )
     blocked_poses: List[PoseType] = Field(default_factory=list)

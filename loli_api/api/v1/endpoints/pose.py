@@ -100,16 +100,31 @@ def build_pose_prompt(
     expression: Optional[str] = None,
     lighting: Optional[str] = None,
     time_of_day: Optional[str] = None,
+    outfit_text: Optional[str] = None,
+    location: Optional[str] = None,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
+
+    B1 (scene/outfit fidelity): the pose step is the LAST pipeline step and fully
+    re-diffuses the whole frame (edit_pose_action.json: denoise 1.0, cfg 1, negatives
+    inert via ConditioningZeroOut — so ONLY positive-prompt text can steer it). With
+    no outfit/scene/solo language it stochastically strips clothing, re-invents the
+    location, and paints in extra people from an activity like "dancing with a
+    partner". This builder now carries three positive-prompt guards against that:
+    a keep-the-background instruction (replacing the old "adapt the background"
+    licence to re-invent it), an optional state-of-dress continuity sentence, an
+    optional scene-location anchor, and an ALWAYS-ON solo constraint.
 
     Args:
         pose: The pose type
         activity: Optional identity-free action phrase (e.g. SceneSpec.activity,
             routed here by scene_mapper when a pose step is active) appended as
-            ", while {activity}". None = unchanged base prompt (interactive
-            /v1/edit/pose never sets this).
+            ", while {activity}". Run through services.scene_vocab.strip_companions()
+            first (defensive) so multi-person phrasing ("… with a partner",
+            "… full of passersby") can't paint extra people into the solo frame;
+            if that leaves nothing meaningful the clause is skipped. None = unchanged
+            base prompt (interactive /v1/edit/pose never sets this).
         expression: Optional facial expression/mood (e.g. SceneSpec.expression)
             appended as ", {expression} expression". Expression/mood ONLY — never
             facial features. Has no effect on non-posed items: the face there is
@@ -136,20 +151,72 @@ def build_pose_prompt(
             ", {time_of_day phrase}" (the phrase already carries its own
             preposition, e.g. "at sunset" / "late at night"). Same
             graceful-skip behavior as lighting.
+        outfit_text: Optional garment/state-of-dress text the reposed frame must
+            preserve — the outfit continuity fix. Produced by
+            api.v1.endpoints.outfit.outfit_continuity_text() (the outfit_detail, or
+            the outfit's nudity tier prose) and threaded here by
+            workers.pipeline_worker so the full re-diffusion keeps what the outfit
+            step actually rendered instead of stripping it. Phrasing adapts to the
+            text: a plain garment becomes "In image 1 she is wearing {outfit_text};
+            keep her state of dress and every garment exactly as in image 1, fully
+            intact.", while text that already begins with a state-of-dress word
+            ("completely naked"/"topless"/"wearing"/"nude" — i.e. NAKED-tier prose)
+            becomes "In image 1 she is {outfit_text}; keep her state of dress exactly
+            as in image 1." so a NAKED tier never reads as "wearing completely
+            naked". None (no outfit step / interactive caller) appends nothing.
+        location: Optional raw location enum-VALUE string (e.g.
+            PipelineEditRequest.location, sourced from SceneSpec.location — values
+            like "home_bedroom"/"beach"/"cafe"). Phrase-ified via
+            services.scene_vocab.location_phrase() (the SAME LOCATION_PHRASES map
+            the background step uses) and appended right after the keep-background
+            sentence as "The scene is {location phrase}." to re-anchor the scene the
+            full re-diffusion must stay in. None, or a value absent from the map,
+            appends nothing (never injects a raw enum string).
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
     """
     desc = POSE_DESCRIPTIONS.get(pose, "natural pose")
     clause = pc.pose_identity_clause()
+    # Keep-the-background instruction REPLACES the former "Adapt the background and
+    # environment to suit the pose naturally." — that sentence was the licence the
+    # full re-diffusion used to re-invent the location (bedroom -> road).
     prompt = (
         f"Make the person in image 1 do the exact same pose of the person in image 2. "
         f"The target pose is: {desc}. {clause}. "
         f"The new pose should match image 2 accurately. "
-        f"Adapt the background and environment to suit the pose naturally."
+        f"Keep the same background, location and environment as image 1, adjusting "
+        f"only perspective to fit the new pose."
     )
-    if activity and activity.strip():
-        prompt += f", while {activity.strip()}"
+    # Scene-location anchor, right after the keep-background sentence.
+    location_text = sv.location_phrase(location)
+    if location_text:
+        prompt += f" The scene is {location_text}."
+    # State-of-dress continuity. NAKED-tier prose already begins with a state word,
+    # so phrase it as "she is {text}" (not "she is wearing completely naked …").
+    if outfit_text and outfit_text.strip():
+        garment = outfit_text.strip()
+        if garment.lower().startswith(("completely naked", "topless", "wearing", "nude")):
+            prompt += (
+                f" In image 1 she is {garment}; keep her state of dress exactly as "
+                f"in image 1."
+            )
+        else:
+            prompt += (
+                f" In image 1 she is wearing {garment}; keep her state of dress and "
+                f"every garment exactly as in image 1, fully intact."
+            )
+    # Solo constraint — ALWAYS appended (even for bare interactive callers): the full
+    # re-diffusion otherwise duplicates the subject or paints companions in.
+    prompt += (
+        " She is completely alone in the frame — exactly one person, no other people."
+    )
+    # Defensive companion scrub before the activity clause folds in (a stray
+    # "… with a partner" would otherwise re-add the extra person the solo sentence
+    # just forbade). None/empty result -> skip the clause entirely.
+    activity_clean = sv.strip_companions(activity)
+    if activity_clean and activity_clean.strip():
+        prompt += f", while {activity_clean.strip()}"
     if expression and expression.strip():
         prompt += f", {expression.strip()} expression"
     lighting_text = sv.lighting_phrase(lighting)

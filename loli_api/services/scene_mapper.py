@@ -127,6 +127,22 @@ def scene_to_pipeline_request(
         else None
     )
 
+    # Additive dressing on a nude base (B2). The swap SOURCE is the character's nude
+    # base (see source_image below) whenever nude_base_url is populated. On a bare
+    # body the "replace" lead ("remove the current outfit and replace it…") is
+    # INCOHERENT — there is no outfit on a nude body to remove, so it no-ops the
+    # garment for some outfits and leaves the body bare. So for a nude source + a real
+    # garment (non-NAKED) we force outfit_prompt_mode="dress" (build_prompt's additive
+    # dress-onto-bare-body lead), overriding controls.outfit_prompt_mode. NAKED never
+    # gets "dress" (there is nothing to add), and a non-nude (hero) source keeps the
+    # admin/controls value. (Deliberately NOT keyed off sourceDressed — that is
+    # default-False for every caller and proves nothing about the source.)
+    nude_source = bool(getattr(character, "nude_base_url", None))
+    if nude_source and outfit is not None and outfit != OutfitType.NAKED:
+        outfit_prompt_mode = "dress"
+    else:
+        outfit_prompt_mode = controls.outfit_prompt_mode
+
     background_text = scene.background_text or sv.build_scene_background_text(
         location=scene.location,
         time_of_day=scene.time_of_day,
@@ -173,15 +189,18 @@ def scene_to_pipeline_request(
         activity=(scene.activity if pose is not None else None),
         outfitDenoise=outfit_denoise,
         # Batch source avatars are dressed-by-default, so BatchControls.outfit_prompt_mode
-        # now defaults to "replace" (explicit remove-then-replace lead-in); an explicit
-        # admin "standard"/"replace" still passes straight through here.
-        outfitPromptMode=controls.outfit_prompt_mode,
+        # defaults to "replace" (explicit remove-then-replace lead-in); an explicit admin
+        # "standard"/"replace" passes straight through — EXCEPT a nude-base source, where
+        # the mapper forces "dress" (additive) above because "replace" is incoherent there.
+        outfitPromptMode=outfit_prompt_mode,
         nudityLevel=nudity,
         accessories=scene.accessories,
-        # Additive scene metadata (identity-free enum-value strings) reserved for the pose
-        # step (W3). Nothing consumes them yet; always safe to set from the scene.
+        # Additive scene metadata (identity-free enum-value strings) for the pose step (W3/B1).
+        # lighting/timeOfDay re-light/re-time the re-diffused frame; location is the scene the
+        # pose step must KEEP (build_pose_prompt's keep-background anchor). Always safe to set.
         lighting=_val(scene.lighting),
         timeOfDay=_val(scene.time_of_day),
+        location=_val(scene.location),
         prompt=background_text or None,
         negativePrompt=None,
         seed=seed,
