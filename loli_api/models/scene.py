@@ -83,6 +83,16 @@ class SceneSpec(BaseModel):
             "nudityLevel; sharpens the outfit step. Clothing ONLY — never facial features."
         ),
     )
+    outfit_detail_dominant: bool = Field(
+        default=False,
+        description=(
+            "When True the outfit step renders `outfit_detail` ALONE — the `outfit` enum's "
+            "tier prose is skipped, and the enum only gates the step + carries the nudity ramp. "
+            "Set by the planner when a director caption had no confident enum mapping or "
+            "conflicted with the enum, so the gallery card caption and the render agree. "
+            "Defaults False (legacy jsonb without this key parses back to enum-driven prose)."
+        ),
+    )
     expression: Optional[str] = Field(
         default=None,
         max_length=80,

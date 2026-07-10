@@ -59,13 +59,21 @@ def _render_free_text(scene: SceneSpec, include_activity: bool) -> Optional[str]
     """
     The AI-authored, identity-free scene text folded into the background prompt so the
     planned "day" actually reaches the render instead of collapsing to bare
-    location/time/lighting phrases. Draws from (in order) the story-director's
-    ``activity`` (what she is doing) and ``setting`` (the place), then the
-    ``beat_description`` caption — deduped, and each part dropped (not appended) if it
-    contains generic glamour/stock-photo filler (see prompt_constants.has_banned_style_words):
-    that filler fights the scene's own location/lighting attributes rather than describing
-    it, and word-surgery on an already-written sentence leaves broken grammar, so the safer
-    move is to skip a bad part entirely and keep the rest.
+    location/time/lighting phrases. Draws from the story-director's ``setting`` (the place
+    the director purpose-writes for the render environment) and, when no pose step consumes
+    it, ``activity`` (what she is doing) — deduped, and each part dropped (not appended) if
+    it contains generic glamour/stock-photo filler (see
+    prompt_constants.has_banned_style_words): that filler fights the scene's own
+    location/lighting attributes rather than describing it, and word-surgery on an
+    already-written sentence leaves broken grammar, so the safer move is to skip a bad part
+    entirely and keep the rest. Each surviving part is run through
+    scene_vocab.strip_companions so a stray "with a partner"/crowd tail can't paint extra
+    people into the background.
+
+    ``beat_description`` is deliberately NOT read here: it is the human-facing narrative
+    caption (persona name, actions, companions — e.g. "Lily practices a new dance with a
+    partner"), which leaks narrative/people into the scene render. ``setting`` is the field
+    the director writes for the render; the caption stays gallery-only.
 
     ``include_activity``: False when a pose step is active for this scene — the
     activity phrase then rides the pose step's own prompt instead (see
@@ -76,14 +84,12 @@ def _render_free_text(scene: SceneSpec, include_activity: bool) -> Optional[str]
     NOTE: ``scene.narrative`` (free story prose) is deliberately NOT read here — it stays
     gallery-only so it can never leak identity/style into a render.
     """
-    parts = (
-        (scene.activity, scene.setting, scene.beat_description)
-        if include_activity
-        else (scene.setting, scene.beat_description)
-    )
+    parts = (scene.activity, scene.setting) if include_activity else (scene.setting,)
     kept: list[str] = []
     for part in parts:
-        text = (part or "").strip()
+        # strip_companions returns None when nothing meaningful survives (the whole part
+        # was a companion/crowd phrase); it also trims/normalizes whitespace.
+        text = sv.strip_companions(part)
         if not text or pc.has_banned_style_words(text):
             continue
         if text not in kept:  # de-dup identical parts
@@ -193,6 +199,11 @@ def scene_to_pipeline_request(
         # "standard"/"replace" passes straight through — EXCEPT a nude-base source, where
         # the mapper forces "dress" (additive) above because "replace" is incoherent there.
         outfitPromptMode=outfit_prompt_mode,
+        # Detail-dominant (B3): when the planner set this, the outfit step renders
+        # outfit_detail alone and skips the enum's tier prose (the enum only gates the
+        # step + drives the nudity ramp). getattr keeps back-compat with legacy scenes /
+        # test stand-ins that predate the field.
+        outfitDetailDominant=bool(getattr(scene, "outfit_detail_dominant", False)),
         nudityLevel=nudity,
         accessories=scene.accessories,
         # Additive scene metadata (identity-free enum-value strings) for the pose step (W3/B1).

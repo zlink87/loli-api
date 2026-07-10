@@ -173,6 +173,21 @@ def outfit_continuity_text(
     return str(outfit.value)
 
 
+# Garment-NEUTRAL exposure clauses for the detail-dominant outfit path. When the freeform
+# outfit_detail caption REPLACES the enum's tier prose (detail_dominant), the enum's built-in
+# nudity ramp is dropped along with that prose — but the nudity level must still render. These
+# clauses ramp exposure WITHOUT naming any garment, so they never re-introduce a contradicting
+# piece of clothing over the caption's garment. LOW is fully clothed -> empty (no clause
+# appended). Keyed by NudityLevel (all 5 tiers present for self-documentation).
+_DETAIL_DOMINANT_EXPOSURE: Dict[NudityLevel, str] = {
+    NudityLevel.LOW: "",
+    NudityLevel.SUGGESTIVE: "worn to tease, hinting at what's underneath",
+    NudityLevel.MEDIUM: "worn partially open with real exposure of bare skin",
+    NudityLevel.REVEALING: "worn barely closed, breasts nearly spilling free",
+    NudityLevel.HIGH: "barely covering anything, breasts and intimate areas fully exposed",
+}
+
+
 def build_prompt(
     outfit: OutfitType,
     accessories: Optional[List[AccessoryType]],
@@ -180,6 +195,7 @@ def build_prompt(
     outfit_detail: Optional[str] = None,
     prompt_mode: str = "standard",
     lighting: Optional[str] = None,
+    detail_dominant: bool = False,
 ) -> str:
     """
     Build the positive prompt from outfit and accessories.
@@ -230,6 +246,19 @@ def build_prompt(
             low-risk secondary lighting signal, not the primary fix (that is
             build_pose_prompt's lighting param). None, or a value absent from
             the map, leaves the prompt unchanged.
+        detail_dominant: When True AND ``outfit_detail`` is non-empty AND ``outfit`` is
+            not NAKED, the garment description becomes the DETAIL alone — the enum's
+            OUTFIT_DESCRIPTIONS tier prose is skipped entirely. Used when the planner's
+            director caption had no confident enum mapping (or conflicted with the enum),
+            so the enum is only a step-gate / nudity carrier and mixing its prose with the
+            caption would render two contradictory garments. The lead phrasing still follows
+            ``prompt_mode`` (the detail is passed to the same change/replace/dress helper in
+            place of the tier prose), and ``outfit_detail`` is NOT appended again (it IS the
+            description here). Because the tier prose carried the nudity ramp, a
+            garment-neutral exposure clause from ``_DETAIL_DOMINANT_EXPOSURE`` is appended
+            for every level above LOW so the nudity still renders without naming a garment.
+            NAKED and empty-detail calls ignore this flag (unchanged behavior); default
+            False everywhere else.
 
     Returns:
         Complete prompt string
@@ -264,18 +293,34 @@ def build_prompt(
             "only change the clothing and covering, nothing else",
         ]
     else:
-        # Dressed branch. "replace" opts into the explicit remove-then-replace
-        # lead; "dress" (nude-base source) opts into the additive dress-onto-bare-
-        # body lead; every other mode ("standard", "nude_base", or an unrecognized
-        # value) uses the neutral change lead.
+        # Dressed branch. In detail-dominant mode the garment description IS the caption
+        # alone: the enum's tier prose named a DIFFERENT garment than the caption, so
+        # feeding both would render two contradictory garments. Swap the tier prose out
+        # for the detail as the lead's description; the enum then only gated the step and
+        # carried the nudity level (re-expressed as a garment-neutral exposure clause below).
+        detail = (outfit_detail or "").strip()
+        detail_active = detail_dominant and bool(detail)
+        lead_desc = detail if detail_active else outfit_desc
+
+        # "replace" opts into the explicit remove-then-replace lead; "dress" (nude-base
+        # source) opts into the additive dress-onto-bare-body lead; every other mode
+        # ("standard", "nude_base", or an unrecognized value) uses the neutral change lead.
         if prompt_mode == "replace":
-            lead = _outfit_replace_lead(outfit, outfit_desc)
+            lead = _outfit_replace_lead(outfit, lead_desc)
         elif prompt_mode == "dress":
-            lead = _outfit_dress_lead(outfit, outfit_desc)
+            lead = _outfit_dress_lead(outfit, lead_desc)
         else:
-            lead = _outfit_change_lead(outfit, outfit_desc)
-        if outfit_detail and outfit_detail.strip():
-            lead += f", {outfit_detail.strip()}"
+            lead = _outfit_change_lead(outfit, lead_desc)
+
+        if detail_active:
+            # The detail is already the description; DON'T append it again. Instead ramp
+            # the nudity with a garment-neutral clause (the tier prose that normally
+            # carried it was skipped). LOW / unknown levels map to "" -> nothing appended.
+            exposure = _DETAIL_DOMINANT_EXPOSURE.get(nudity_level, "")
+            if exposure:
+                lead += f", {exposure}"
+        elif detail:
+            lead += f", {detail}"
         if lighting_text:
             lead += f", in {lighting_text}"
         prompt_parts = [

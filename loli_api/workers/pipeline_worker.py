@@ -368,6 +368,10 @@ class PipelineBackgroundWorker:
                     # stand-in without the field) normalizes to "standard", the
                     # historical behavior.
                     prompt_mode=(getattr(request, "outfitPromptMode", None) or "standard"),
+                    # Detail-dominant (B3): render outfitDetail alone (skip the enum's
+                    # tier prose) when the planner flagged a caption that had no confident
+                    # enum mapping / conflicted with the enum. getattr keeps back-compat.
+                    detail_dominant=bool(getattr(request, "outfitDetailDominant", False)),
                     # Secondary/cheap lighting signal (see build_prompt docstring):
                     # the outfit step composites the person back over the source,
                     # so this mainly affects the regenerated crop, not a full relight.

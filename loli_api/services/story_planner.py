@@ -1256,6 +1256,7 @@ _OUTFIT_KEYWORDS: Dict[str, OutfitType] = {
     "bodycon": OutfitType.BODYCON_DRESS,
     "white summer dress": OutfitType.WHITE_SUMMER_DRESS,
     "summer dress": OutfitType.WHITE_SUMMER_DRESS,
+    "sundress": OutfitType.WHITE_SUMMER_DRESS,  # compound: bare "dress" never matches inside it
     "floral maxi dress": OutfitType.FLORAL_MAXI_DRESS,
     "maxi dress": OutfitType.FLORAL_MAXI_DRESS,
     "floral dress": OutfitType.FLORAL_MAXI_DRESS,
@@ -1292,6 +1293,7 @@ _OUTFIT_KEYWORDS: Dict[str, OutfitType] = {
     "running gear": OutfitType.RUNNING_GEAR,
     "gym set": OutfitType.GYM_SET,
     "gym": OutfitType.GYM_SET,
+    "sports bra": OutfitType.GYM_SET,
     # swim
     "one piece swimsuit": OutfitType.ONE_PIECE_SWIMSUIT,
     "swimsuit": OutfitType.ONE_PIECE_SWIMSUIT,
@@ -1317,10 +1319,22 @@ _OUTFIT_KEYWORDS: Dict[str, OutfitType] = {
     "silk pajama": OutfitType.SILK_PAJAMAS,
     "pajama": OutfitType.SILK_PAJAMAS,
     "pyjama": OutfitType.SILK_PAJAMAS,
+    "camisole": OutfitType.SILK_PAJAMAS,
     "lace bodysuit": OutfitType.LACE_BODYSUIT,
     "bodysuit": OutfitType.LACE_BODYSUIT,
     "satin robe": OutfitType.SATIN_ROBE,
     "robe": OutfitType.SATIN_ROBE,
+    # nightwear compounds — bare "gown"/"dress"/"robe" never match inside a single
+    # word ("nightgown", "bathrobe", "nightdress"), so map the whole word explicitly.
+    # A slip dress is the closest satin-nightgown analogue in the catalogue.
+    "nightgown": OutfitType.SATIN_SLIP_DRESS,
+    "night gown": OutfitType.SATIN_SLIP_DRESS,
+    "nightie": OutfitType.SATIN_SLIP_DRESS,
+    "nightdress": OutfitType.SATIN_SLIP_DRESS,
+    "negligee": OutfitType.SATIN_SLIP_DRESS,
+    "chemise": OutfitType.SATIN_SLIP_DRESS,
+    "bathrobe": OutfitType.SATIN_ROBE,
+    "dressing gown": OutfitType.SATIN_ROBE,
     # uniforms
     "nurse": OutfitType.NURSE_UNIFORM,
     "school uniform": OutfitType.SCHOOL_UNIFORM,
@@ -1333,14 +1347,22 @@ _OUTFIT_KEYWORDS: Dict[str, OutfitType] = {
 _OUTFIT_KEYWORDS_ORDER: List[str] = sorted(_OUTFIT_KEYWORDS, key=lambda p: (-len(p), p))
 
 # Broad garment-CLASS words used only to notice that an outfit_detail names a DIFFERENT
-# kind of garment than the enum when no specific keyword matched (the conservative "drop
-# the contradicting detail" branch of _reconcile_outfit). Specific garments live in
-# _OUTFIT_KEYWORDS above; these are the coarse classes a mismatch surfaces as.
+# kind of garment than the enum when no specific keyword matched (the detail-dominant
+# branch of _reconcile_outfit). Specific garments live in _OUTFIT_KEYWORDS above; these
+# are the coarse classes a mismatch surfaces as. COMPOUND single-word garments are listed
+# explicitly (e.g. "nightgown", "bathrobe") because the base class word never matches
+# inside them — "\bgown\b" does NOT fire on "nightgown", "\brobe\b" not on "bathrobe".
+# NOTE: whole words only, never wildcard-prefixed (a "\w*dress" would false-match
+# "undressed", which shows up in scene prose).
 _GARMENT_CLASS_WORDS: Tuple[str, ...] = (
     "dress", "gown", "skirt", "suit", "tuxedo", "robe", "bikini", "swimsuit", "lingerie",
     "bodysuit", "leotard", "jacket", "coat", "jeans", "denim", "pajama", "pyjama", "hoodie",
     "uniform", "kimono", "sari", "cheongsam", "hanbok", "dirndl", "jumpsuit", "shorts",
     "leggings", "lace", "sequin", "blazer", "trousers", "pants", "sweater",
+    # compounds (base class word can't match inside them) + garments with no enum
+    # (towel/bralette/apron): the conflict check must still recognize them as a class.
+    "nightgown", "nightdress", "nightie", "negligee", "chemise", "camisole",
+    "towel", "bralette", "apron",
 )
 
 
@@ -1390,7 +1412,9 @@ def _reconcile_outfit(scene: SceneSpec, controls: BatchControls) -> None:
       * a confident keyword hit on the detail that is a DIFFERENT, allowed OutfitType
         -> override the enum to match the detail;
       * no confident hit, but the detail clearly names a garment class the enum is not
-        -> drop the detail (keep the enum) so the two channels can't contradict.
+        -> KEEP the caption and mark the scene detail-dominant, so the outfit step renders
+        the CAPTION alone (the enum then only gates the step + carries the nudity ramp) and
+        the gallery card matches the image.
     Conservative on purpose: an ambiguous or already-consistent detail is left untouched,
     and a confident-but-blocked target is not forced in (allow/block wins).
     """
@@ -1402,7 +1426,12 @@ def _reconcile_outfit(scene: SceneSpec, controls: BatchControls) -> None:
             scene.outfit = derived  # caption wins: enum now matches what she's described wearing
         return
     if _detail_conflicts_with_outfit(scene.outfit, scene.outfit_detail):
-        scene.outfit_detail = None  # contradicting caption with no confident target -> drop it
+        # Contradicting caption with no confident enum target. KEEP it (don't drop) and
+        # mark the scene detail-dominant: the outfit step then renders the caption alone
+        # and the enum only gates the step, so the card caption and the render agree.
+        # (Dropping it — the old behavior — silenced the contradiction but left the card
+        # describing a garment the image never showed.)
+        scene.outfit_detail_dominant = True
 
 
 def _pose_ok_at(pose, location) -> bool:
@@ -1654,6 +1683,16 @@ def validate_and_repair(
                 if fill_pool:
                     fill_rng = random.Random((controls.base_seed or 0) + 700001 * (i + 1))
                     s.outfit = fill_rng.choice(fill_pool)
+                    # A caption with NO confident enum mapping (derived is None — e.g.
+                    # "cotton robe", "towel wrapped snugly"): the just-picked random enum
+                    # exists ONLY to gate the outfit step and feed variety bookkeeping — it
+                    # does NOT describe what she wears. Mark the scene detail-dominant so the
+                    # outfit step renders the CAPTION alone (build_prompt skips the random
+                    # enum's tier prose) and the gallery card matches the image. A caption
+                    # that DID map but to a blocked/disallowed type stays enum-driven:
+                    # honoring it would re-introduce the blocked garment.
+                    if s.outfit_detail and derived is None:
+                        s.outfit_detail_dominant = True
 
         # Enum<->detail reconcile: when the LLM set an outfit but the caption describes a
         # different garment, the caption wins (override the enum) or the contradicting
@@ -1670,7 +1709,11 @@ def validate_and_repair(
         if s.setting:
             s.setting = _scrub_scene_text(s.setting, 400)
         if s.activity:
-            s.activity = _scrub_scene_text(s.activity, 200)
+            # strip_companions in addition to the identity scrub so the STORED activity is
+            # already solo (no "with a partner"/crowd tail); the pose-step scrub in
+            # build_pose_prompt stays as a backstop, and _render_free_text scrubs again at
+            # map time for the pose-absent (activity -> background) path.
+            s.activity = sv.strip_companions(_scrub_scene_text(s.activity, 200))
         if s.outfit_detail:
             s.outfit_detail = _scrub_scene_text(s.outfit_detail, 160)
         if s.expression:

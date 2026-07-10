@@ -714,6 +714,17 @@ class PipelineEditRequest(BaseModel):
             "behaves like 'standard'."
         ),
     )
+    outfitDetailDominant: bool = Field(
+        default=False,
+        description=(
+            "When True the outfit step's garment description is the freeform outfitDetail "
+            "ALONE; the enum's tier prose is skipped (the enum only gates the step + carries "
+            "the nudity ramp, which is re-expressed as a garment-neutral exposure clause). "
+            "Set by the planner when a director caption had no confident enum mapping or "
+            "conflicted with the enum. No effect on the NAKED outfit or when outfitDetail is "
+            "empty. Defaults False (unchanged tier-prose behavior)."
+        ),
+    )
     nudityLevel: NudityLevel = Field(
         default=NudityLevel.LOW,
         description="Nudity level for outfit step: low, medium, high"

@@ -803,6 +803,59 @@ def test_outfit_dress_mode_lead():
 
 
 # ---------------------------------------------------------------------------
+# c31 — outfit build_prompt: detail_dominant renders the caption ALONE (tier prose
+# skipped), with a garment-neutral exposure clause carrying the nudity ramp (B3)
+# ---------------------------------------------------------------------------
+def test_outfit_detail_dominant_renders_caption_alone():
+    T, N = OutfitType, NudityLevel
+    # The BUSINESS_SUIT tier prose ("...business suit...") must be ABSENT; the caption is
+    # the only garment text and appears exactly once.
+    tier_low = OUTFIT_DESCRIPTIONS[T.BUSINESS_SUIT][N.LOW]
+    dom = outfit_ep.build_prompt(
+        T.BUSINESS_SUIT, None, N.MEDIUM,
+        outfit_detail="a flowing chiffon dress", detail_dominant=True,
+    )
+    assert tier_low not in dom
+    assert "business suit" not in dom
+    assert dom.count("a flowing chiffon dress") == 1
+    # MEDIUM ramps exposure with a garment-neutral clause (no garment named).
+    assert "worn partially open with real exposure of bare skin" in dom
+
+    # LOW appends NO exposure clause (fully clothed).
+    dom_low = outfit_ep.build_prompt(
+        T.BUSINESS_SUIT, None, N.LOW,
+        outfit_detail="a flowing chiffon dress", detail_dominant=True,
+    )
+    for clause in (
+        "worn to tease", "real exposure of bare skin",
+        "nearly spilling free", "barely covering anything",
+    ):
+        assert clause not in dom_low
+    assert dom_low.count("a flowing chiffon dress") == 1
+
+    # HIGH gets the top exposure clause.
+    dom_high = outfit_ep.build_prompt(
+        T.BUSINESS_SUIT, None, N.HIGH,
+        outfit_detail="a flowing chiffon dress", detail_dominant=True,
+    )
+    assert "barely covering anything, breasts and intimate areas fully exposed" in dom_high
+
+    # Works with prompt_mode="dress": the dress lead phrasing is kept, fed the detail.
+    dom_dress = outfit_ep.build_prompt(
+        T.BUSINESS_SUIT, None, N.MEDIUM, outfit_detail="a flowing chiffon dress",
+        prompt_mode="dress", detail_dominant=True,
+    )
+    assert dom_dress.startswith("The person is currently completely nude; dress them in: a flowing chiffon dress")
+    assert "business suit" not in dom_dress
+
+    # Guardrails: with detail_dominant but an EMPTY detail, fall back to tier prose
+    # unchanged (the flag only fires when there is a caption to be dominant with).
+    assert outfit_ep.build_prompt(T.BUSINESS_SUIT, None, N.LOW, detail_dominant=True) == \
+        outfit_ep.build_prompt(T.BUSINESS_SUIT, None, N.LOW)
+    print("c31 OK: detail_dominant renders the caption alone; exposure clause ramps MEDIUM+; LOW/empty unchanged")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -834,6 +887,7 @@ def _run_all():
         test_pose_prompt_outfit_continuity_phrasing,
         test_outfit_continuity_text,
         test_outfit_dress_mode_lead,
+        test_outfit_detail_dominant_renders_caption_alone,
     ]
     failures = 0
     for fn in tests:

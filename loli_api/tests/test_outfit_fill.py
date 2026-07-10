@@ -49,6 +49,24 @@ def test_outfit_from_detail_maps_representative_captions():
     assert _outfit_from_detail("leather crop top and high-waisted jeans") == T.CROP_TOP_CARGO
 
 
+def test_outfit_from_detail_maps_compound_garment_words():
+    # Compound words the bare class word can't reach inside ("gown" doesn't fire on
+    # "nightgown", "robe" not on "bathrobe") now map explicitly (B3).
+    T = OutfitType
+    assert _outfit_from_detail("soft cotton nightgown, loose and comfortable") == T.SATIN_SLIP_DRESS
+    assert _outfit_from_detail("a sheer negligee") == T.SATIN_SLIP_DRESS
+    assert _outfit_from_detail("a silk chemise") == T.SATIN_SLIP_DRESS
+    assert _outfit_from_detail("bathrobe, loose and plush") == T.SATIN_ROBE
+    assert _outfit_from_detail("her fluffy dressing gown") == T.SATIN_ROBE
+    assert _outfit_from_detail("a light floral sundress") == T.WHITE_SUMMER_DRESS
+    assert _outfit_from_detail("a fitted sports bra and shorts") == T.GYM_SET
+    assert _outfit_from_detail("a lacy camisole") == T.SILK_PAJAMAS
+    # "towel" is DELIBERATELY unmapped (no towel enum) -> None (the detail-dominant path
+    # handles it downstream), and "undressed" in prose must not false-match any dress word.
+    assert _outfit_from_detail("wrapped in a towel") is None
+    assert _outfit_from_detail("she looks undressed and sleepy") is None
+
+
 def test_outfit_from_detail_unknown_or_empty_returns_none():
     assert _outfit_from_detail("") is None
     assert _outfit_from_detail(None) is None
@@ -86,6 +104,34 @@ def test_low_beat_null_enum_and_no_caption_stays_none():
     out = validate_and_repair([scene], _character(), 1, BatchControls(base_seed=1),
                               enforce_beat_pool=False)
     assert out[0].outfit is None
+
+
+def test_unmapped_caption_fills_enum_and_marks_detail_dominant():
+    # "towel, wrapped snugly" maps to no enum (deliberately no towel type). The enum is
+    # still random-filled so the outfit STEP runs + variety accounting has a value, but the
+    # scene is marked detail-dominant so the CAPTION (not the random enum's prose) renders.
+    scene = _scene(outfit=None, nudityLevel=NudityLevel.LOW, outfit_detail="towel, wrapped snugly")
+    out = validate_and_repair([scene], _character(), 1, BatchControls(base_seed=1),
+                              enforce_beat_pool=False)
+    assert out[0].outfit is not None                         # enum filled (gates the step)
+    assert out[0].outfit != OutfitType.NAKED
+    assert out[0].outfit_detail == "towel, wrapped snugly"   # caption kept as-is
+    assert out[0].outfit_detail_dominant is True             # render uses the caption alone
+
+
+def test_blocked_caption_fill_does_not_mark_dominant():
+    # Caption maps to a CONFIDENT enum that is blocked (bikini). We fall back to a pool pick,
+    # but must NOT mark detail-dominant — rendering the caption alone would re-introduce the
+    # blocked garment. The enum stays authoritative here.
+    controls = BatchControls(
+        max_nudity=NudityLevel.HIGH, start_nudity=NudityLevel.MEDIUM,
+        blocked_outfits=[OutfitType.NAKED, OutfitType.BIKINI], base_seed=3,
+    )
+    scene = _scene(outfit=None, nudityLevel=NudityLevel.MEDIUM,
+                   location=LocationType.BEACH, outfit_detail="a tiny bikini")
+    out = validate_and_repair([scene], _character(), 1, controls, enforce_beat_pool=False)
+    assert out[0].outfit not in (OutfitType.BIKINI, OutfitType.NAKED)
+    assert out[0].outfit_detail_dominant is False
 
 
 def test_fill_is_deterministic_for_same_seed():
@@ -151,14 +197,16 @@ def test_reconcile_little_black_dress_becomes_satin_robe():
     assert out[0].outfit == OutfitType.SATIN_ROBE
 
 
-def test_reconcile_drops_detail_on_mismatch_with_no_confident_target():
+def test_reconcile_keeps_conflicting_detail_and_marks_dominant():
     # enum=business_suit, caption names a DIFFERENT class ("dress") that maps to no specific
-    # keyword -> keep the enum, drop the contradicting caption so the render can't conflict.
+    # keyword -> KEEP the caption and mark the scene detail-dominant (was: dropped) so the
+    # outfit step renders the caption alone and the card caption matches the image.
     scene = _scene(outfit=OutfitType.BUSINESS_SUIT, outfit_detail="a flowing chiffon dress")
     out = validate_and_repair([scene], _character(), 1, BatchControls(base_seed=1),
                               enforce_beat_pool=False)
-    assert out[0].outfit == OutfitType.BUSINESS_SUIT  # enum kept
-    assert out[0].outfit_detail is None               # contradicting caption dropped
+    assert out[0].outfit == OutfitType.BUSINESS_SUIT             # enum kept (gates the step)
+    assert out[0].outfit_detail == "a flowing chiffon dress"     # caption kept, NOT dropped
+    assert out[0].outfit_detail_dominant is True                 # render uses the caption alone
 
 
 def test_reconcile_keeps_consistent_detail_untouched():
@@ -204,6 +252,20 @@ def test_director_user_prompt_reinforces_mandatory_outfit():
     prompt = planner._build_director_user_prompt(_character(occupation="nurse"), 8, controls)
     low = prompt.lower()
     assert "every photo" in low and "never null" in low
+
+
+# ---------------------------------------------------------------------------
+# SceneSpec.outfit_detail_dominant round-trips through the jsonb persistence
+# (the batch reconciler reconstructs SceneSpec(**item.scene_spec))
+# ---------------------------------------------------------------------------
+def test_outfit_detail_dominant_round_trips_and_defaults_false_on_legacy():
+    s = _scene(outfit=OutfitType.SATIN_ROBE, outfit_detail="a plush robe", outfit_detail_dominant=True)
+    dumped = s.model_dump(mode="json")
+    assert dumped["outfit_detail_dominant"] is True
+    assert SceneSpec.model_validate(dumped).outfit_detail_dominant is True
+    # Legacy jsonb written before this field existed has no key -> defaults False.
+    legacy = {k: v for k, v in dumped.items() if k != "outfit_detail_dominant"}
+    assert SceneSpec(**legacy).outfit_detail_dominant is False
 
 
 if __name__ == "__main__":

@@ -326,6 +326,56 @@ def test_lighting_and_time_of_day_mapped_from_scene():
     assert req.timeOfDay == "golden_hour"
 
 
+# ---------------------------------------------------------------------------
+# B4 background hygiene: beat_description is dropped from the render channel, and
+# companion/crowd phrasing is scrubbed out of setting/activity before they reach it.
+# ---------------------------------------------------------------------------
+def test_beat_description_dropped_from_background_prompt():
+    char = _character()
+    scene = _scene(
+        pose=None,  # activity would ride here too, but we only assert on beat_description
+        beat_description="Lily practices a new dance with a partner BEATMARKER_9f3a",
+        setting="a sunlit small kitchen",
+    )
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    # The human-facing narrative caption (persona name/actions/companions) must not render.
+    assert "BEATMARKER_9f3a" not in (req.prompt or "")
+    assert "Lily" not in (req.prompt or "")
+    # The director's purpose-written setting IS retained.
+    assert "a sunlit small kitchen" in req.prompt
+
+
+def test_companion_phrasing_never_survives_into_the_request_prompt():
+    char = _character()
+    # Put the companion tail in BOTH setting and activity; with pose absent both feed the
+    # background. strip_companions must remove "with a partner" while keeping the clean part.
+    scene = _scene(
+        pose=None,
+        setting="a quiet cafe with a partner",
+        activity="practicing a new dance with a partner",
+        beat_description="anything",
+    )
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert "with a partner" not in (req.prompt or "")
+    assert "partner" not in (req.prompt or "")
+    assert "a quiet cafe" in req.prompt          # setting retained (companion stripped)
+    assert "practicing a new dance" in req.prompt  # activity retained (companion stripped)
+
+
+# ---------------------------------------------------------------------------
+# B3: outfitDetailDominant is threaded from the scene onto the request
+# ---------------------------------------------------------------------------
+def test_outfit_detail_dominant_threaded_onto_request():
+    char = _character()
+    scene = _scene(outfit=OutfitType.BUSINESS_SUIT, outfit_detail="a chiffon dress")
+    scene.outfit_detail_dominant = True
+    req = scene_to_pipeline_request(char, scene, BatchControls())
+    assert req.outfitDetailDominant is True
+    # Defaults False when the scene didn't set it.
+    req2 = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
+    assert req2.outfitDetailDominant is False
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
