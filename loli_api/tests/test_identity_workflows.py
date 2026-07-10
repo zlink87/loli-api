@@ -177,6 +177,58 @@ def test_prepare_background_keeps_node_211_valid():
     assert wf["211"]["inputs"]["image"] == "src.png"
 
 
+def test_prepare_background_denoise_override():
+    """
+    A5: the backgroundDenoise knob lands on the KSampler (node 106, the sampler
+    that drives the background regen). None (default) leaves the template's baked
+    0.8, and the passed-in template is never mutated (deep-copied).
+    """
+    base = _load("test_final_API.json")
+    assert base["106"]["inputs"]["denoise"] == 0.8  # template baseline (verified node id)
+
+    wf = prepare_background_workflow(base, "src.png", "a beach", denoise=0.95)
+    assert wf["106"]["inputs"]["denoise"] == 0.95
+    assert base["106"]["inputs"]["denoise"] == 0.8  # original untouched
+
+    wf_default = prepare_background_workflow(_load("test_final_API.json"), "src.png", "a beach")
+    assert wf_default["106"]["inputs"]["denoise"] == 0.8
+
+
+def test_prepare_background_solo_subject_threshold():
+    """
+    A5: node 202's GroundingDINO person threshold is raised ONLY when solo_subject
+    is True AND person_threshold > 0 (the fail-open solo-subject path for the nude
+    base). Every other combination leaves the template's baked 0.3 exactly.
+    """
+    base = _load("test_final_API.json")
+    assert base["202"]["inputs"]["threshold"] == 0.3  # template baseline (verified node id)
+
+    # Both conditions -> threshold raised.
+    raised = prepare_background_workflow(
+        _load("test_final_API.json"), "src.png", "a beach",
+        solo_subject=True, person_threshold=0.45,
+    )
+    assert raised["202"]["inputs"]["threshold"] == 0.45
+
+    # solo_subject True but threshold 0 (env disabled = default) -> untouched.
+    disabled = prepare_background_workflow(
+        _load("test_final_API.json"), "src.png", "a beach",
+        solo_subject=True, person_threshold=0.0,
+    )
+    assert disabled["202"]["inputs"]["threshold"] == 0.3
+
+    # threshold configured but solo_subject False (interactive path) -> untouched.
+    not_solo = prepare_background_workflow(
+        _load("test_final_API.json"), "src.png", "a beach",
+        solo_subject=False, person_threshold=0.45,
+    )
+    assert not_solo["202"]["inputs"]["threshold"] == 0.3
+
+    # Neither passed (default kwargs) -> untouched.
+    default = prepare_background_workflow(_load("test_final_API.json"), "src.png", "a beach")
+    assert default["202"]["inputs"]["threshold"] == 0.3
+
+
 def test_head_mask_service():
     """Fail-closed fallback box when no face; white feathered region when found."""
     import numpy as np

@@ -401,25 +401,38 @@ def test_outfit_detail_appended_on_naked_branch_too():
 
 
 # ---------------------------------------------------------------------------
-# c20 — outfit build_prompt: replace_mode swaps the dressed-branch lead-in
+# c20 — outfit build_prompt: prompt_mode="replace" swaps the dressed-branch
+# lead-in; "standard" (and the default / an unknown value) keep the neutral
+# change lead byte-for-byte — no drift from the pre-PR2 replace_mode=False/True
+# behavior now that the bool became the prompt_mode string.
 # ---------------------------------------------------------------------------
 def test_outfit_replace_mode_swaps_lead_in():
-    standard = outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW)
-    replaced = outfit_ep.build_prompt(
-        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, replace_mode=True,
+    default = outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW)
+    standard = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, prompt_mode="standard",
     )
+    replaced = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, prompt_mode="replace",
+    )
+    # "standard" is byte-identical to the default call (former replace_mode=False).
+    assert standard == default
     assert "Change the person's outfit to:" in standard
     assert "Remove the person's current clothing completely and replace it with:" in replaced
     assert "no piece of the previous outfit may remain visible" in replaced
     assert "Change the person's outfit to:" not in replaced
     # Rest of the prompt (identity clause, "only change" instruction) is unaffected.
     assert "only change the clothing, nothing else" in replaced
+    # An unrecognized mode also falls back to the standard lead.
+    assert outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, prompt_mode="bogus",
+    ) == default
 
-    # replace_mode is a no-op on the NAKED branch: it already reads as a removal.
+    # "replace" is a no-op on the NAKED branch: it already reads as a removal, so
+    # NAKED+replace is byte-identical to NAKED+standard (former replace_mode=True).
     naked_standard = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH)
-    naked_replace = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH, replace_mode=True)
+    naked_replace = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH, prompt_mode="replace")
     assert naked_standard == naked_replace
-    print("c20 OK: replace_mode swaps the dressed-branch lead-in; NAKED branch unaffected")
+    print("c20 OK: prompt_mode replace swaps the dressed lead-in; standard/unknown == default; NAKED unaffected")
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +591,52 @@ def test_outfit_prompt_lighting_appended_after_outfit_detail():
 
 
 # ---------------------------------------------------------------------------
+# c25 — outfit build_prompt: prompt_mode="nude_base" (NAKED branch) renders the
+# NEUTRAL anatomical reference body instead of the arousal-styled NAKED tier
+# prose, and hardens the removal lead so no stray strap survives. The dressed
+# branch and the standard NAKED branch are unchanged (nude_base only ever pairs
+# with NAKED).
+# ---------------------------------------------------------------------------
+def test_outfit_nude_base_mode_neutral_body():
+    from services.outfit_vocab import NUDE_BASE_BODY_DESCRIPTION
+
+    nb = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH, prompt_mode="nude_base")
+
+    # Neutral reference body + hardened removal lead (kills the leftover-strap bug).
+    assert nb.startswith(
+        "Remove all clothing completely so that no garment, bra, strap, or "
+        "underwear remains anywhere"
+    )
+    assert NUDE_BASE_BODY_DESCRIPTION in nb
+    assert "matte" in nb                 # natural matte skin (anti-shine)
+    assert "matches her face" in nb      # RELATIVE tone anchor (not absolute)
+    assert "no garment, bra, strap" in nb
+
+    # The arousal-styled NAKED tier prose ("...swollen aroused pussy lips...", plus
+    # shine words) must be gone. "non-aroused" legitimately appears (the calm body
+    # IS the point), so assert the tier's actual arousal wording is absent rather
+    # than the bare "aroused" token.
+    assert "swollen" not in nb
+    assert "glistening" not in nb
+    assert "aroused pussy" not in nb
+    assert "non-aroused" in nb           # the neutral state is stated positively
+
+    # nude_base is a no-op on the DRESSED branch: it falls through to the standard
+    # change lead, byte-identical to the default call.
+    dressed_default = outfit_ep.build_prompt(OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW)
+    dressed_nb = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW, prompt_mode="nude_base",
+    )
+    assert dressed_nb == dressed_default
+
+    # The STANDARD NAKED branch is untouched — still the arousal-styled tier prose.
+    naked_standard = outfit_ep.build_prompt(OutfitType.NAKED, None, NudityLevel.HIGH)
+    assert "swollen aroused pussy lips" in naked_standard
+    assert naked_standard != nb
+    print("c25 OK: nude_base renders the neutral reference body + hardened removal; dressed/standard paths unchanged")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -603,6 +662,7 @@ def _run_all():
         test_pose_prompt_lighting_appended,
         test_pose_prompt_time_of_day_appended_and_combines_with_lighting,
         test_outfit_prompt_lighting_appended_after_outfit_detail,
+        test_outfit_nude_base_mode_neutral_body,
     ]
     failures = 0
     for fn in tests:

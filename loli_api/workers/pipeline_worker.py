@@ -348,7 +348,11 @@ class PipelineBackgroundWorker:
                 build_prompt(
                     request.outfit, request.accessories, request.nudityLevel,
                     outfit_detail=getattr(request, "outfitDetail", None),
-                    replace_mode=(getattr(request, "outfitPromptMode", "standard") == "replace"),
+                    # Thread the request's outfitPromptMode through verbatim
+                    # ("standard"/"replace"/"nude_base"); None (default / a test
+                    # stand-in without the field) normalizes to "standard", the
+                    # historical behavior.
+                    prompt_mode=(getattr(request, "outfitPromptMode", None) or "standard"),
                     # Secondary/cheap lighting signal (see build_prompt docstring):
                     # the outfit step composites the person back over the source,
                     # so this mainly affects the regenerated crop, not a full relight.
@@ -371,6 +375,16 @@ class PipelineBackgroundWorker:
                 self._background_template, source_name, prompt, seed=seed,
                 negative_prompt=request.negativePrompt,
                 nudity_level=request.nudityLevel,
+                # A5 (nude base / solo backdrop): backgroundDenoise strengthens
+                # scene removal on the cfg-1.0 V1 graph; soloSubject + the env
+                # threshold drop low-confidence background passersby out of the
+                # protected person mask. Both read defensively (getattr) so a
+                # request object without these fields degrades to prior behavior;
+                # person_threshold is the env value, gated behind soloSubject in
+                # prepare_background_workflow (0.0 default = disabled).
+                denoise=getattr(request, "backgroundDenoise", None),
+                solo_subject=getattr(request, "soloSubject", False),
+                person_threshold=settings.SOLO_BG_PERSON_THRESHOLD,
             )
         raise RuntimeError(f"Unknown pipeline step: {step_name}")
 

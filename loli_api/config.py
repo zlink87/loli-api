@@ -185,6 +185,17 @@ class Settings(BaseSettings):
     # silent-fallback-to-V1 behavior for back-compat; flip true once Phase 0
     # diagnostics confirm the deployment resolves a crop-stitch tier.
     BATCH_REQUIRE_CROPSTITCH_OUTFIT: bool = False
+    # Solo-subject background threshold (nude base / admin-reviewed assets only).
+    # 0.0 (default) = DISABLED. When > 0 AND a PipelineEditRequest sets
+    # soloSubject=true, the background step raises node 202's GroundingDINO
+    # person-detector confidence threshold to this value so low-confidence
+    # background passersby fall OUT of the protected person mask and get painted
+    # over by the backdrop regen. FAIL-OPEN: if the MAIN subject also scores below
+    # this the whole frame becomes editable — only safe for admin-reviewed assets
+    # like the nude base, never the interactive /v1/edit/background path (which
+    # never sets soloSubject). A sane starting value is ~0.4 (the template default
+    # is 0.3); tune against real hero photos before enabling.
+    SOLO_BG_PERSON_THRESHOLD: float = 0.0
     # Rough per-step wall-clock estimate (seconds) used only for BatchEstimate.
     RUNPOD_AVG_STEP_SECONDS: int = 60
     # Optional GPU cost rate (USD/second) for BatchEstimate.est_cost_usd. 0 -> omit.

@@ -22,7 +22,11 @@ from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
 from services import prompt_constants as pc
 from services import scene_vocab as sv
-from services.outfit_vocab import OUTFIT_DESCRIPTIONS, ACCESSORY_DESCRIPTIONS
+from services.outfit_vocab import (
+    OUTFIT_DESCRIPTIONS,
+    ACCESSORY_DESCRIPTIONS,
+    NUDE_BASE_BODY_DESCRIPTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +124,7 @@ def build_prompt(
     accessories: Optional[List[AccessoryType]],
     nudity_level: NudityLevel = NudityLevel.LOW,
     outfit_detail: Optional[str] = None,
-    replace_mode: bool = False,
+    prompt_mode: str = "standard",
     lighting: Optional[str] = None,
 ) -> str:
     """
@@ -136,10 +140,25 @@ def build_prompt(
             director) appended onto the lead sentence, right after the generic
             OUTFIT_DESCRIPTIONS tier prose it sharpens. None = tier prose only
             (unchanged interactive-endpoint behavior).
-        replace_mode: WS3.2. When True (dressed branch only), swaps the lead-in
-            for an explicit remove-then-replace instruction (see
-            ``_outfit_replace_lead``). The NAKED branch already reads as a
-            removal instruction, so this has no effect there.
+        prompt_mode: Lead-in selector (default "standard"). Recognized values:
+            * "standard" — the neutral "Change the person's outfit to:" lead on
+              the dressed branch (``_outfit_change_lead``); the plain "Remove all
+              clothing, the person should be {tier prose}" lead on NAKED. This is
+              the historical default behavior (formerly ``replace_mode=False``).
+            * "replace" — WS3.2 dressed-branch only: swaps the lead-in for an
+              explicit remove-then-replace instruction (``_outfit_replace_lead``)
+              so a dressed source stops reconstructing its own garment (formerly
+              ``replace_mode=True``). The NAKED branch already reads as a removal,
+              so this leaves NAKED unchanged.
+            * "nude_base" — NAKED-branch only: renders the neutral per-character
+              anatomical base. Swaps the arousal-styled NAKED tier prose for
+              ``outfit_vocab.NUDE_BASE_BODY_DESCRIPTION`` AND hardens the removal
+              lead to explicitly clear any stray garment/bra/strap/underwear (the
+              leftover-strap failure). On the dressed branch it falls through to
+              the "standard" lead (nude_base is only ever paired with NAKED).
+            Any unrecognized value behaves like "standard". (A "dress" mode is
+            planned for a following PR; the dressed-branch else-arm below is left
+            structured so adding it is a one-line addition.)
         lighting: Optional raw lighting enum-VALUE string (e.g.
             PipelineEditRequest.lighting, sourced from SceneSpec.lighting —
             values like "moody_dim"/"candlelit"/"neon"). Phrase-ified via
@@ -165,7 +184,17 @@ def build_prompt(
     lighting_text = sv.lighting_phrase(lighting)
 
     if outfit == OutfitType.NAKED:
-        lead = f"Remove all clothing, the person should be {outfit_desc}"
+        if prompt_mode == "nude_base":
+            # Neutral per-character anatomical base: use the calm reference-body
+            # description instead of the arousal-styled NAKED tier prose, and
+            # harden the removal so no stray garment/bra/strap/underwear survives.
+            lead = (
+                "Remove all clothing completely so that no garment, bra, strap, or "
+                "underwear remains anywhere, the person should be "
+                f"{NUDE_BASE_BODY_DESCRIPTION}"
+            )
+        else:
+            lead = f"Remove all clothing, the person should be {outfit_desc}"
         if outfit_detail and outfit_detail.strip():
             lead += f", {outfit_detail.strip()}"
         if lighting_text:
@@ -176,11 +205,14 @@ def build_prompt(
             "only change the clothing and covering, nothing else",
         ]
     else:
-        lead = (
-            _outfit_replace_lead(outfit, outfit_desc)
-            if replace_mode
-            else _outfit_change_lead(outfit, outfit_desc)
-        )
+        # Dressed branch. "replace" opts into the explicit remove-then-replace
+        # lead; every other mode ("standard", "nude_base", or an unrecognized
+        # value) uses the neutral change lead. A future "dress" mode slots in as
+        # another arm here.
+        if prompt_mode == "replace":
+            lead = _outfit_replace_lead(outfit, outfit_desc)
+        else:
+            lead = _outfit_change_lead(outfit, outfit_desc)
         if outfit_detail and outfit_detail.strip():
             lead += f", {outfit_detail.strip()}"
         if lighting_text:

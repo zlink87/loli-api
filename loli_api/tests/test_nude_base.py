@@ -238,9 +238,11 @@ def test_post_builds_naked_high_nudity_outfit_job():
 
     resp = asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}))
 
-    # exactly one pipeline_edit job: NAKED at high nudity, pushed hard (denoise +
-    # replace-mode) so the source garment is actually removed, plus a background
-    # step (via `prompt`) clearing the scene to a plain backdrop — all in one job.
+    # exactly one pipeline_edit job: NAKED at high nudity in the NEUTRAL "nude_base"
+    # prompt mode (a calm reference body, not the arousal-styled tier), pushed hard
+    # (outfit denoise) so the source garment is actually removed, plus a background
+    # step (via `prompt`) clearing the scene to a plain SOLO backdrop (background
+    # denoise + soloSubject) — all in one job.
     assert len(jm.created) == 1
     request, user_id, job_type = jm.created[0]
     assert job_type == "pipeline_edit"
@@ -249,8 +251,12 @@ def test_post_builds_naked_high_nudity_outfit_job():
     assert request.source_image == "https://x.supabase.co/hero.png"
     assert request.sourceDressed is False  # NAKED is never a GARMENT_MODE_OUTFITS target
     assert request.outfitDenoise == 0.92
-    assert request.outfitPromptMode == "replace"
+    assert request.outfitPromptMode == "nude_base"
     assert request.prompt and "plain" in request.prompt and "grey studio" in request.prompt
+    # Solo backdrop (A5): clears the hero's crowd/props to an empty studio.
+    assert "only person in the frame" in request.prompt
+    assert request.backgroundDenoise == 0.95
+    assert request.soloSubject is True
 
     # a pending base row was recorded against that job
     assert nude.created == [{

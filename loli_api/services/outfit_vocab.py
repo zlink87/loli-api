@@ -365,6 +365,25 @@ OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Nude-base body description (per-character neutral anatomical reference asset)
+#
+# NOT a scene: the nude base is the neutral, once-per-character source image that
+# every story-batch scene is later dressed on top of, so it must read as a calm
+# anatomical reference, NOT the arousal-styled NAKED/HIGH tier prose above ("hard
+# nipples, swollen aroused pussy lips…" is wrong for a neutral base). Selected by
+# build_prompt (api/v1/endpoints/outfit.py) when outfitPromptMode == "nude_base".
+# The skin-tone anchor is deliberately RELATIVE ("matches her face and neck") so a
+# dark-skinned character is not silently pushed lighter toward an absolute tone.
+NUDE_BASE_BODY_DESCRIPTION = (
+    "completely nude in a relaxed neutral standing stance, arms resting naturally "
+    "at her sides, natural matte skin with clearly visible pores and fine texture, "
+    "no oil or shine on the skin, an even natural skin tone that exactly matches "
+    "her face and neck, body in a calm neutral non-aroused state, a plain neutral "
+    "full-body reference"
+)
+
+
+# ---------------------------------------------------------------------------
 # Accessories Mapping
 # ---------------------------------------------------------------------------
 ACCESSORY_DESCRIPTIONS: Dict[AccessoryType, str] = {

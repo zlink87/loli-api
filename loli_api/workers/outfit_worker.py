@@ -107,7 +107,14 @@ class OutfitBackgroundWorker(BaseEditWorker):
             # look (true-to-life grade, lightly retouched skin) instead of the flat
             # default Qwen render.
             prompt = apply_edit_photo_style(
-                build_prompt(request.outfit, request.accessories, request.nudityLevel),
+                build_prompt(
+                    request.outfit, request.accessories, request.nudityLevel,
+                    # OutfitEditRequest carries no outfitPromptMode, so this
+                    # normalizes to "standard" — byte-identical to the previous
+                    # call. Kept explicit/defensive so the interactive path picks
+                    # up any future prompt-mode field with no further change.
+                    prompt_mode=(getattr(request, "outfitPromptMode", None) or "standard"),
+                ),
                 PhotoStyleType.POLISHED,
             )
             seed = request.seed if request.seed is not None else random.randint(1, 999_999_999)

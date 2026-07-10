@@ -2,11 +2,14 @@
 Nude-base generation endpoints — ADMIN ONLY.
 
 A nude base is ONE identity-locked nude render per character, generated from the
-clothed hero photo via the pipeline edit machinery: an outfit step (outfit=NAKED
-at high nudity, pushed hard — see _NUDE_BASE_OUTFIT_DENOISE/_NUDE_BASE_PROMPT_MODE
-below) chained with a background step that clears the scene to a plain neutral
-backdrop. The head/face stays byte-locked exactly as on every other edit (server
-YuNet head mask + crop-stitch composite-back — nothing new is invented here).
+clothed hero photo via the pipeline edit machinery: an outfit step (outfit=NAKED,
+prompt mode "nude_base" — a NEUTRAL anatomical reference body, not the arousal-
+styled NAKED scene tier — pushed hard, see _NUDE_BASE_OUTFIT_DENOISE /
+_NUDE_BASE_OUTFIT_PROMPT_MODE below) chained with a background step that clears the
+scene to a plain neutral SOLO backdrop (denoise + solo-subject person-mask knobs,
+_NUDE_BASE_BACKGROUND_DENOISE / soloSubject below, so the hero's original crowd/
+props don't survive). The head/face stays byte-locked exactly as on every other
+edit (server YuNet head mask + crop-stitch composite-back — nothing new here).
 
 WHY THE PIPELINE PATH (not the plain outfit-edit endpoint): a nude conversion needs
 to fully REMOVE the source garment, not blend a new one over it — the standard
@@ -66,14 +69,27 @@ _NUDE_BASE_NUDITY = NudityLevel.HIGH
 # PipelineEditRequest.outfitDenoise; identity is unaffected regardless of this
 # value (the head sits outside the edit mask on every tier).
 _NUDE_BASE_OUTFIT_DENOISE = 0.92
-# "replace" = explicit remove-then-apply lead-in, instead of the default
-# "change the outfit to X" phrasing that lets the source garment ghost through.
-_NUDE_BASE_OUTFIT_PROMPT_MODE = "replace"
-# Clears the hero's original scene to a plain, neutral backdrop — an internal
-# asset shouldn't carry a specific location/prop into every scene built from it.
+# "nude_base" = the neutral-anatomical-base prompt mode (build_prompt, outfit.py):
+# on the NAKED outfit it swaps the scene-tier arousal prose ("hard nipples, swollen
+# aroused pussy lips…", wrong for a neutral reference asset) for a calm reference-
+# body description AND hardens the removal lead so no stray bra/strap/underwear
+# survives. Supersedes the old "replace" mode here, which reused that arousal prose.
+_NUDE_BASE_OUTFIT_PROMPT_MODE = "nude_base"
+# Pushed high (max 1.0 on backgroundDenoise) so the busy hero scene is actually
+# cleared: the V1 background graph samples at cfg 1.0 with denoise baked at 0.8, so
+# a clean backdrop needs the extra removal strength from the denoise knob, not the
+# (mathematically inert) negatives.
+_NUDE_BASE_BACKGROUND_DENOISE = 0.95
+# Clears the hero's original scene to a plain, neutral backdrop — an internal asset
+# shouldn't carry a specific location/prop (or a passerby out of the hero's street
+# crowd) into every scene built from it. The "only person in the frame" tail pairs
+# with soloSubject=True on the request: the background step's person detector then
+# drops low-confidence background people out of the protected mask so they get
+# painted over instead of composited back byte-exact.
 _NUDE_BASE_BACKGROUND_PROMPT = (
     "a plain seamless light grey studio backdrop, soft even lighting, "
-    "no furniture, props, or distracting objects"
+    "no furniture, props, or distracting objects, she is the only person in the "
+    "frame, no other people anywhere, empty backdrop"
 )
 
 # ---------------------------------------------------------------------------
@@ -214,6 +230,8 @@ async def generate_nude_base(
         outfitDenoise=_NUDE_BASE_OUTFIT_DENOISE,
         outfitPromptMode=_NUDE_BASE_OUTFIT_PROMPT_MODE,
         prompt=_NUDE_BASE_BACKGROUND_PROMPT,
+        backgroundDenoise=_NUDE_BASE_BACKGROUND_DENOISE,
+        soloSubject=True,
     )
     job = await submit_pipeline_edit_job(request, user_id)
 
@@ -223,7 +241,8 @@ async def generate_nude_base(
     logger.info(
         f"[NUDE-BASE] character {character_id} -> job {job.job_id} "
         f"(outfit=naked, nudity=high, denoise={_NUDE_BASE_OUTFIT_DENOISE}, "
-        f"mode={_NUDE_BASE_OUTFIT_PROMPT_MODE}, background=plain)"
+        f"mode={_NUDE_BASE_OUTFIT_PROMPT_MODE}, background=plain solo "
+        f"denoise={_NUDE_BASE_BACKGROUND_DENOISE})"
     )
     return _status_response(nb)
 

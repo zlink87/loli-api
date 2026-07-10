@@ -707,7 +707,11 @@ class PipelineEditRequest(BaseModel):
         description=(
             "'standard' (default behavior: append outfit/outfitDetail) | 'replace' "
             "(explicit remove-then-replace lead-in — use when a dressed source keeps "
-            "reconstructing its original garment). None behaves like 'standard'."
+            "reconstructing its original garment) | 'nude_base' (INTERNAL — set by "
+            "the nude-base endpoint, not admin UIs: on the NAKED outfit it swaps the "
+            "arousal-styled tier prose for a neutral anatomical reference body and "
+            "hardens the removal so no stray bra/strap/underwear survives). None "
+            "behaves like 'standard'."
         ),
     )
     nudityLevel: NudityLevel = Field(
@@ -769,6 +773,30 @@ class PipelineEditRequest(BaseModel):
         default=None,
         max_length=2000,
         description="Negative prompt for background step"
+    )
+    backgroundDenoise: Optional[float] = Field(
+        default=None,
+        ge=0.5,
+        le=1.0,
+        description=(
+            "Optional background-step denoise override for the V1 whole-frame graph "
+            "(node 106). Higher = the new backdrop overrides the source scene more "
+            "strongly — e.g. the nude base clears the hero's original location to a "
+            "plain studio backdrop. None = the template's baked value (~0.80)."
+        ),
+    )
+    soloSubject: bool = Field(
+        default=False,
+        description=(
+            "Nude-base / internal. When the server's SOLO_BG_PERSON_THRESHOLD env "
+            "is set (>0), the background step raises its GroundingDINO person-"
+            "detector confidence threshold so low-confidence background passersby "
+            "fall OUT of the protected mask and get painted over by the new "
+            "backdrop. FAIL-OPEN risk: if the MAIN subject also scored below the "
+            "threshold the whole frame becomes editable — acceptable only for "
+            "admin-reviewed assets like the nude base, never the interactive edit "
+            "paths (which leave this false)."
+        ),
     )
     seed: Optional[int] = Field(
         default=None,

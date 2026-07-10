@@ -100,6 +100,9 @@ def prepare_background_workflow(
     seed: Optional[int] = None,
     negative_prompt: Optional[str] = None,
     nudity_level: Optional[NudityLevel] = None,
+    denoise: Optional[float] = None,
+    solo_subject: bool = False,
+    person_threshold: float = 0.0,
 ) -> dict:
     """
     Prepare the environment/scene workflow with injected parameters.
@@ -121,9 +124,10 @@ def prepare_background_workflow(
     Injected nodes:
         108  LoadImage         -> inputs.image    (source image filename)
         16   easy positive     -> inputs.positive (scene change prompt)
-        106  KSampler          -> inputs.seed
+        106  KSampler          -> inputs.seed, optional inputs.denoise override
         117  easy negative     -> inputs.negative (quality/adult/identity/nudity)
         119  GrowMaskWithBlur  -> expand/blur_radius (mask feathering)
+        202  GroundingDinoSAMSegment -> optional inputs.threshold raise (solo subject)
 
     Args:
         template: Base workflow template (same as outfit)
@@ -133,6 +137,21 @@ def prepare_background_workflow(
         negative_prompt: Optional negative prompt override
         nudity_level: Optional nudity level (keeps exposure from creeping up
             across a chained outfit->background->pose batch item)
+        denoise: Optional KSampler (node 106) denoise override, 0.5-1.0. Higher =
+            the new backdrop overrides the source scene more strongly. None leaves
+            the template's baked value (~0.80). The template samples at cfg 1.0, so
+            a clean solo backdrop needs the extra removal strength here rather than
+            from the (inert) negatives.
+        solo_subject: When True AND ``person_threshold`` > 0, raise node 202's
+            GroundingDINO confidence threshold to ``person_threshold`` so low-
+            confidence background people drop OUT of the protected person mask and
+            get painted over. FAIL-OPEN: if the MAIN subject scores below the
+            threshold the whole frame becomes editable — only pass True for admin-
+            reviewed assets (the nude base). Default False leaves node 202 untouched.
+        person_threshold: The confidence threshold applied to node 202 when
+            ``solo_subject`` is True (typically ``settings.SOLO_BG_PERSON_THRESHOLD``,
+            resolved by the caller). 0.0 (default) = disabled — no change even when
+            ``solo_subject`` is True.
 
     Returns:
         Prepared workflow dict
@@ -159,6 +178,14 @@ def prepare_background_workflow(
         wf["106"]["inputs"]["seed"] = seed
         logger.debug(f"Set node 106 seed: {seed}")
 
+    # Node 106: denoise override. The V1 template bakes denoise 0.8 and samples at
+    # cfg 1.0 (negatives inert), so clearing a busy source scene to a clean backdrop
+    # relies on a stronger denoise here rather than on the (mathematically inert)
+    # negatives. None leaves the baked value untouched (unchanged legacy behavior).
+    if denoise is not None and "106" in wf:
+        wf["106"]["inputs"]["denoise"] = denoise
+        logger.debug(f"Set node 106 denoise override: {denoise}")
+
     # Segment the PERSON (node 202) instead of the clothing. Single robust term —
     # GroundingDINO expects period-separated phrases and "person" alone boxes the
     # full subject; node 204 inverts it so the inpaint region is the background
@@ -166,6 +193,18 @@ def prepare_background_workflow(
     if "202" in wf:
         wf["202"]["inputs"]["prompt"] = "person"
         logger.debug("Set node 202: person detection (for inverted background mask)")
+
+        # Solo-subject (nude base / admin-reviewed assets): raise node 202's
+        # GroundingDINO confidence threshold so low-confidence background passersby
+        # drop OUT of the protected person mask and get painted over by the new
+        # backdrop. Conjunction-gated (both the per-request flag AND a configured
+        # env threshold) and FAIL-OPEN — see the docstring. Default off: the
+        # template threshold (0.3) is left exactly as-is.
+        if solo_subject and person_threshold > 0:
+            wf["202"]["inputs"]["threshold"] = person_threshold
+            logger.debug(
+                f"Solo-subject: raised node 202 person threshold -> {person_threshold}"
+            )
 
     # Node 211 (head-protect mask) is unused on the background path (the whole
     # person is protected), but LoadImage validates file existence — point it at
