@@ -83,9 +83,15 @@ class PoseBackgroundWorker(BaseEditWorker):
                 prompt_used=prompt, seed_used=seed
             )
 
-            # Step 5: Prepare workflow and run on RunPod
+            # Step 5: Prepare workflow and run on RunPod. D3: negativePrompt goes LIVE
+            # only when the pose worker is pointed at the Tier-A 2511 pose graph
+            # (prepare_pose_workflow gates the injection on the template marker); on the
+            # v1 cfg-1 graph it stays inert, matching PoseEditRequest.negativePrompt's
+            # documented "IGNORED on v1" contract. PoseEditRequest carries no nudity
+            # level, so the negative uses edit_negative's 'low' default.
             workflow = prepare_pose_workflow(
-                self._workflow_template, source_name, reference_image, prompt=prompt, seed=seed
+                self._workflow_template, source_name, reference_image, prompt=prompt, seed=seed,
+                negative_prompt=getattr(request, "negativePrompt", None),
             )
 
             image_start = datetime.utcnow()

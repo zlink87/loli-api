@@ -236,7 +236,10 @@ pose_worker = PoseBackgroundWorker(
     job_manager=job_manager,
     comfyui_client=comfyui_client,
     storage_service=storage_service,
-    workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
+    # Precedence: Tier-A full-2511 pose graph (COMFYUI_POSE_WORKFLOW_PATH_2511) -> v1
+    # Rapid pose graph. EMPTY _2511 (default) keeps v1; the preparer auto-detects the
+    # 2511 graph (same node-id contract) and only then wires the live negative.
+    workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH_2511 or settings.COMFYUI_POSE_WORKFLOW_PATH,
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
@@ -258,7 +261,9 @@ pipeline_worker = PipelineBackgroundWorker(
     job_manager=job_manager,
     comfyui_client=comfyui_client,
     storage_service=storage_service,
-    pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
+    # Pose step follows the same 2511-if-set-else-v1 precedence as the interactive pose
+    # worker; auto-detected by prepare_pose_workflow (same node-id contract as v1).
+    pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH_2511 or settings.COMFYUI_POSE_WORKFLOW_PATH,
     # Pipeline outfit step follows the same precedence as the interactive outfit worker
     # (Tier A full-2511 -> Rapid V2 -> V1; auto-detected by prepare_outfit_workflow).
     outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
@@ -304,7 +309,9 @@ if supabase_db.is_configured():
         job_manager=job_manager,
         comfyui_client=comfyui_client,
         storage_service=storage_service,
-        pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH,
+        # Batch pose step follows the same 2511-if-set-else-v1 precedence as the
+        # interactive/pipeline pose workers (auto-detected by prepare_pose_workflow).
+        pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH_2511 or settings.COMFYUI_POSE_WORKFLOW_PATH,
         # Batch outfit step normally follows the same tier precedence as the
         # interactive/pipeline workers (Tier A full-2511 -> Rapid V2 -> V1;
         # auto-detected by prepare_outfit_workflow). WS3.2:
@@ -411,7 +418,11 @@ async def lifespan(app: FastAPI):
     # the [WORKFLOW-RESOLVED] lines emitted after workers start, and
     # GET /debug/workflow-config, for the ground truth per engine.
     logger.info(f"Outfit Workflow (V1 fallback default): {settings.COMFYUI_OUTFIT_WORKFLOW_PATH}")
-    logger.info(f"Pose Workflow: {settings.COMFYUI_POSE_WORKFLOW_PATH}")
+    logger.info(
+        "Pose Workflow: "
+        f"{settings.COMFYUI_POSE_WORKFLOW_PATH_2511 or settings.COMFYUI_POSE_WORKFLOW_PATH}"
+        f"{' (2511 tier)' if settings.COMFYUI_POSE_WORKFLOW_PATH_2511 else ''}"
+    )
     logger.info(f"Edit Workflow: {settings.COMFYUI_EDIT_WORKFLOW_PATH}")
     logger.info(f"Image Cache TTL: {settings.IMAGE_CACHE_TTL_SECONDS}s")
     logger.info(f"Debug Mode: {settings.DEBUG}")
@@ -440,7 +451,9 @@ async def lifespan(app: FastAPI):
         comfyui_client,
         settings.COMFYUI_EDIT_WORKFLOW_PATH,
         settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
-        settings.COMFYUI_POSE_WORKFLOW_PATH,
+        # Keep the interactive pose endpoint's template in sync with the pose worker's
+        # own resolved path (2511 if set, else v1).
+        settings.COMFYUI_POSE_WORKFLOW_PATH_2511 or settings.COMFYUI_POSE_WORKFLOW_PATH,
         image_cache_service,
         supabase_storage_service,
         runpod_client,

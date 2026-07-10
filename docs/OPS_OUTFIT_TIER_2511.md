@@ -166,3 +166,63 @@ Unset `COMFYUI_OUTFIT_WORKFLOW_PATH_2511` (and `COMFYUI_BATCH_OUTFIT_WORKFLOW_PA
 if you set that instead) and restart. The chain falls back to whatever was
 previously resolving (`_V2` / `rapid_cropstitch` if still set, else `v1`). No code
 change, no worker image change required.
+
+---
+
+## 7. Soft-LoRA A/B variant (optional)
+
+`workflows/outfit_cropstitch_2511full_softlora_API.json` is a byte-for-byte copy of
+the `2511full` graph with a SINGLE change: the NSFW LoRA (loader node `305`,
+`qwen-image-edit-plus-nsfw-lora.safetensors`) is dialed from `strength_model` **0.9
+→ 0.65**. The realism LoRA (`URP_20`, node `304` @ 0.8) is untouched. Everything else
+— UNet, VAE, CLIP, the whole crop-and-stitch mask graph, the sampler (20 steps / cfg
+2.5 / denoise 0.9) — is identical, so it loads the SAME five volume files (§4) and
+needs no extra staging.
+
+**Why:** at 0.9 the NSFW LoRA can over-assert on a dressed source (softening the
+source garment / skin detail). 0.65 tests whether a lighter NSFW push keeps more fine
+detail while still clearing the base 2511's mild-NSFW ceiling.
+
+**Heads-up on verification:** it renders on the same `2511full` tier (node `301`
+present), so `workflow_meta`/`describe_template` reports `tier=2511full` for BOTH
+graphs. Tell them apart by the resolved **`workflow_path`** (…`_softlora_API.json`)
+in the `[WORKFLOW-RESOLVED]` log / `GET /debug/workflow-config` / the per-image
+`workflow_meta.steps[]`, **not** by the tier string.
+
+**How to A/B:** point ONE of the outfit-path vars at it and restart — the graph is
+auto-detected (crop-and-stitch), no code change:
+
+```bash
+# interactive + pipeline + batch (shares the §2 precedence chain):
+COMFYUI_OUTFIT_WORKFLOW_PATH_2511=workflows/outfit_cropstitch_2511full_softlora_API.json
+# or batches only (leave interactive on the 0.9 graph):
+COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH=workflows/outfit_cropstitch_2511full_softlora_API.json
+```
+
+Roll back by repointing to `outfit_cropstitch_2511full_API.json` (§3) and restarting.
+
+---
+
+## 8. Pose step on 2511 (D3, optional, default-OFF)
+
+`workflows/pose_2511_API.json` runs the POSE (re-pose) step on this SAME 2511 stack
+(UNet + `URP_20` + NSFW LoRA, loader node ids `301`–`305`) instead of the distilled
+Rapid v1 graph (`edit_pose_action.json`: 4 steps, cfg 1, negatives inert via
+`ConditioningZeroOut`). It samples at **20 steps / cfg 2.5 / denoise 1.0 with a LIVE
+negative** encoder, and keeps the v1 node-id contract (source `109`, pose-ref `170`,
+prompt `114`, sampler `3`, ReActor `200`, save `164`) so the shared
+`prepare_pose_workflow` drives both templates — it only wires the negative on this
+tier. Same five volume files as §4, no extra staging.
+
+Enable it (own precedence, independent of the outfit chain):
+
+```bash
+COMFYUI_POSE_WORKFLOW_PATH_2511=workflows/pose_2511_API.json
+```
+
+(takes precedence over `COMFYUI_POSE_WORKFLOW_PATH`; empty default = v1). Restart the
+API. **Per-image proof:** the pose step records its tier in `character_images.metadata
+→ workflow_meta → steps[]` — `"pose_2511"` when this graph rendered it, `"v1"`
+otherwise — so batch A/Bs are identifiable in Supabase. **Cost:** 20 full-model steps
+vs. 4 distilled is a large jump per posed item; budget as with the outfit tier (§4).
+Roll back by unsetting the var and restarting.

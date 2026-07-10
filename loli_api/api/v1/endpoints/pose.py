@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth.dependencies import get_current_user
-from models.enums import PoseType, JobStatus
+from models.enums import PoseType, JobStatus, NudityLevel
 from models.requests import PoseEditRequest
 from models.responses import JobCreateResponse
 from services import pose_assets
@@ -293,14 +293,32 @@ def get_pose_reference(pose: PoseType) -> str:
     return pose_assets.worker_filename(pose)
 
 
-# NOTE (W7): The pose workflow (edit_pose_action.json) has NO negative
-# conditioning BY DESIGN. It runs the KSampler at cfg=1 and routes the negative
-# branch through ConditioningZeroOut, so any negative-prompt text is
-# mathematically inert. PoseEditRequest.negativePrompt is therefore accepted for
-# request-shape parity but deliberately not wired here. Do NOT wire a negative
-# prompt into this workflow without also raising cfg above 1 AND adding a real
-# negative encoder node — otherwise you change the sampler math and the intended
-# behavior. This is intentional; do not "fix" it.
+def _is_pose_2511_template(template: dict) -> bool:
+    """
+    True if this is the Tier-A 2511 pose graph (``pose_2511_API.json``).
+
+    Marker: node "301" is a UNETLoader (the native non-distilled Qwen-Image-Edit-2511
+    stack), present on the 2511 pose graph but NOT on the v1 Rapid pose graph
+    (edit_pose_action.json loads its checkpoint via CheckpointLoaderSimple at node
+    163). Mirrors ``_is_cropstitch_template``'s node-id + class_type approach so a
+    single ``prepare_pose_workflow`` can drive BOTH templates and branch only where
+    the graphs genuinely differ (the live negative — see the D3 NOTE below).
+    """
+    node = template.get("301")
+    return bool(node and node.get("class_type") == "UNETLoader")
+
+
+# NOTE (W7 / D3): The v1 pose graph (edit_pose_action.json) has NO negative
+# conditioning BY DESIGN — it runs the KSampler at cfg=1 and routes the negative
+# branch through ConditioningZeroOut, so any negative-prompt text is mathematically
+# inert. On that graph PoseEditRequest.negativePrompt stays accepted-but-unwired:
+# the injection block below is gated on ``_is_pose_2511_template`` and NEVER touches
+# the v1 template. Do NOT wire a negative into the v1 graph without also raising its
+# cfg above 1 AND adding a real negative encoder node — that would change the sampler
+# math. The Tier-A pose graph (pose_2511_API.json) satisfies exactly those two
+# preconditions (cfg 2.5 + a real TextEncodeQwenImageEditPlus negative at node 115),
+# so the negative IS wired there — this is the one place the pose step's negatives
+# come alive, and only when that template is loaded.
 def prepare_pose_workflow(
     template: dict,
     source_image: str,
@@ -310,6 +328,8 @@ def prepare_pose_workflow(
     debug_save_pre_reactor: bool = False,
     reactor_restore_visibility: float = -1.0,
     reactor_codeformer_weight: float = -1.0,
+    negative_prompt: Optional[str] = None,
+    nudity_level: Optional[NudityLevel] = None,
 ) -> dict:
     """
     Prepare the pose workflow with injected parameters.
@@ -317,13 +337,21 @@ def prepare_pose_workflow(
     Workflow nodes:
         109  LoadImage        -> inputs.image  (source character image = image1)
         170  LoadImage        -> inputs.image  (reference pose image = image2)
-        114  CLIPTextEncode (or similar) -> inputs.prompt  (text prompt)
+        114  CLIPTextEncode (or similar) -> inputs.prompt  (positive text prompt)
+        115  TextEncodeQwenImageEditPlus -> inputs.prompt  (LIVE negative; 2511 tier ONLY)
         3    KSampler         -> inputs.seed
         8    VAEDecode        -> the PRE-ReActor frame (raw pose regen)
         200  ReActorFaceSwap  -> inputs.face_restore_visibility / codeformer_weight
         164  SaveImage        -> the POST-ReActor final output (images=["200",0])
         300  SaveImage        -> WS4.1 debug-only node, injected when
                                   debug_save_pre_reactor=True (images=["8",0])
+
+    This preparer drives BOTH pose templates off the SAME node-id contract
+    (109/170/114/3/8/200/164): the v1 Rapid graph (edit_pose_action.json) and the
+    Tier-A graph (pose_2511_API.json). The ONLY tier-specific branch is the negative:
+    node 115 (a real negative encoder) exists solely on the 2511 graph and is wired
+    from ``pc.edit_negative(...)`` only when ``_is_pose_2511_template`` is true. On v1
+    (no node 115, cfg 1) nothing is injected, so v1 stays byte-identical to before.
 
     Args:
         template: Base workflow template
@@ -344,6 +372,14 @@ def prepare_pose_workflow(
         reactor_codeformer_weight: WS4.2 tuning knob (default -1.0 = no
             override). When >= 0, overrides node 200's ``codeformer_weight``
             (template default 0.25).
+        negative_prompt: D3, 2511-tier ONLY. Optional extra negative terms folded
+            into ``pc.edit_negative(...)`` and written to node 115's prompt. On the
+            v1 graph this is ignored entirely (no node 115; cfg 1 makes negatives
+            inert — see the W7/D3 NOTE above). None = the full standard edit negative
+            (quality + adult + identity + skin + nudity-tier) with no extra terms.
+        nudity_level: D3, 2511-tier ONLY. NudityLevel (or None = 'low') selecting the
+            nudity-suppression block inside ``pc.edit_negative(...)`` for node 115.
+            Ignored on the v1 graph.
 
     Returns:
         Prepared workflow dict
@@ -365,6 +401,17 @@ def prepare_pose_workflow(
         wf["114"]["inputs"]["prompt"] = prompt
         logger.debug(f"Set node 114 prompt: {prompt[:80]}...")
 
+    # Node 115: LIVE negative — Tier-A (2511) pose graph ONLY. The v1 Rapid graph
+    # has no node 115 and samples at cfg 1 (negatives inert), so this is gated on
+    # the 2511 template marker AND on the node's presence, and never touches v1
+    # (see the W7/D3 NOTE above). pc.edit_negative folds the standard
+    # quality/adult/identity/skin + nudity-tier negatives with any request extra.
+    if _is_pose_2511_template(wf) and "115" in wf:
+        wf["115"]["inputs"]["prompt"] = pc.edit_negative(
+            negative_prompt, nudity_level=nudity_level
+        )
+        logger.debug("Set node 115 live negative (2511 pose tier)")
+
     # Node 3: Seed + quality bump.
     if "3" in wf:
         if seed is not None:
@@ -375,6 +422,8 @@ def prepare_pose_workflow(
         # so it is the dominant source of extra-limb / anatomy artifacts in a batch.
         # More steps is the main lever we have here (denoise can't drop — it's a genuine
         # pose transfer — and cfg can't rise on this distilled checkpoint). 4 -> 8.
+        # This is a v1-tier nudge: the Tier-A 2511 pose graph already bakes 20 steps
+        # (>= 8), so the guard is a no-op there and leaves its sampler untouched.
         try:
             if int(wf["3"]["inputs"].get("steps", 0)) < 8:
                 wf["3"]["inputs"]["steps"] = 8

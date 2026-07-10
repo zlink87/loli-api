@@ -387,6 +387,11 @@ class PipelineBackgroundWorker:
                 debug_save_pre_reactor=settings.POSE_DEBUG_SAVE_PRE_REACTOR,
                 reactor_restore_visibility=reactor_restore_visibility,
                 reactor_codeformer_weight=reactor_codeformer_weight,
+                # D3: LIVE negative on the Tier-A 2511 pose graph ONLY (prepare_pose_workflow
+                # gates this on the template marker — no-op on the v1 cfg-1 graph). getattr
+                # keeps a test stand-in without these fields on the pre-D3 path.
+                negative_prompt=getattr(request, "negativePrompt", None),
+                nudity_level=getattr(request, "nudityLevel", None),
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(

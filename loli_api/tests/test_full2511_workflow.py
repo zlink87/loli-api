@@ -78,6 +78,58 @@ def test_preparer_mask_mode_still_works_on_2511_graph():
     assert body["233"]["inputs"]["destination"] == ["213", 0]
 
 
+# ---------------------------------------------------------------------------
+# A6 — soft-LoRA A/B variant (outfit_cropstitch_2511full_softlora_API.json).
+# An exact copy of the base 2511 outfit graph with ONE change: the NSFW LoRA
+# (node 305) dialed from strength_model 0.9 -> 0.65 to test whether a lighter
+# NSFW LoRA preserves more source-garment/identity detail. Ships default-OFF
+# (point COMFYUI_*_OUTFIT_WORKFLOW_PATH_2511 / _BATCH at it to A/B). This is a
+# structural-diff guard: the ONLY difference from the base must be that strength.
+# ---------------------------------------------------------------------------
+_SOFTLORA_WF = (
+    Path(__file__).resolve().parent.parent
+    / "workflows" / "outfit_cropstitch_2511full_softlora_API.json"
+)
+
+
+def _softlora_template():
+    with open(_SOFTLORA_WF, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_softlora_variant_differs_from_base_only_in_node_305_strength():
+    base = _template()
+    soft = _softlora_template()
+    # Same node-id set, and EVERY node identical except 305.
+    assert set(base) == set(soft)
+    differing = [nid for nid in base if base[nid] != soft[nid]]
+    assert differing == ["305"], f"expected only node 305 to differ, got {differing}"
+    # Within 305, ONLY strength_model changed (0.9 -> 0.65); lora + wiring untouched.
+    assert base["305"]["inputs"]["strength_model"] == 0.9
+    assert soft["305"]["inputs"]["strength_model"] == 0.65
+    assert soft["305"]["inputs"]["lora_name"] == "qwen-image-edit-plus-nsfw-lora.safetensors"
+    assert soft["305"]["inputs"]["model"] == ["304", 0]
+    assert soft["305"]["class_type"] == "LoraLoaderModelOnly"
+    # The realism LoRA (URP_20 @ node 304) is explicitly left untouched.
+    assert soft["304"]["inputs"]["lora_name"] == "URP_20.safetensors"
+    assert soft["304"]["inputs"]["strength_model"] == 0.8
+
+
+def test_softlora_variant_is_still_driven_by_the_shared_2511_preparer():
+    # Same crop-and-stitch graph -> auto-detected and driven with no code change, and
+    # the full-model sampler settings survive (only seed + denoise are set).
+    assert _is_cropstitch_template(_softlora_template()) is True
+    wf = prepare_outfit_workflow(
+        _softlora_template(), "src.png", "a red dress",
+        seed=5, nudity_level=NudityLevel.LOW, outfit=OutfitType.COCKTAIL_DRESS,
+        head_mask_name="hm.png", source_dressed=True,
+    )
+    assert wf["106"]["inputs"]["steps"] >= 20
+    assert wf["106"]["inputs"]["cfg"] >= 2.0
+    assert wf["106"]["inputs"]["seed"] == 5
+    assert wf["305"]["inputs"]["strength_model"] == 0.65  # variant's lighter NSFW LoRA
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

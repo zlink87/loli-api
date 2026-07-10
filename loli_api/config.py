@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     # template than the interactive engines (e.g. a staged rollout to batches first).
     COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH: str = ""
     COMFYUI_POSE_WORKFLOW_PATH: str = "workflows/edit_pose_action.json"
+    # D3 quality path: run the pose (re-pose) step on the FULL (non-distilled)
+    # Qwen-Image-Edit-2511 stack + realism/NSFW LoRAs at 20 steps / cfg 2.5 with a
+    # LIVE negative, instead of the distilled Rapid-AIO v1 graph (edit_pose_action.json:
+    # 4 steps, cfg 1, negatives inert via ConditioningZeroOut). EMPTY (default) keeps
+    # the v1 graph. Set to "workflows/pose_2511_API.json" to cut the pose step over to
+    # the 2511 tier — the preparer auto-detects the graph (same node-id contract as v1)
+    # and only then wires the negative. Takes precedence over COMFYUI_POSE_WORKFLOW_PATH
+    # (mirrors the outfit _2511 precedence). REQUIRES the worker image to stage the 2511
+    # model + LoRA files first (same five files as the outfit 2511 tier — see
+    # docs/OPS_OUTFIT_TIER_2511.md §4); redeploy before enabling.
+    COMFYUI_POSE_WORKFLOW_PATH_2511: str = ""
     COMFYUI_VIDEO_WORKFLOW_PATH: str = "workflows/wan_i2v.json"
     # Frame-interpolation variant of the reel workflow (RIFE/FILM 16->32fps, kills
     # judder). EMPTY (default) -> OFF: the video worker uses COMFYUI_VIDEO_WORKFLOW_PATH.

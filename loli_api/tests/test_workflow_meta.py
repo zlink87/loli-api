@@ -10,7 +10,14 @@ import asyncio
 import json
 from pathlib import Path
 
-from services.workflow_meta import describe_template, TIER_2511FULL, TIER_RAPID_CROPSTITCH, TIER_V1, TIER_UNKNOWN
+from services.workflow_meta import (
+    describe_template,
+    TIER_2511FULL,
+    TIER_RAPID_CROPSTITCH,
+    TIER_POSE_2511,
+    TIER_V1,
+    TIER_UNKNOWN,
+)
 
 _WF_DIR = Path(__file__).resolve().parent.parent / "workflows"
 
@@ -55,17 +62,40 @@ def test_maskpreview_variant_is_also_rapid_cropstitch():
 
 
 # ---------------------------------------------------------------------------
-# Pose graph: no node "106" -> sampler falls back to node "3"
+# Pose graphs: no node "106" -> sampler falls back to node "3", and the pose
+# step is classified on its OWN axis (v1 Rapid graph vs. Tier-A 2511 graph).
 # ---------------------------------------------------------------------------
 def test_pose_graph_sampler_falls_back_to_node_3():
     wf = _load("edit_pose_action.json")
     meta = describe_template(wf)
-    # The pose graph has neither node 301 nor a crop-stitch node 235, so it
-    # falls into the catch-all "v1" bucket — tier is outfit-graph vocabulary,
-    # the pose step just doesn't have one of its own.
+    # The v1 Rapid pose graph has a ReActorFaceSwap at node 200 (so it's detected as
+    # a pose graph) but NOT the native 2511 UNETLoader at node 301, so it reports the
+    # catch-all "v1" tier — unchanged from before pose_2511 existed.
     assert meta["tier"] == TIER_V1
     assert "106" not in wf
     assert meta["sampler"] == {"steps": 4, "cfg": 1, "denoise": 1}
+
+
+def test_pose_2511_tier_on_real_template():
+    wf = _load("pose_2511_API.json")
+    meta = describe_template(wf)
+    # The Tier-A pose graph is a pose graph (ReActorFaceSwap at 200) AND carries the
+    # native 2511 UNETLoader (node 301), so it reports its own "pose_2511" tier — even
+    # though it reuses the outfit 2511 loader block. This is what makes batch A/Bs
+    # identifiable in character_images.metadata -> workflow_meta -> steps[].tier.
+    assert meta["tier"] == TIER_POSE_2511 == "pose_2511"
+    assert "106" not in wf
+    # Full re-pose sampler: 20 steps, cfg 2.5, denoise 1.0 (read off node 3).
+    assert meta["sampler"] == {"steps": 20, "cfg": 2.5, "denoise": 1.0}
+
+
+def test_pose_2511_does_not_leak_into_outfit_2511_tier():
+    # Guard the ordering in describe_template: the 2511 pose graph reuses node 301, so
+    # if the pose check didn't run FIRST it would misreport as the outfit "2511full".
+    assert describe_template(_load("pose_2511_API.json"))["tier"] != TIER_2511FULL
+    # ...and conversely the outfit 2511 graph (SAMModelLoader at 200, not ReActor) must
+    # stay "2511full", never "pose_2511".
+    assert describe_template(_load("outfit_cropstitch_2511full_API.json"))["tier"] == TIER_2511FULL
 
 
 # ---------------------------------------------------------------------------
