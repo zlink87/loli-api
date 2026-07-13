@@ -204,6 +204,58 @@ with every other job type.
 
 ---
 
+## 5b. Dedicated batch endpoint (optional)
+
+Story/trait **batch** jobs run each item's pipeline as several separate RunPod jobs
+(pose + two 20-step 2511 passes). On the main §4 endpoint's all-**A40** fleet there
+is no FP8 hardware, so the `fp8mixed` 2511 model runs dequantized and slow; items
+can exceed the 10-min main per-job cap (`RUNPOD_EXECUTION_TIMEOUT_MS`) and get killed
+and retried, and each cold start reloads ~20 GB from the volume (`BATCH_MAX_INFLIGHT=3`
+fans that cold-start cost out three ways). Give batches their own fp8-capable endpoint
+so items finish in minutes without timeout-retry churn.
+
+Create a **third** Serverless endpoint (RunPod console → Serverless → New Endpoint):
+- **Network volume:** attach the SAME volume as the main endpoint (`loli-comfy-models`,
+  same datacenter) — reuses the already-populated ~20 GB of models with no extra
+  download, and pins the endpoint to that datacenter so it can mount the volume.
+- **Worker image / template:** the SAME worker image as the main endpoint (§2). RunPod
+  binds a template to exactly one endpoint, so **clone** the main template (as was done
+  for the video endpoint in §5a) rather than trying to share it.
+- **GPU priority (ordered by SUPPLY, FP8-capable 48 GB first):**
+  `L40S → L40 → RTX 6000 Ada`, then **fallback `A6000 → A40`** (Ampere — slower, no FP8,
+  but plentiful, so batches keep flowing when Ada supply is dry). **Exclude RTX 4090 /
+  L4 (24 GB):** the 20 GB fp8 UNet + ~8 GB text encoder don't fit reliably, and the
+  resulting OOM-retry churn is worse than a slower-but-roomy card.
+- **FlashBoot:** ON.
+- **Min / Active workers:** `1` while running batch sessions — this kills the ~4.5-min
+  cold-start tax mid-batch. Scale back to `0` overnight so you stop paying for idle GPU
+  when no batches are running (a min-1 worker bills continuously).
+- **Max workers:** ≥ `BATCH_MAX_INFLIGHT` (3) so every in-flight batch item has a worker.
+- **Idle timeout:** ~300 s — bridges the gaps between a single item's pipeline steps so
+  the worker stays warm across pose → outfit → background instead of cold-starting each
+  step.
+- **Execution timeout:** ≥ 1200 s (matches `RUNPOD_BATCH_EXECUTION_TIMEOUT_MS`, 20 min).
+- Add the same S3 env vars from §3.
+
+Copy the new endpoint's ID and set it on the API deployment's env (see `.env.example`):
+```
+RUNPOD_BATCH_ENDPOINT_ID=<the new endpoint id>
+```
+Leaving it unset (default) keeps today's behavior: batches share `RUNPOD_ENDPOINT_ID`
+with every other job type.
+
+> **Live endpoint (created 2026-07-13):** id `4x3p45rwcqssu6`, template
+> `loli-worker-batch` — a clone of the main worker template on the shared
+> `loli-comfy-models` volume (48 GB pool L40S/L40/RTX 6000 Ada, A6000/A40 fallback,
+> FlashBoot on, min 1 / max 3, 20-min execution timeout).
+
+> **Future ops task — worker-image slimming:** the ~4.5-min cold start is dominated
+> by loading the worker image + 20 GB of models. Slimming the image (fewer custom
+> nodes / smaller base) is a separate ops task tracked outside this endpoint setup;
+> min-1 workers during batch sessions is the interim mitigation.
+
+---
+
 ## 6. Quality / identity follow-ups (need ComfyUI to validate)
 
 These improve identity preservation and reduce deformities but change the ComfyUI workflow

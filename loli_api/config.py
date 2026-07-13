@@ -117,6 +117,23 @@ class Settings(BaseSettings):
     # on A40-class workers.
     RUNPOD_VIDEO_ENDPOINT_ID: str = ""
 
+    # Batch (Story/trait batch) pipeline items run each step as a separate RunPod
+    # job, and the 2511 tier's multi-step items (pose + two 20-step passes) can run
+    # longer than the main 10-min per-job cap (RUNPOD_EXECUTION_TIMEOUT_MS) — on the
+    # all-A40 fleet with no FP8 hardware the fp8mixed model runs dequantized and
+    # slow — so batch jobs get their own, longer caps.
+    RUNPOD_BATCH_EXECUTION_TIMEOUT_MS: int = 1_200_000   # 20 min per-job cap
+    RUNPOD_BATCH_TTL_MS: int = 3_600_000                 # 60 min total lifespan
+    # Dedicated serverless endpoint for BATCH pipeline jobs. EMPTY (default) ->
+    # batches share RUNPOD_ENDPOINT_ID like every other job type — byte-identical
+    # legacy behavior. The main endpoint's all-A40 fleet has no FP8 hardware, so the
+    # 2511 tier's 3-step items run dequantized/slow and can blow past the main
+    # 10-min per-job cap and get killed and retried. Set this to a second endpoint
+    # id in the SAME datacenter as the models network volume (so it can attach the
+    # volume), backed by an fp8-capable 48 GB GPU (L40S / L40 / RTX 6000 Ada), so
+    # batch items stop landing on A40-class workers and stop timing out.
+    RUNPOD_BATCH_ENDPOINT_ID: str = ""
+
     # Keep-warm pinger (OPTIONAL, OFF by default). When enabled, the API submits a
     # lightweight warm-up job to the RunPod endpoint every WARMUP_INTERVAL_SECONDS
     # for as long as WARMUP_WINDOW_MINUTES after the last REAL job — so an active

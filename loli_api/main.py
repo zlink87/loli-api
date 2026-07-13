@@ -120,6 +120,26 @@ else:
     video_runpod_client = runpod_client
 job_manager.attach_video_runpod_client(video_runpod_client)
 
+# Dedicated batch endpoint (OPTIONAL, empty by default -> batches share
+# runpod_client above, byte-identical legacy behavior). Batch pipeline items run
+# each step as a separate RunPod job; on the main endpoint's all-A40 fleet the
+# 2511 tier's multi-step items run dequantized/slow and can exceed the main 10-min
+# per-job cap and get killed/retried. A separate fp8-capable 48GB endpoint (L40S /
+# L40 / RTX 6000 Ada) with a 20-min batch cap keeps items flowing. Same
+# api_key/base_url — only the endpoint id and batch-sized timeout/ttl differ.
+if settings.RUNPOD_BATCH_ENDPOINT_ID and settings.RUNPOD_BATCH_ENDPOINT_ID != settings.RUNPOD_ENDPOINT_ID:
+    batch_runpod_client = RunPodServerlessClient(
+        api_key=settings.RUNPOD_API_KEY,
+        endpoint_id=settings.RUNPOD_BATCH_ENDPOINT_ID,
+        base_url=settings.RUNPOD_BASE_URL,
+        default_execution_timeout_ms=settings.RUNPOD_BATCH_EXECUTION_TIMEOUT_MS,
+        default_ttl_ms=settings.RUNPOD_BATCH_TTL_MS,
+    )
+    logger.info(f"Dedicated batch RunPod endpoint active: {settings.RUNPOD_BATCH_ENDPOINT_ID}")
+else:
+    batch_runpod_client = runpod_client
+job_manager.attach_batch_runpod_client(batch_runpod_client)
+
 prompt_generator = PromptGenerator()
 
 # Persona/bio writer (Feature 1). Unconditional — works keyless (deterministic
@@ -373,7 +393,11 @@ if supabase_db.is_configured():
         image_cache_service=image_cache_service,
         notification_service=notification_service,
         supabase_storage_service=supabase_storage_service,
-        runpod_client=runpod_client,
+        # THE batch-engine client handoff: dedicated batch endpoint when
+        # RUNPOD_BATCH_ENDPOINT_ID is set, else the same object as runpod_client
+        # (see the batch_runpod_client assignment above). Only the batch engine
+        # cuts over — interactive char-gen/edit/video paths stay on the main client.
+        runpod_client=batch_runpod_client,
     )
     for i in range(settings.BATCH_WORKER_POOL_SIZE):
         batch_workers.append(BatchPipelineWorker(

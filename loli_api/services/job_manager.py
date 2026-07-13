@@ -93,6 +93,9 @@ class JobManager:
         # Optional dedicated RunPod client for VIDEO jobs (RUNPOD_VIDEO_ENDPOINT_ID).
         # None -> cancel_job falls back to _runpod_client, same as before this existed.
         self._video_runpod_client = None
+        # Optional dedicated RunPod client for BATCH pipeline jobs (RUNPOD_BATCH_ENDPOINT_ID).
+        # None -> cancel_job falls back to _runpod_client, same as before this existed.
+        self._batch_runpod_client = None
 
     def attach_runpod_client(self, runpod_client) -> None:
         """Attach the RunPod client so cancel_job can stop in-flight RunPod jobs."""
@@ -105,6 +108,14 @@ class JobManager:
         (RUNPOD_VIDEO_ENDPOINT_ID) instead of the main one.
         """
         self._video_runpod_client = runpod_client
+
+    def attach_batch_runpod_client(self, runpod_client) -> None:
+        """
+        Attach the dedicated batch-endpoint RunPod client, so cancel_job can stop
+        in-flight BATCH pipeline jobs on the endpoint they were actually submitted to
+        (RUNPOD_BATCH_ENDPOINT_ID) instead of the main one.
+        """
+        self._batch_runpod_client = runpod_client
 
     async def set_runpod_id(self, job_id: str, runpod_id: str) -> None:
         """Associate a RunPod job id with a local job."""
@@ -513,15 +524,22 @@ class JobManager:
         if job.status in (JobStatus.SUCCEEDED, JobStatus.FAILED):
             return False  # terminal jobs cannot be cancelled
 
-        # If it's already running on RunPod, ask RunPod to stop it. VIDEO jobs may
-        # have been submitted to the dedicated video endpoint (RUNPOD_VIDEO_ENDPOINT_ID)
-        # instead of the main one, so pick the client that matches where it landed;
-        # fall back to the main client when no dedicated video client is attached.
+        # If it's already running on RunPod, ask RunPod to stop it on the endpoint it
+        # was actually submitted to. VIDEO jobs may have gone to the dedicated video
+        # endpoint (RUNPOD_VIDEO_ENDPOINT_ID) and BATCH pipeline jobs to the dedicated
+        # batch endpoint (RUNPOD_BATCH_ENDPOINT_ID); pick the client that matches where
+        # each landed, and fall back to the main client when no dedicated client is
+        # attached. Batch is keyed on job_type (not the request type) because batch and
+        # interactive pipeline edits both carry PipelineEditRequest — an isinstance
+        # check would wrongly divert interactive /v1/edit cancels to the batch endpoint.
         is_video_job = isinstance(job.request, VideoGenerateRequest)
-        runpod_client = (
-            self._video_runpod_client if is_video_job and self._video_runpod_client is not None
-            else self._runpod_client
-        )
+        is_batch_job = job.job_type == "batch_pipeline_edit"
+        if is_video_job and self._video_runpod_client is not None:
+            runpod_client = self._video_runpod_client
+        elif is_batch_job and self._batch_runpod_client is not None:
+            runpod_client = self._batch_runpod_client
+        else:
+            runpod_client = self._runpod_client
         if job.runpod_id and runpod_client is not None:
             try:
                 await runpod_client.cancel(job.runpod_id)
