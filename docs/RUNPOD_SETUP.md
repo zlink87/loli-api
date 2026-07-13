@@ -221,11 +221,19 @@ Create a **third** Serverless endpoint (RunPod console → Serverless → New En
 - **Worker image / template:** the SAME worker image as the main endpoint (§2). RunPod
   binds a template to exactly one endpoint, so **clone** the main template (as was done
   for the video endpoint in §5a) rather than trying to share it.
-- **GPU priority (ordered by SUPPLY, FP8-capable 48 GB first):**
-  `L40S → L40 → RTX 6000 Ada`, then **fallback `A6000 → A40`** (Ampere — slower, no FP8,
-  but plentiful, so batches keep flowing when Ada supply is dry). **Exclude RTX 4090 /
-  L4 (24 GB):** the 20 GB fp8 UNet + ~8 GB text encoder don't fit reliably, and the
-  resulting OOM-retry churn is worse than a slower-but-roomy card.
+- **GPU priority: `RTX A6000 → A40` (Ampere 48 GB ONLY — see warning).**
+  **Verified 2026-07-13 in production: the CURRENT worker image CRASHES on Ada
+  GPUs (L40S / L40 / RTX 6000 Ada)** — workers die ~2 min into the first job
+  (at fp8 model load; the image's ComfyUI/torch build cannot run
+  `qwen_image_edit_2511_fp8mixed` on Ada's native-FP8 path, while Ampere's
+  dequantized path works). Symptom: jobs stuck in queue forever, workers
+  flapping running → unhealthy, `stop container`/`create container` loops in
+  worker logs, zero completions. Ampere-only immediately completed jobs.
+  Re-adding Ada (for true FP8 speed) requires a worker-image upgrade
+  (newer torch/ComfyUI with working Ada fp8 kernels) — test on ONE Ada worker
+  before trusting it. **Exclude RTX 4090 / L4 (24 GB):** the 20 GB fp8 UNet +
+  ~8 GB text encoder don't fit reliably, and the resulting OOM-retry churn is
+  worse than a slower-but-roomy card.
 - **FlashBoot:** ON.
 - **Min / Active workers:** `1` while running batch sessions — this kills the ~4.5-min
   cold-start tax mid-batch. Scale back to `0` overnight so you stop paying for idle GPU
@@ -235,7 +243,11 @@ Create a **third** Serverless endpoint (RunPod console → Serverless → New En
   the worker stays warm across pose → outfit → background instead of cold-starting each
   step.
 - **Execution timeout:** ≥ 1200 s (matches `RUNPOD_BATCH_EXECUTION_TIMEOUT_MS`, 20 min).
-- Add the same S3 env vars from §3.
+- **Do NOT add the S3 `BUCKET_*` env vars to the worker template.** Verified
+  2026-07-13: this worker image's direct-S3-upload path breaks job processing
+  (every job fails with "Job processing failed" before the first step). The
+  main template runs WITHOUT them — the worker returns outputs in the response
+  and the API uploads to Supabase itself. Leave the template env empty.
 
 Copy the new endpoint's ID and set it on the API deployment's env (see `.env.example`):
 ```
@@ -245,9 +257,10 @@ Leaving it unset (default) keeps today's behavior: batches share `RUNPOD_ENDPOIN
 with every other job type.
 
 > **Live endpoint (created 2026-07-13):** id `4x3p45rwcqssu6`, template
-> `loli-worker-batch` — a clone of the main worker template on the shared
-> `loli-comfy-models` volume (48 GB pool L40S/L40/RTX 6000 Ada, A6000/A40 fallback,
-> FlashBoot on, min 1 / max 3, 20-min execution timeout).
+> `loli-worker-batch` (env EMPTY — see S3 warning above) on the shared
+> `loli-comfy-models` volume. GPU pool switched to **A6000/A40 Ampere-only**
+> the same evening after the Ada crash was confirmed live. FlashBoot on,
+> min 1 / max 3, 20-min execution timeout, ~300s idle.
 
 > **Future ops task — worker-image slimming:** the ~4.5-min cold start is dominated
 > by loading the worker image + 20 GB of models. Slimming the image (fewer custom
