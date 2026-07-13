@@ -33,9 +33,21 @@ Start a cheap **GPU Pod** (or CPU pod) with this network volume attached, open a
 and download the models into the ComfyUI model folders on the volume. These are the exact
 files loli-api expects (from `setup.sh` / `download2.sh`):
 
+> **PATH WARNING (learned the hard way 07-14):** the worker maps
+> `<volume>/models/<folder>` — **`models/…`, NOT `ComfyUI/models/…`**
+> (Dockerfile.worker symlinks `/runpod-volume/models/${d}` → `/comfyui/models/${d}`).
+> On a pod the volume usually mounts at `/workspace`, so files go to
+> `/workspace/models/loras/`, `/workspace/models/facerestore_models/`, etc.
+> Files placed under `ComfyUI/models/` are silently invisible to workers.
+> Also: workers only scan model folders at container start — after adding files,
+> cycle the endpoint's workers (min/max → 0 → restore) so they rescan.
+> HF downloads now require auth: fetch the redirect URL with
+> `curl -H "Authorization: Bearer hf_…" -o /dev/null -w '%{redirect_url}'` and
+> wget THAT (wget forwards the auth header to the signed CDN URL and gets 403).
+
 ```bash
 cd /runpod-volume
-mkdir -p ComfyUI/models/{diffusion_models,text_encoders,vae,checkpoints,sam3,upscale_models,loras}
+mkdir -p models/{diffusion_models,text_encoders,vae,checkpoints,sam3,upscale_models,loras,facerestore_models}
 
 # Z-Image Turbo (character generation)
 # NOTE: the production workflow (amazing-z-photo_API_Create_CHAR.json) loads the
