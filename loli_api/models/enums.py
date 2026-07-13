@@ -36,12 +36,51 @@ class StyleType(str, Enum):
 
 
 class EthnicityType(str, Enum):
-    """Character ethnicity options."""
+    """
+    Character ethnicity options.
+
+    The 5 original members (caucasian/asian/black_afro/latina/arab) are kept FIRST
+    with their values unchanged for back-compat (stored text columns still parse).
+    The 20 regional members appended below give heritage/skin/bone-structure
+    distinctiveness that the 5 broad buckets collapsed away — expansion is purely
+    additive (every consumer degrades safely on values it doesn't recognize).
+    Grouping for the admin dropdown lives in api/v1/endpoints/options.py; the
+    skin-tone + facial-structure phrase for each value lives in
+    services/attribute_phrases.py (never hair or eye color — those are separate
+    persona fields and must not conflict).
+    """
+    # --- legacy (kept first, values unchanged) ---
     CAUCASIAN = "caucasian"
     ASIAN = "asian"
     BLACK_AFRO = "black_afro"
     LATINA = "latina"
     ARAB = "arab"
+    # --- European ---
+    NORDIC = "nordic"
+    SLAVIC = "slavic"
+    BALTIC = "baltic"
+    WESTERN_EUROPEAN = "western_european"
+    MEDITERRANEAN = "mediterranean"
+    # --- Asian ---
+    JAPANESE = "japanese"
+    KOREAN = "korean"
+    CHINESE = "chinese"
+    SOUTHEAST_ASIAN = "southeast_asian"
+    SOUTH_ASIAN = "south_asian"
+    CENTRAL_ASIAN = "central_asian"
+    # --- Middle East / North Africa ---
+    PERSIAN = "persian"
+    TURKISH = "turkish"
+    NORTH_AFRICAN = "north_african"
+    # --- African ---
+    WEST_AFRICAN = "west_african"
+    EAST_AFRICAN = "east_african"
+    HORN_OF_AFRICA = "horn_of_africa"
+    AFRO_CARIBBEAN = "afro_caribbean"
+    # --- Americas ---
+    BRAZILIAN = "brazilian"
+    # --- Mixed ---
+    MIXED_HERITAGE = "mixed_heritage"
 
 
 class HairStyleType(str, Enum):

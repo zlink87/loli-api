@@ -76,6 +76,38 @@ def test_ethnicity_enum_length_matches():
     assert len(body["persona"]["ethnicity"]) == len(EthnicityType)
 
 
+def test_ethnicity_options_are_exhaustive_and_unique():
+    # The regionally-ordered list must contain EVERY enum member exactly once.
+    body = asyncio.run(ep.get_options(user={"sub": "admin-1"}))
+    values = [e["value"] for e in body["persona"]["ethnicity"]]
+    assert len(values) == len(set(values)), "duplicate ethnicity option"
+    assert set(values) == {e.value for e in EthnicityType}
+
+
+def test_ethnicity_options_include_new_values_with_labels():
+    body = asyncio.run(ep.get_options(user={"sub": "admin-1"}))
+    eth = body["persona"]["ethnicity"]
+    assert {"value": "slavic", "label": "Slavic"} in eth
+    assert {"value": "west_african", "label": "West African"} in eth
+    assert {"value": "mixed_heritage", "label": "Mixed Heritage"} in eth
+
+
+def test_ethnicity_options_ordered_regionally_with_legacy_inside_regions():
+    # European group leads (legacy caucasian sits at the END of European), then
+    # Asian (legacy asian last in group), then MENA/African/Americas/Mixed.
+    body = asyncio.run(ep.get_options(user={"sub": "admin-1"}))
+    values = [e["value"] for e in body["persona"]["ethnicity"]]
+    pos = {v: i for i, v in enumerate(values)}
+    # legacy values are placed inside their region, not all up-front
+    assert pos["nordic"] < pos["caucasian"] < pos["japanese"]
+    assert pos["chinese"] < pos["asian"] < pos["persian"]
+    assert pos["north_african"] < pos["arab"] < pos["west_african"]
+    assert pos["afro_caribbean"] < pos["black_afro"] < pos["brazilian"]
+    assert pos["brazilian"] < pos["latina"] < pos["mixed_heritage"]
+    # mixed_heritage is the final option
+    assert values[-1] == "mixed_heritage"
+
+
 def test_every_option_entry_has_nonempty_value_and_label():
     body = asyncio.run(ep.get_options(user={"sub": "admin-1"}))
     for group, keys in _ENUM_KEYS.items():

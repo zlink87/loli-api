@@ -230,6 +230,51 @@ def test_user_prompt_card_specs_forbid_aispeak_and_enum_words():
     assert "humanized" in prompt.lower()
 
 
+# --- ethnicity heritage hint (WS-2, display-only) ---
+def _persona_eth(ethnicity):
+    return PersonaOptions(
+        ethnicity=ethnicity, age=27, hairStyle="straight", hairColor="blonde",
+        eyeColor="green", bodyType="average", breastSize="medium", name="Mila",
+        occupation="model", personality="lover", relationship="girlfriend",
+    )
+
+
+def test_facts_include_heritage_nationality_hint():
+    w = _writer()
+    prompt = w._build_user_prompt(_persona_eth("baltic"), ["backstory"], {}, None)
+    # the fact sheet carries the heritage + example nationalities...
+    assert "heritage:" in prompt
+    assert "Baltic" in prompt and "Lithuanian" in prompt
+    # ...and the backstory spec invites a matching nationality/name flavor
+    assert "matching nationality" in prompt
+
+
+def test_backstory_and_short_description_specs_mention_heritage():
+    from services.trait_profile_writer import _FIELD_SPECS
+    assert "heritage" in _FIELD_SPECS["backstory"]["instruction"].lower()
+    assert "heritage" in _FIELD_SPECS["short_description"]["instruction"].lower()
+
+
+def test_deterministic_survives_all_new_ethnicity_values():
+    # The deterministic fallback ignores ethnicity, so every value (incl. the 20
+    # new ones) must produce a full, coerced profile without raising.
+    w = _writer()
+    for eth in ("west_african", "baltic", "horn_of_africa", "mixed_heritage",
+                "southeast_asian", "central_asian", "brazilian"):
+        v, provider = asyncio.run(w.write(_persona_eth(eth), None, {}, character_id="c1"))
+        assert provider == "deterministic"
+        assert set(v.keys()) == set(ALL_TRAIT_FIELDS)
+        assert v["backstory"] and v["short_description"]
+
+
+def test_heritage_hint_degrades_for_unknown_value():
+    # Unknown/None ethnicity -> humanized fallback / 'unspecified', never raises.
+    from services.trait_profile_writer import _heritage_hint
+    assert _heritage_hint(None) == ""
+    assert _heritage_hint("klingon") == "klingon"  # humanized fallback
+    assert _heritage_hint("mixed_heritage") == "of mixed heritage"
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

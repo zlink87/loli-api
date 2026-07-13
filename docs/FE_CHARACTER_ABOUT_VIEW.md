@@ -43,13 +43,42 @@ the current version; values change source):
 |---|---|---|
 | AGE | `characters.age` | as-is |
 | BODY | `characters.body_type` | humanize enum: `snake_case` → Title Case ("curvy" → "Curvy") |
-| ETHNICITY | `characters.ethnicity` | humanized label map (e.g. `black_afro` → "Black", `caucasian` → "Caucasian", `asian` → "Asian", `latina` → "Latina", `arab` → "Middle Eastern") |
+| ETHNICITY | `characters.ethnicity` | humanized label map — see **Ethnicity labels** below (the enum now has 25 regional values, not 5) |
 | LANGUAGE | `card.language` | default "English" when card null; keep the flag icon |
 | RELATIONSHIP | `characters.relationship` | humanize enum; "None" when null |
 | OCCUPATION | `card.display_occupation` | **prefer the card** ("Heiress and Socialite"); fallback: humanized `characters.occupation` enum |
 | HOBBIES | `card.display_hobbies` | join with ", " (2–5 items, ≤32 chars each); **hide the tile when card null/empty** |
 | PERSONALITY | `card.display_personality` | join with ", " ("Well-educated, Spoiled, Charming"); fallback: humanized `characters.personality` single enum |
 | ZODIAC (new tile) | `card.zodiac` | Title Case + sign emoji (♌ Leo …); **hide when null** — nice differentiator vs Candy |
+
+**Ethnicity labels** — `characters.ethnicity` is now a 25-value regional enum
+(the original 5 broad buckets kept, 20 regional values added). Humanize with this
+map; the 5 legacy values are unchanged. For any value not in the map (forward-compat),
+fall back to `snake_case → Title Case`:
+
+```js
+const ETHNICITY_LABELS = {
+  // legacy (unchanged)
+  caucasian: 'Caucasian', asian: 'Asian', black_afro: 'Black',
+  latina: 'Latina', arab: 'Middle Eastern',
+  // European
+  nordic: 'Nordic', slavic: 'Slavic', baltic: 'Baltic',
+  western_european: 'Western European', mediterranean: 'Mediterranean',
+  // Asian
+  japanese: 'Japanese', korean: 'Korean', chinese: 'Chinese',
+  southeast_asian: 'Southeast Asian', south_asian: 'South Asian',
+  central_asian: 'Central Asian',
+  // MENA
+  persian: 'Persian', turkish: 'Turkish', north_african: 'North African',
+  // African
+  west_african: 'West African', east_african: 'East African',
+  horn_of_africa: 'Horn of Africa', afro_caribbean: 'Afro-Caribbean',
+  // Americas
+  brazilian: 'Brazilian',
+  // Mixed
+  mixed_heritage: 'Mixed',
+};
+```
 
 **Gallery strip** (unchanged) — `character_images` as today. Note for the
 gating layer: every batch-generated image row carries `outfit` and

@@ -83,6 +83,16 @@ def test_locked_identity_block_unchanged():
     assert locked in positive  # identity block appears verbatim
 
 
+def test_locked_identity_block_carries_new_ethnicity_phrase():
+    # A NEW regional ethnicity value flows into the locked identity block via
+    # ETHNICITY_PHRASES with no other wiring (purely additive expansion).
+    positive, _neg, locked = assemble_generation_prompt(_persona(ethnicity="slavic"))
+    assert "a Slavic woman with fair skin, high cheekbones and gently rounded features" in locked
+    assert locked in positive
+    # and the legacy phrase is NOT emitted for this character
+    assert "a Caucasian woman with fair skin" not in locked
+
+
 # --- h3: expression resolution ---
 def test_explicit_expression_suppresses_personality():
     persona = _persona(personality=PersonalityType.SHY)  # -> "a shy, bashful expression"

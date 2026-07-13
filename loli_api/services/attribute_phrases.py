@@ -27,12 +27,44 @@ STYLE_PHRASES = {
 }
 
 # --- Locked identity block ---------------------------------------------------
+# One entry per EthnicityType value (models/enums.py). Each describes ONLY skin
+# tone + facial/bone structure + a heritage adjective — NEVER hair color/texture
+# or eye color (those are separate persona fields — HAIR_*/EYE_COLOR_PHRASES — and
+# a heritage phrase that named them would fight the admin's explicit choice). The
+# 5 legacy entries are byte-identical to the original 5-value map for back-compat.
 ETHNICITY_PHRASES = {
+    # --- legacy (unchanged) ---
     "caucasian": "a Caucasian woman with fair skin",
     "asian": "an East Asian woman with light skin",
     "black_afro": "a Black woman with warm dark-brown skin",
     "latina": "a Latina woman with warm tan skin",
     "arab": "a Middle Eastern woman with olive skin",
+    # --- European ---
+    "nordic": "a Nordic woman with fair luminous skin and softly angular features",
+    "slavic": "a Slavic woman with fair skin, high cheekbones and gently rounded features",
+    "baltic": "a Baltic woman with very fair cool-toned skin and refined angular features",
+    "western_european": "a Western European woman with fair neutral-toned skin and classic refined features",
+    "mediterranean": "a Mediterranean woman with warm olive skin and expressive sculpted features",
+    # --- Asian ---
+    "japanese": "a Japanese woman with light porcelain skin and delicate refined features",
+    "korean": "a Korean woman with light luminous skin and soft elegant features",
+    "chinese": "a Chinese woman with light warm-toned skin and graceful refined features",
+    "southeast_asian": "a Southeast Asian woman with warm golden-tan skin and soft rounded features",
+    "south_asian": "a South Asian woman with warm brown skin and striking defined features",
+    "central_asian": "a Central Asian woman with light golden skin and softly blended Eurasian features",
+    # --- Middle East / North Africa ---
+    "persian": "a Persian woman with light olive skin and elegant defined features",
+    "turkish": "a Turkish woman with warm olive skin and strong graceful features",
+    "north_african": "a North African woman with golden-bronze skin and defined elegant features",
+    # --- African ---
+    "west_african": "a West African woman with deep rich ebony skin and full striking features",
+    "east_african": "an East African woman with deep warm-brown skin and tall elegant bone structure",
+    "horn_of_africa": "a woman of Horn of Africa heritage with rich copper-brown skin and finely sculpted features",
+    "afro_caribbean": "an Afro-Caribbean woman with warm deep-brown skin and vibrant full features",
+    # --- Americas ---
+    "brazilian": "a Brazilian woman with sun-kissed bronze skin and softly sculpted features",
+    # --- Mixed ---
+    "mixed_heritage": "a woman of mixed heritage with warm golden-tan skin and harmoniously blended features",
 }
 
 # Just the SKIN-TONE descriptor for each ethnicity — the visual attribute pulled
@@ -45,11 +77,38 @@ ETHNICITY_PHRASES = {
 # would fight the render the same way an age-down word does. Keyed by the
 # EthnicityType enum value (models/enums.py).
 SKIN_TONE_PHRASES = {
+    # --- legacy (unchanged) ---
     "caucasian": "fair skin",
     "asian": "light skin",
     "black_afro": "warm dark-brown skin",
     "latina": "warm tan skin",
     "arab": "olive skin",
+    # --- European ---
+    "nordic": "fair luminous skin",
+    "slavic": "fair skin",
+    "baltic": "very fair cool-toned skin",
+    "western_european": "fair neutral-toned skin",
+    "mediterranean": "warm olive skin",
+    # --- Asian ---
+    "japanese": "light porcelain skin",
+    "korean": "light luminous skin",
+    "chinese": "light warm-toned skin",
+    "southeast_asian": "warm golden-tan skin",
+    "south_asian": "warm brown skin",
+    "central_asian": "light golden skin",
+    # --- Middle East / North Africa ---
+    "persian": "light olive skin",
+    "turkish": "warm olive skin",
+    "north_african": "golden-bronze skin",
+    # --- African ---
+    "west_african": "deep rich ebony skin",
+    "east_african": "deep warm-brown skin",
+    "horn_of_africa": "rich copper-brown skin",
+    "afro_caribbean": "warm deep-brown skin",
+    # --- Americas ---
+    "brazilian": "sun-kissed bronze skin",
+    # --- Mixed ---
+    "mixed_heritage": "warm golden-tan skin",
 }
 
 HAIR_STYLE_PHRASES = {

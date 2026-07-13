@@ -54,6 +54,39 @@ def _opts(enum_cls):
     return [{"value": m.value, "label": m.value.replace("_", " ").title()} for m in enum_cls]
 
 
+# Ethnicity is presented to the admin dropdown grouped by region (European, Asian,
+# MENA, African, Americas, Mixed) rather than in enum-declaration order (which keeps
+# the 5 legacy values first for storage back-compat). The legacy broad buckets sit
+# at the end of their own region so an admin still finds e.g. "caucasian" among the
+# European options. This flat, regionally-ordered list contains every EthnicityType
+# member exactly once (a test asserts it stays exhaustive as the enum grows).
+_ETHNICITY_REGIONAL_ORDER = [
+    # --- European ---
+    EthnicityType.NORDIC, EthnicityType.SLAVIC, EthnicityType.BALTIC,
+    EthnicityType.WESTERN_EUROPEAN, EthnicityType.MEDITERRANEAN, EthnicityType.CAUCASIAN,
+    # --- Asian ---
+    EthnicityType.JAPANESE, EthnicityType.KOREAN, EthnicityType.CHINESE,
+    EthnicityType.SOUTHEAST_ASIAN, EthnicityType.SOUTH_ASIAN, EthnicityType.CENTRAL_ASIAN,
+    EthnicityType.ASIAN,
+    # --- Middle East / North Africa ---
+    EthnicityType.PERSIAN, EthnicityType.TURKISH, EthnicityType.NORTH_AFRICAN,
+    EthnicityType.ARAB,
+    # --- African ---
+    EthnicityType.WEST_AFRICAN, EthnicityType.EAST_AFRICAN, EthnicityType.HORN_OF_AFRICA,
+    EthnicityType.AFRO_CARIBBEAN, EthnicityType.BLACK_AFRO,
+    # --- Americas ---
+    EthnicityType.BRAZILIAN, EthnicityType.LATINA,
+    # --- Mixed ---
+    EthnicityType.MIXED_HERITAGE,
+]
+
+
+def _ethnicity_opts():
+    """Ethnicity {value,label} pairs in regional order (see _ETHNICITY_REGIONAL_ORDER)."""
+    return [{"value": m.value, "label": m.value.replace("_", " ").title()}
+            for m in _ETHNICITY_REGIONAL_ORDER]
+
+
 @router.get(
     "/options",
     summary="Enumerate all selectable options (admin UI dropdowns)",
@@ -67,7 +100,7 @@ async def get_options(user: Dict[str, Any] = Depends(require_admin)):
     return {
         "persona": {
             "style": _opts(StyleType),
-            "ethnicity": _opts(EthnicityType),
+            "ethnicity": _ethnicity_opts(),
             "hair_style": _opts(HairStyleType),
             "hair_color": _opts(HairColorType),
             "eye_color": _opts(EyeColorType),

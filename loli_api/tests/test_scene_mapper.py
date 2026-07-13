@@ -458,6 +458,19 @@ def test_identity_anchor_text_skin_tone_leads_for_dark_skin():
     assert "black_afro" not in text
 
 
+def test_identity_anchor_text_skin_tone_leads_for_new_west_african_value():
+    # Same white-body-on-dark-skin guard as black_afro, but for a NEW regional
+    # value (west_african): its skin tone must resolve and lead the anchor.
+    persona = PersonaOptions(
+        ethnicity="west_african", age=30, hairStyle="curly", hairColor="black",
+        eyeColor="brown", bodyType="curvy", breastSize="large", name="Amara",
+    )
+    char = Character(persona=persona, hero_photo_url="https://x.supabase.co/img.png")
+    text = identity_anchor_text(char)
+    assert text.startswith("deep rich ebony skin, ")
+    assert "west_african" not in text
+
+
 def test_identity_anchor_text_normalizes_underscores():
     # BreastSize.EXTRA_LARGE ("extra_large") exercises the underscore-normalize
     # contract for enum-ish values that aren't a single word.

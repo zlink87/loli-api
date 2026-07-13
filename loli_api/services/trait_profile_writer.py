@@ -133,7 +133,10 @@ _FIELD_SPECS: Dict[str, Dict[str, str]] = {
         "instruction": (
             "A short third-person background narrative (<=800 chars). DISPLAY / "
             "LLM-context ONLY — it is NEVER rendered into an image, so it may be "
-            "descriptive prose. Present tense, tasteful."
+            "descriptive prose. Present tense, tasteful. Her heritage is given in the "
+            "CHARACTER facts above — you MAY give her a matching nationality, name and "
+            "cultural flavor (e.g. a Baltic heritage -> a Lithuanian background), but "
+            "keep it natural and never contradict her other options."
         ),
     },
     "home_description": {
@@ -156,8 +159,9 @@ _FIELD_SPECS: Dict[str, Dict[str, str]] = {
             "backstory/bio, e.g. 'Wealthy Russian heiress, accustomed to luxury and "
             "used to getting exactly what she wants... she enjoys indulging in every "
             "pleasure life has to offer.' Write it as an enticing intro the reader sees "
-            "FIRST — a teaser, NOT a summary. No AI-speak, and do NOT use the raw enum "
-            "words verbatim. A single string."
+            "FIRST — a teaser, NOT a summary. Her heritage (in the CHARACTER facts) may "
+            "inform a nationality/cultural flavor here, consistent with the backstory. "
+            "No AI-speak, and do NOT use the raw enum words verbatim. A single string."
         ),
     },
     "display_occupation": {
@@ -390,6 +394,59 @@ _DEFAULT_ADJECTIVES = ["Charming", "Confident"]
 _DEFAULT_HOBBIES = ["Traveling", "Good company"]
 
 
+# Heritage -> example nationalities the writer MAY use for a character's
+# nationality/name/cultural flavor in her (display-only) backstory + short
+# description. Keyed by EthnicityType value; unknown/None -> "" (no hint, degrades
+# safely). This is narrative flavor ONLY — it never enters a render prompt (the
+# render-side skin/bone descriptor lives in attribute_phrases.ETHNICITY_PHRASES).
+_HERITAGE_NATIONALITY_HINT: Dict[str, str] = {
+    # --- legacy (broad buckets — looser hints) ---
+    "caucasian": "European",
+    "asian": "East Asian",
+    "black_afro": "of the African diaspora",
+    "latina": "Latina (e.g. Mexican, Colombian, Argentinian)",
+    "arab": "Arab / Middle Eastern (e.g. Lebanese, Emirati, Jordanian)",
+    # --- European ---
+    "nordic": "Scandinavian (e.g. Swedish, Norwegian, Danish, Finnish)",
+    "slavic": "Slavic (e.g. Russian, Ukrainian, Polish)",
+    "baltic": "Baltic (e.g. Lithuanian, Latvian, Estonian)",
+    "western_european": "Western European (e.g. French, German, Dutch)",
+    "mediterranean": "Mediterranean (e.g. Italian, Greek, Spanish)",
+    # --- Asian ---
+    "japanese": "Japanese",
+    "korean": "Korean",
+    "chinese": "Chinese",
+    "southeast_asian": "Southeast Asian (e.g. Thai, Filipina, Vietnamese)",
+    "south_asian": "South Asian (e.g. Indian, Pakistani, Sri Lankan)",
+    "central_asian": "Central Asian (e.g. Kazakh, Uzbek, Mongolian)",
+    # --- Middle East / North Africa ---
+    "persian": "Persian (Iranian)",
+    "turkish": "Turkish",
+    "north_african": "North African (e.g. Moroccan, Egyptian, Tunisian)",
+    # --- African ---
+    "west_african": "West African (e.g. Nigerian, Ghanaian, Senegalese)",
+    "east_african": "East African (e.g. Kenyan, Tanzanian, Ugandan)",
+    "horn_of_africa": "of the Horn of Africa (e.g. Ethiopian, Somali, Eritrean)",
+    "afro_caribbean": "Afro-Caribbean (e.g. Jamaican, Trinidadian, Haitian)",
+    # --- Americas ---
+    "brazilian": "Brazilian",
+    # --- Mixed ---
+    "mixed_heritage": "of mixed heritage",
+}
+
+
+def _heritage_hint(ethnicity) -> str:
+    """
+    A short 'heritage: <label> (e.g. nationalities)' hint for the fact sheet, or ''
+    when ethnicity is unset. Falls back to the humanized enum label for any value
+    not in the hint table so new/unknown values still degrade to a usable hint.
+    """
+    key = _val(ethnicity)
+    if not key:
+        return ""
+    return _HERITAGE_NATIONALITY_HINT.get(key) or key.replace("_", " ")
+
+
 def _val(value) -> str:
     """Raw enum/string value ('' for None)."""
     if value is None:
@@ -512,6 +569,7 @@ class TraitProfileWriter:
         lines = [
             f"name: {persona.name or 'she'}",
             f"age: {persona.age}",
+            f"heritage: {_heritage_hint(persona.ethnicity) or 'unspecified'}",
             f"personality: {_label(persona.personality) or 'unspecified'}",
             f"relationship to the user: {_label(persona.relationship) or 'unspecified'}",
             f"occupation: {_label(persona.occupation) or 'unspecified'}",
