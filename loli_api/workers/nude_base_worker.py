@@ -130,6 +130,18 @@ BODY_AESTHETIC_CLAUSES: Dict[str, str] = {
 # face to plastic. The current values raise the weight to stay faithful to the
 # swapped face's texture and pull visibility down so more raw-swap detail
 # survives the blend.
+#
+# REACTOR_FACE_RESTORE_MODEL below is now only the BAKED FALLBACK: the live
+# default is ``settings.NUDE_BASE_FACE_RESTORE_MODEL`` (GPEN-BFR-512.onnx —
+# see config.py), applied to the main node whenever that setting is non-empty.
+# inswapper_128 synthesizes identity at only 128px, so CodeFormer's own
+# restore (itself low-res) was leaving faces soft; GPEN-BFR-512 restores at
+# 512px instead. When ``settings.NUDE_BASE_FACE_BOOST`` is True (default),
+# ``build_faceswap_workflow`` additionally wires a ReActorFaceBoost node into
+# the main swap's ``face_boost`` input — it restores AND upscales the swapped
+# face BEFORE it is pasted back onto the base, which is the actual fix for a
+# 128px swap landing on a close-up face (the main node's own restore only
+# acts on the face at the base image's resolution).
 # ---------------------------------------------------------------------------
 REACTOR_SWAP_MODEL = "inswapper_128.onnx"
 REACTOR_FACE_DETECTION = "retinaface_resnet50"
@@ -242,15 +254,22 @@ def build_faceswap_workflow(base_image_name: str, hero_image_name: str) -> dict:
 
         LoadImage(base)  --input_image-->  ReActorFaceSwap  --> SaveImage
         LoadImage(hero)  --source_image--/
+                                  ^
+                    ReActorFaceBoost --face_boost-/  (settings.NUDE_BASE_FACE_BOOST)
 
     ``base_image_name`` is the generated t2i base (the body the face is stamped
     ONTO). ``hero_image_name`` is the ORIGINAL hero photo (the face DONOR / identity
     source) — never a generated or intermediate image. Node params mirror the pose
     graphs' node 200 exactly (fidelity-favoring restore — see the REACTOR_* constants
-    above). Both images are shipped alongside as
-    base64 ``input.images[]`` entries under these flat names.
+    above), except the restore model and the optional FaceBoost pass are settings-
+    driven (``NUDE_BASE_FACE_RESTORE_MODEL`` / ``NUDE_BASE_FACE_BOOST`` — see
+    config.py), so a sharper restorer can be rolled out or rolled back without a code
+    change. Both images are shipped alongside as base64 ``input.images[]`` entries
+    under these flat names.
     """
-    return {
+    face_restore_model = settings.NUDE_BASE_FACE_RESTORE_MODEL or REACTOR_FACE_RESTORE_MODEL
+
+    workflow = {
         "10": {
             "class_type": "LoadImage",
             "inputs": {"image": base_image_name},
@@ -267,7 +286,7 @@ def build_faceswap_workflow(base_image_name: str, hero_image_name: str) -> dict:
                 "source_image": ["11", 0],      # the ORIGINAL hero face
                 "swap_model": REACTOR_SWAP_MODEL,
                 "facedetection": REACTOR_FACE_DETECTION,
-                "face_restore_model": REACTOR_FACE_RESTORE_MODEL,
+                "face_restore_model": face_restore_model,
                 "face_restore_visibility": REACTOR_FACE_RESTORE_VISIBILITY,
                 "codeformer_weight": REACTOR_CODEFORMER_WEIGHT,
                 "detect_gender_input": "no",
@@ -282,6 +301,26 @@ def build_faceswap_workflow(base_image_name: str, hero_image_name: str) -> dict:
             "inputs": {"images": ["12", 0], "filename_prefix": "nude_base"},
         },
     }
+
+    if settings.NUDE_BASE_FACE_BOOST:
+        # Restores + upscales the swapped face BEFORE it is pasted back onto the
+        # base (vs. the main node's own restore, which only ever sees the face at
+        # the base image's resolution) — the real fix for inswapper's 128px swap
+        # landing on a close-up face. "5" is unused elsewhere in this graph.
+        workflow["5"] = {
+            "class_type": "ReActorFaceBoost",
+            "inputs": {
+                "enabled": True,
+                "boost_model": face_restore_model,
+                "interpolation": "Bicubic",
+                "visibility": 1.0,
+                "codeformer_weight": 0.5,
+                "restore_with_main_after": False,
+            },
+        }
+        workflow["12"]["inputs"]["face_boost"] = ["5", 0]
+
+    return workflow
 
 
 def _download_image(url: str, timeout: int = 30) -> bytes:

@@ -11,7 +11,9 @@ Covers the NEW default path (settings.NUDE_BASE_T2I=True):
     character/controls photo_style), resolution left untouched (no downscale),
     hires refine pass on per GENERATION_HIRES_DEFAULT.
   * build_faceswap_workflow — ReActor sources the ORIGINAL hero face onto the
-    GENERATED base, with the gentle restore params mirrored from pose node 200.
+    GENERATED base, with the gentle restore params mirrored from pose node 200,
+    a settings-driven restore model (NUDE_BASE_FACE_RESTORE_MODEL), and an
+    optional ReActorFaceBoost pass (NUDE_BASE_FACE_BOOST).
   * POST /nude-base builds a `nude_base` job carrying the persona + hero URL +
     deterministic seed (flag True), and the LEGACY pipeline_edit job (flag False).
 
@@ -45,6 +47,7 @@ from workers.nude_base_worker import (
     BODY_AESTHETIC_CLAUSES,
     REACTOR_CODEFORMER_WEIGHT,
     REACTOR_FACE_RESTORE_VISIBILITY,
+    REACTOR_FACE_RESTORE_MODEL,
 )
 from api.v1.endpoints import nude_base as ep
 from api.v1.endpoints import pipeline as pipeline_ep
@@ -223,39 +226,136 @@ def test_t2i_workflow_natural_style_untouched_resolution_hires():
 # Face-swap workflow wiring
 # ---------------------------------------------------------------------------
 def test_faceswap_sources_hero_onto_generated_base():
-    wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
+    # Pin the two settings this test asserts against explicitly, rather than relying
+    # on ambient defaults, so it can't flake if another test's override leaks.
+    prev_model = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    settings.NUDE_BASE_FACE_RESTORE_MODEL = "GPEN-BFR-512.onnx"
+    try:
+        wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
 
-    reactor_items = [(nid, n) for nid, n in wf.items() if n["class_type"] == "ReActorFaceSwap"]
-    assert len(reactor_items) == 1
-    reactor_id, reactor = reactor_items[0]
-    r = reactor["inputs"]
+        reactor_items = [(nid, n) for nid, n in wf.items() if n["class_type"] == "ReActorFaceSwap"]
+        assert len(reactor_items) == 1
+        reactor_id, reactor = reactor_items[0]
+        r = reactor["inputs"]
 
-    # input_image = the GENERATED base (the body the face is stamped ONTO).
-    base_node = r["input_image"][0]
-    assert wf[base_node]["class_type"] == "LoadImage"
-    assert wf[base_node]["inputs"]["image"] == "BASE_generated.png"
+        # input_image = the GENERATED base (the body the face is stamped ONTO).
+        base_node = r["input_image"][0]
+        assert wf[base_node]["class_type"] == "LoadImage"
+        assert wf[base_node]["inputs"]["image"] == "BASE_generated.png"
 
-    # source_image = the ORIGINAL hero (the face DONOR / identity source) — never a
-    # generated or intermediate image.
-    hero_node = r["source_image"][0]
-    assert wf[hero_node]["class_type"] == "LoadImage"
-    assert wf[hero_node]["inputs"]["image"] == "HERO_original.png"
-    assert base_node != hero_node
+        # source_image = the ORIGINAL hero (the face DONOR / identity source) — never a
+        # generated or intermediate image.
+        hero_node = r["source_image"][0]
+        assert wf[hero_node]["class_type"] == "LoadImage"
+        assert wf[hero_node]["inputs"]["image"] == "HERO_original.png"
+        assert base_node != hero_node
 
-    # Fidelity-favoring restore params mirror the pose graphs' node 200 exactly
-    # (FACE-DIAL fix: HIGH codeformer_weight keeps the swapped face's real texture,
-    # moderate visibility keeps raw-swap detail in the blend).
-    assert r["codeformer_weight"] == REACTOR_CODEFORMER_WEIGHT == 0.7
-    assert r["face_restore_visibility"] == REACTOR_FACE_RESTORE_VISIBILITY == 0.65
-    assert r["swap_model"] == "inswapper_128.onnx"
-    assert r["facedetection"] == "retinaface_resnet50"
-    assert r["face_restore_model"] == "codeformer-v0.1.0.pth"
-    assert r["enabled"] is True
+        # Fidelity-favoring restore params mirror the pose graphs' node 200 exactly
+        # (FACE-DIAL fix: HIGH codeformer_weight keeps the swapped face's real texture,
+        # moderate visibility keeps raw-swap detail in the blend).
+        assert r["codeformer_weight"] == REACTOR_CODEFORMER_WEIGHT == 0.7
+        assert r["face_restore_visibility"] == REACTOR_FACE_RESTORE_VISIBILITY == 0.65
+        assert r["swap_model"] == "inswapper_128.onnx"
+        assert r["facedetection"] == "retinaface_resnet50"
+        # DELIBERATE CHANGE: face_restore_model is now settings-driven
+        # (NUDE_BASE_FACE_RESTORE_MODEL) instead of the baked codeformer constant —
+        # this used to assert the literal "codeformer-v0.1.0.pth". The baked
+        # REACTOR_FACE_RESTORE_MODEL constant is now only the empty-string fallback;
+        # see the dedicated restore-model / boost tests below for that coverage.
+        assert r["face_restore_model"] == "GPEN-BFR-512.onnx"
+        assert r["enabled"] is True
 
-    # Exactly one SaveImage, consuming the ReActor output (no extra restore/upscale).
-    save_items = [n for n in wf.values() if n["class_type"] == "SaveImage"]
-    assert len(save_items) == 1
-    assert save_items[0]["inputs"]["images"][0] == reactor_id
+        # Exactly one SaveImage, consuming the ReActor output (no extra restore/upscale
+        # BESIDES the optional FaceBoost pass, which is covered separately below).
+        save_items = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+        assert len(save_items) == 1
+        assert save_items[0]["inputs"]["images"][0] == reactor_id
+    finally:
+        settings.NUDE_BASE_FACE_RESTORE_MODEL = prev_model
+
+
+# ---------------------------------------------------------------------------
+# Face restore model — settings-driven (NUDE_BASE_FACE_RESTORE_MODEL), applied to
+# BOTH the main ReActorFaceSwap node and (when enabled) the ReActorFaceBoost node.
+# ---------------------------------------------------------------------------
+def test_faceswap_restore_model_empty_setting_keeps_baked_codeformer_fallback():
+    prev = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    settings.NUDE_BASE_FACE_RESTORE_MODEL = ""
+    try:
+        wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
+        assert wf["12"]["inputs"]["face_restore_model"] == REACTOR_FACE_RESTORE_MODEL
+        assert REACTOR_FACE_RESTORE_MODEL == "codeformer-v0.1.0.pth"
+    finally:
+        settings.NUDE_BASE_FACE_RESTORE_MODEL = prev
+
+
+def test_faceswap_restore_model_gpen_applied_to_main_and_boost_nodes():
+    prev_model = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    prev_boost = settings.NUDE_BASE_FACE_BOOST
+    settings.NUDE_BASE_FACE_RESTORE_MODEL = "GPEN-BFR-512.onnx"
+    settings.NUDE_BASE_FACE_BOOST = True
+    try:
+        wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
+        assert wf["12"]["inputs"]["face_restore_model"] == "GPEN-BFR-512.onnx"
+        boost_items = [n for n in wf.values() if n["class_type"] == "ReActorFaceBoost"]
+        assert len(boost_items) == 1
+        assert boost_items[0]["inputs"]["boost_model"] == "GPEN-BFR-512.onnx"
+    finally:
+        settings.NUDE_BASE_FACE_RESTORE_MODEL = prev_model
+        settings.NUDE_BASE_FACE_BOOST = prev_boost
+
+
+# ---------------------------------------------------------------------------
+# ReActorFaceBoost — settings-gated (NUDE_BASE_FACE_BOOST), restores + upscales the
+# swapped face BEFORE it is pasted back onto the base.
+# ---------------------------------------------------------------------------
+def test_faceswap_boost_on_by_default_node_present_with_exact_params_and_wired():
+    prev_boost = settings.NUDE_BASE_FACE_BOOST
+    prev_model = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    settings.NUDE_BASE_FACE_BOOST = True
+    settings.NUDE_BASE_FACE_RESTORE_MODEL = "GPEN-BFR-512.onnx"
+    try:
+        wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
+
+        boost_node_items = [(nid, n) for nid, n in wf.items() if n["class_type"] == "ReActorFaceBoost"]
+        assert len(boost_node_items) == 1
+        boost_id, boost_node = boost_node_items[0]
+
+        # Exact params, per spec: enabled, boost_model mirrors the main node's
+        # restore model, Bicubic interpolation, visibility 1.0, codeformer_weight
+        # 0.5, restore_with_main_after False (the boost's own restore is final).
+        assert boost_node["inputs"] == {
+            "enabled": True,
+            "boost_model": "GPEN-BFR-512.onnx",
+            "interpolation": "Bicubic",
+            "visibility": 1.0,
+            "codeformer_weight": 0.5,
+            "restore_with_main_after": False,
+        }
+
+        # Wired into the main ReActorFaceSwap node's face_boost input.
+        assert wf["12"]["class_type"] == "ReActorFaceSwap"
+        assert wf["12"]["inputs"]["face_boost"] == [boost_id, 0]
+    finally:
+        settings.NUDE_BASE_FACE_BOOST = prev_boost
+        settings.NUDE_BASE_FACE_RESTORE_MODEL = prev_model
+
+
+def test_faceswap_boost_disabled_omits_node_graph_otherwise_unchanged():
+    prev_boost = settings.NUDE_BASE_FACE_BOOST
+    settings.NUDE_BASE_FACE_BOOST = False
+    try:
+        wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
+
+        # No boost node, no face_boost key on the main node.
+        assert not any(n["class_type"] == "ReActorFaceBoost" for n in wf.values())
+        assert "face_boost" not in wf["12"]["inputs"]
+
+        # Graph is byte-identical (aside from the restore-model setting) to the
+        # pre-boost shape: exactly the original 4 node ids, nothing extra.
+        assert set(wf.keys()) == {"10", "11", "12", "13"}
+    finally:
+        settings.NUDE_BASE_FACE_BOOST = prev_boost
 
 
 # ---------------------------------------------------------------------------

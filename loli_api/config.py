@@ -397,6 +397,24 @@ class Settings(BaseSettings):
     NUDE_BASE_T2I: bool = True
 
     # -----------------------------------------------------------------------
+    # WS-N face-restore quality — inswapper_128 synthesizes identity at only
+    # 128px, so the WS-N ReActor swap's restore step is what determines how
+    # sharp the final face reads. GPEN-BFR-512 restores at 512px (sharper,
+    # less waxy than CodeFormer on a large/close-up face). Set to
+    # "codeformer-v0.1.0.pth" to roll back to the old restorer. Empty string
+    # keeps the worker's baked REACTOR_FACE_RESTORE_MODEL default (see
+    # workers/nude_base_worker.py).
+    NUDE_BASE_FACE_RESTORE_MODEL: str = "GPEN-BFR-512.onnx"
+    # Wire ReActorFaceBoost onto the WS-N swap: restores + upscales the
+    # swapped face BEFORE it is pasted back onto the base, instead of relying
+    # solely on the main node's own restore — the actual fix for a 128px swap
+    # landing on a close-up face. Requires the worker image's ReActor pack to
+    # ship the ReActorFaceBoost node; if a pinned build lacks it, the job
+    # fails validation loudly rather than silently skipping the boost, so
+    # flip this False to roll back cleanly.
+    NUDE_BASE_FACE_BOOST: bool = True
+
+    # -----------------------------------------------------------------------
     # WS-M — outfit mask diagnostics (flag-gated, default OFF). When True, every
     # outfit-step engine (interactive /v1/edit/outfit, the /v1/edit pipeline, and the
     # batch engine) resolves to workflows/outfit_cropstitch_maskpreview_API.json instead
