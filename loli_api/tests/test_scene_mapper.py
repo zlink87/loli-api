@@ -436,13 +436,26 @@ def test_outfit_detail_dominant_threaded_onto_request():
 # persona's hair/eye/body attributes (drift-prone), never name/age/ethnicity
 # ---------------------------------------------------------------------------
 def test_identity_anchor_text_full_profile():
-    # _character(): hairStyle=straight, hairColor=blonde, eyeColor=green,
-    # bodyType=curvy, breastSize=medium.
+    # _character(): ethnicity=caucasian, hairStyle=straight, hairColor=blonde,
+    # eyeColor=green, bodyType=curvy, breastSize=medium. Skin tone leads.
     char = _character()
     assert (
         identity_anchor_text(char)
-        == "straight blonde hair, green eyes, curvy build with medium breasts"
+        == "fair skin, straight blonde hair, green eyes, curvy build with medium breasts"
     )
+
+
+def test_identity_anchor_text_skin_tone_leads_for_dark_skin():
+    # The white-body-on-dark-skin bug scenario: a black_afro character must carry
+    # a paintable skin-tone descriptor, and it must lead the anchor.
+    persona = PersonaOptions(
+        ethnicity="black_afro", age=28, hairStyle="straight", hairColor="black",
+        eyeColor="brown", bodyType="curvy", breastSize="medium", name="Nia",
+    )
+    char = Character(persona=persona, hero_photo_url="https://x.supabase.co/img.png")
+    text = identity_anchor_text(char)
+    assert text.startswith("warm dark-brown skin, ")
+    assert "black_afro" not in text
 
 
 def test_identity_anchor_text_normalizes_underscores():
@@ -479,11 +492,22 @@ def test_identity_anchor_text_empty_profile_is_none():
 
 
 def test_identity_anchor_text_never_includes_name_age_ethnicity():
-    char = _character()
+    # Name, age, and the raw ethnicity LABEL never leak; but the paintable
+    # skin-tone descriptor MUST be present when ethnicity is set (edit body-repaint
+    # fix — the label would fight the render, the skin tone paints correctly).
+    persona = PersonaOptions(
+        ethnicity="black_afro", age=28, hairStyle="straight", hairColor="black",
+        eyeColor="brown", bodyType="curvy", breastSize="medium", name="Estella",
+    )
+    char = Character(persona=persona, hero_photo_url="https://x.supabase.co/img.png")
     text = identity_anchor_text(char)
     assert "Estella" not in text
     assert "28" not in text
-    assert "caucasian" not in text.lower()
+    # Raw demographic label (enum value and the "a Black woman" catalog label) excluded.
+    assert "black_afro" not in text.lower()
+    assert "black woman" not in text.lower()
+    # ...but the skin-tone descriptor is required.
+    assert "warm dark-brown skin" in text
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +516,7 @@ def test_identity_anchor_text_never_includes_name_age_ethnicity():
 def test_identity_anchors_threaded_onto_request():
     char = _character()
     req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
-    assert req.identityAnchors == "straight blonde hair, green eyes, curvy build with medium breasts"
+    assert req.identityAnchors == "fair skin, straight blonde hair, green eyes, curvy build with medium breasts"
 
 
 def test_identity_anchors_none_when_character_attrs_missing():

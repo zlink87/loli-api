@@ -208,6 +208,35 @@ def test_batch_items_target_character_batch_items():
     assert client.calls_for("character_batch_items")
 
 
+def test_merge_item_debug_read_modify_writes_pipeline_request():
+    # Phase 5 observability: merge_item_debug must preserve existing pipeline_request
+    # keys (e.g. the planned "prompt") while adding/overwriting "_debug".
+    client = _FakeClient(table_data={
+        "character_batch_items": [{"pipeline_request": {"prompt": "kitchen at dawn"}}],
+    })
+    store = BatchStore(client)
+    debug_payload = {
+        "steps": [{"step": "outfit", "tier": "2511full", "positive": "P", "negative": "N"}],
+        "planner_provider": "deterministic",
+    }
+    asyncio.run(store.merge_item_debug("i1", debug_payload))
+
+    calls = client.calls_for("character_batch_items")
+    update_calls = [c for c in calls if c["op"] == "update"]
+    assert update_calls, "merge_item_debug must issue an update"
+    payload = update_calls[-1]["payload"]
+    assert payload["pipeline_request"]["prompt"] == "kitchen at dawn"  # preserved
+    assert payload["pipeline_request"]["_debug"] == debug_payload
+    assert ("id", "i1") in update_calls[-1]["eqs"]
+
+
+def test_merge_item_debug_missing_row_is_a_noop():
+    client = _FakeClient(table_data={"character_batch_items": []})
+    store = BatchStore(client)
+    asyncio.run(store.merge_item_debug("missing", {"steps": []}))
+    assert not [c for c in client.calls_for("character_batch_items") if c["op"] == "update"]
+
+
 def test_active_batches_query_is_status_scoped():
     client = _FakeClient(default_data=[])
     store = BatchStore(client)

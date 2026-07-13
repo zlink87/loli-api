@@ -58,8 +58,10 @@ Covers:
 Runs under pytest AND under plain ``python tests/test_prompt_assembly.py`` (the
 __main__ block invokes each test function; pytest is not required).
 """
+import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 # Ensure the loli_api package dir is importable when run as a plain script
 # (mirrors conftest.py / main.py:22).
@@ -81,7 +83,10 @@ from models.enums import (  # noqa: E402
     NudityLevel,
     PoseType,
 )
-from models.requests import PersonaOptions, OutfitEditRequest, PoseEditRequest  # noqa: E402
+from models.requests import (  # noqa: E402
+    PersonaOptions, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest,
+)
+from services.character_anchors import populate_identity_anchors  # noqa: E402
 from services import attribute_phrases as ap  # noqa: E402
 from services import prompt_constants as pc  # noqa: E402
 from services import prompt_generator as pg  # noqa: E402
@@ -790,16 +795,32 @@ def test_pose_prompt_outfit_continuity_phrasing():
 
 
 # ---------------------------------------------------------------------------
-# c29 — outfit_continuity_text: detail wins over tier prose; tier-prose fallback;
-# None outfit -> None.
+# c29 — outfit_continuity_text: detail is ADDITIVELY comma-joined AHEAD of the
+# tier prose (caption + graded prose, dedupe when identical); tier-prose
+# fallback when no detail; None outfit -> None.
 # ---------------------------------------------------------------------------
 def test_outfit_continuity_text():
-    # outfit_detail (stripped) wins over the generic tier prose.
+    # outfit_detail (stripped) is prefixed AHEAD of the graded tier prose (additive),
+    # so the pose step preserves BOTH the caption garment AND the graded exposure.
+    tier_low = OUTFIT_DESCRIPTIONS[OutfitType.BUSINESS_SUIT][NudityLevel.LOW]
     assert (
         outfit_ep.outfit_continuity_text(
             OutfitType.BUSINESS_SUIT, NudityLevel.LOW, "  charcoal wool pantsuit  "
         )
-        == "charcoal wool pantsuit"
+        == f"charcoal wool pantsuit, {tier_low}"
+    )
+    # HIGH level -> the caption plus the HIGH tier prose.
+    tier_high = OUTFIT_DESCRIPTIONS[OutfitType.BUSINESS_SUIT][NudityLevel.HIGH]
+    assert (
+        outfit_ep.outfit_continuity_text(
+            OutfitType.BUSINESS_SUIT, NudityLevel.HIGH, "charcoal wool pantsuit"
+        )
+        == f"charcoal wool pantsuit, {tier_high}"
+    )
+    # Dedupe: a detail identical to the tier prose is emitted once, not doubled.
+    assert (
+        outfit_ep.outfit_continuity_text(OutfitType.BUSINESS_SUIT, NudityLevel.HIGH, tier_high)
+        == tier_high
     )
     # No detail -> the OUTFIT_DESCRIPTIONS tier prose at the requested level.
     assert (
@@ -814,7 +835,7 @@ def test_outfit_continuity_text():
     # None outfit -> None (no outfit step, nothing to preserve).
     assert outfit_ep.outfit_continuity_text(None, NudityLevel.LOW, None) is None
     assert outfit_ep.outfit_continuity_text(None, NudityLevel.HIGH, "ignored") is None
-    print("c29 OK: outfit_continuity_text: detail wins, tier-prose fallback, None outfit -> None")
+    print("c29 OK: outfit_continuity_text: caption + tier prose (additive, dedupe), tier fallback, None outfit -> None")
 
 
 # ---------------------------------------------------------------------------
@@ -846,29 +867,36 @@ def test_outfit_dress_mode_lead():
 
 
 # ---------------------------------------------------------------------------
-# c31 — outfit build_prompt: detail_dominant renders the caption ALONE (tier prose
-# skipped), with a garment-neutral exposure clause carrying the nudity ramp (B3)
+# c31 — outfit build_prompt: detail_dominant is ADDITIVE — the caption LEADS the
+# garment description and the graded per-nudity-tier prose is appended after it
+# (caption AND tier prose), so explicitness is not weakened. The generic
+# _DETAIL_DOMINANT_EXPOSURE clause is NOT used when the enum has tier prose.
 # ---------------------------------------------------------------------------
-def test_outfit_detail_dominant_renders_caption_alone():
+def test_outfit_detail_dominant_renders_caption_plus_tier_prose():
     T, N = OutfitType, NudityLevel
-    # The BUSINESS_SUIT tier prose ("...business suit...") must be ABSENT; the caption is
-    # the only garment text and appears exactly once.
-    tier_low = OUTFIT_DESCRIPTIONS[T.BUSINESS_SUIT][N.LOW]
+    # The caption LEADS and the graded tier prose is appended additively after it.
+    tier_med = OUTFIT_DESCRIPTIONS[T.BUSINESS_SUIT][N.MEDIUM]
     dom = outfit_ep.build_prompt(
         T.BUSINESS_SUIT, None, N.MEDIUM,
         outfit_detail="a flowing chiffon dress", detail_dominant=True,
     )
-    assert tier_low not in dom
-    assert "business suit" not in dom
+    # Both the caption AND the graded MEDIUM tier prose are present.
+    assert "a flowing chiffon dress" in dom
+    assert tier_med in dom
     assert dom.count("a flowing chiffon dress") == 1
-    # MEDIUM ramps exposure with a garment-neutral clause (no garment named).
-    assert "worn partially open with real exposure of bare skin" in dom
+    # Caption leads; the tier prose follows it on the lead sentence.
+    assert dom.index("a flowing chiffon dress") < dom.index(tier_med)
+    # The generic garment-neutral exposure clause is NOT substituted in (enum has prose).
+    assert "worn partially open with real exposure of bare skin" not in dom
 
-    # LOW appends NO exposure clause (fully clothed).
+    # LOW: caption + graded LOW tier prose (no generic exposure clause).
+    tier_low = OUTFIT_DESCRIPTIONS[T.BUSINESS_SUIT][N.LOW]
     dom_low = outfit_ep.build_prompt(
         T.BUSINESS_SUIT, None, N.LOW,
         outfit_detail="a flowing chiffon dress", detail_dominant=True,
     )
+    assert "a flowing chiffon dress" in dom_low
+    assert tier_low in dom_low
     for clause in (
         "worn to tease", "real exposure of bare skin",
         "nearly spilling free", "barely covering anything",
@@ -876,26 +904,74 @@ def test_outfit_detail_dominant_renders_caption_alone():
         assert clause not in dom_low
     assert dom_low.count("a flowing chiffon dress") == 1
 
-    # HIGH gets the top exposure clause.
+    # HIGH: caption + graded HIGH tier prose (the actual explicit garment text, not a
+    # generic clause).
+    tier_high = OUTFIT_DESCRIPTIONS[T.BUSINESS_SUIT][N.HIGH]
     dom_high = outfit_ep.build_prompt(
         T.BUSINESS_SUIT, None, N.HIGH,
         outfit_detail="a flowing chiffon dress", detail_dominant=True,
     )
-    assert "barely covering anything, breasts and intimate areas fully exposed" in dom_high
+    assert "a flowing chiffon dress" in dom_high
+    assert tier_high in dom_high
+    assert "barely covering anything, breasts and intimate areas fully exposed" not in dom_high
 
-    # Works with prompt_mode="dress": the dress lead phrasing is kept, fed the detail.
+    # Works with prompt_mode="dress": the dress lead phrasing is kept, fed the caption,
+    # and the graded tier prose is still appended additively.
     dom_dress = outfit_ep.build_prompt(
         T.BUSINESS_SUIT, None, N.MEDIUM, outfit_detail="a flowing chiffon dress",
         prompt_mode="dress", detail_dominant=True,
     )
     assert dom_dress.startswith("The person is currently completely nude; dress them in: a flowing chiffon dress")
-    assert "business suit" not in dom_dress
+    assert tier_med in dom_dress
 
     # Guardrails: with detail_dominant but an EMPTY detail, fall back to tier prose
     # unchanged (the flag only fires when there is a caption to be dominant with).
     assert outfit_ep.build_prompt(T.BUSINESS_SUIT, None, N.LOW, detail_dominant=True) == \
         outfit_ep.build_prompt(T.BUSINESS_SUIT, None, N.LOW)
-    print("c31 OK: detail_dominant renders the caption alone; exposure clause ramps MEDIUM+; LOW/empty unchanged")
+    print("c31 OK: detail_dominant is additive — caption leads, graded tier prose appended; LOW/empty unchanged")
+
+
+# ---------------------------------------------------------------------------
+# c31b — outfit build_prompt: detail_dominant fallback when the outfit enum is
+# ABSENT from OUTFIT_DESCRIPTIONS (no tier prose) — the garment-neutral
+# _DETAIL_DOMINANT_EXPOSURE clause still carries the nudity ramp.
+# ---------------------------------------------------------------------------
+def test_outfit_detail_dominant_missing_enum_uses_exposure_fallback():
+    N = NudityLevel
+    # A synthetic outfit not present in OUTFIT_DESCRIPTIONS (and != NAKED) exercises
+    # the no-tier-prose fallback branch. Must be hashable (used as a dict key via
+    # OUTFIT_DESCRIPTIONS.get), so a plain object instance rather than SimpleNamespace.
+    class _FakeOutfit:
+        value = "mystery_couture_gown"
+
+    fake_outfit = _FakeOutfit()
+
+    dom = outfit_ep.build_prompt(
+        fake_outfit, None, N.MEDIUM,
+        outfit_detail="a flowing chiffon dress", detail_dominant=True,
+    )
+    assert "a flowing chiffon dress" in dom
+    # No tier prose exists -> the garment-neutral exposure clause carries the ramp.
+    assert "worn partially open with real exposure of bare skin" in dom
+
+    # HIGH -> the top exposure clause.
+    dom_high = outfit_ep.build_prompt(
+        fake_outfit, None, N.HIGH,
+        outfit_detail="a flowing chiffon dress", detail_dominant=True,
+    )
+    assert "barely covering anything, breasts and intimate areas fully exposed" in dom_high
+
+    # LOW -> no exposure clause appended (fully clothed).
+    dom_low = outfit_ep.build_prompt(
+        fake_outfit, None, N.LOW,
+        outfit_detail="a flowing chiffon dress", detail_dominant=True,
+    )
+    for clause in (
+        "worn to tease", "real exposure of bare skin",
+        "nearly spilling free", "barely covering anything",
+    ):
+        assert clause not in dom_low
+    print("c31b OK: detail_dominant missing-enum fallback still emits _DETAIL_DOMINANT_EXPOSURE")
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1219,129 @@ def test_variety_preserves_locked_identity():
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 (trait-aware edits) — background build_background_prompt: identity_anchors
+# appended after the identity clause; absent when None/empty (back-compat).
+# ---------------------------------------------------------------------------
+def test_background_prompt_identity_anchors_appended():
+    anchors = "warm dark-brown skin, straight black hair, brown eyes, curvy build"
+    expected_clause = f"she has {anchors}, kept exactly unchanged"
+    base = background_ep.build_background_prompt("a sunny beach")
+
+    anchored = background_ep.build_background_prompt("a sunny beach", identity_anchors=anchors)
+    assert expected_clause in anchored
+    # Placed right after the identity clause, before the lighting-adapt clause.
+    identity = pc.identity_clause("the background and surroundings")
+    assert anchored.index(identity) < anchored.index(expected_clause)
+    assert anchored.index(expected_clause) < anchored.index("adapt lighting and shadows")
+
+    # None/empty -> byte-identical to the base prompt (back-compat).
+    assert background_ep.build_background_prompt("a sunny beach", identity_anchors=None) == base
+    assert background_ep.build_background_prompt("a sunny beach", identity_anchors="   ") == base
+    print("bg-anchor OK: background identity_anchors appended after identity clause; absent when None/empty")
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — server-side identityAnchors population from characterId.
+# ---------------------------------------------------------------------------
+class _FakeCharacterStore:
+    """Minimal async store: get(id) -> character or None (KeyError-safe)."""
+    def __init__(self, characters):
+        self._characters = characters
+
+    async def get(self, character_id):
+        return self._characters.get(character_id)
+
+
+def _dark_skin_character():
+    persona = PersonaOptions(
+        ethnicity="black_afro", age=28, hairStyle="straight", hairColor="black",
+        eyeColor="brown", bodyType="curvy", breastSize="medium", name="Nia",
+    )
+    return SimpleNamespace(persona=persona)
+
+
+def test_populate_identity_anchors_resolves_skin_tone_from_character_id():
+    store = _FakeCharacterStore({"c1": _dark_skin_character()})
+
+    # characterId present + no explicit anchors -> populated, skin tone LEADS, and
+    # the eventual edit prompt (via build_prompt) carries the skin-tone anchor.
+    req = OutfitEditRequest(
+        source_image="https://x.supabase.co/i.png",
+        outfit=OutfitType.BUSINESS_SUIT, characterId="c1",
+    )
+    asyncio.run(populate_identity_anchors(store, req))
+    assert req.identityAnchors is not None
+    assert req.identityAnchors.startswith("warm dark-brown skin")
+    prompt = outfit_ep.build_prompt(
+        OutfitType.BUSINESS_SUIT, None, NudityLevel.LOW,
+        identity_anchors=req.identityAnchors,
+    )
+    assert "warm dark-brown skin" in prompt
+
+    # Explicit anchors are NEVER overridden.
+    req_explicit = OutfitEditRequest(
+        source_image="https://x.supabase.co/i.png",
+        outfit=OutfitType.BUSINESS_SUIT, characterId="c1",
+        identityAnchors="pale skin, red hair",
+    )
+    asyncio.run(populate_identity_anchors(store, req_explicit))
+    assert req_explicit.identityAnchors == "pale skin, red hair"
+
+    # Unknown characterId -> no crash, no anchors.
+    req_unknown = OutfitEditRequest(
+        source_image="https://x.supabase.co/i.png",
+        outfit=OutfitType.BUSINESS_SUIT, characterId="does-not-exist",
+    )
+    asyncio.run(populate_identity_anchors(store, req_unknown))
+    assert req_unknown.identityAnchors is None
+
+    # Store not configured (None) -> no crash, no anchors.
+    req_no_store = OutfitEditRequest(
+        source_image="https://x.supabase.co/i.png",
+        outfit=OutfitType.BUSINESS_SUIT, characterId="c1",
+    )
+    asyncio.run(populate_identity_anchors(None, req_no_store))
+    assert req_no_store.identityAnchors is None
+
+    # No characterId at all -> no-op.
+    req_no_id = OutfitEditRequest(
+        source_image="https://x.supabase.co/i.png", outfit=OutfitType.BUSINESS_SUIT,
+    )
+    asyncio.run(populate_identity_anchors(store, req_no_id))
+    assert req_no_id.identityAnchors is None
+    print("populate OK: resolves from id, respects explicit, tolerates unknown/no-store/no-id")
+
+
+def test_populate_identity_anchors_pose_and_background_requests():
+    # The same helper works for PoseEditRequest and BackgroundEditRequest, and the
+    # resolved anchor reaches each step's prompt builder (end-to-end skin-tone anchor).
+    store = _FakeCharacterStore({"c1": _dark_skin_character()})
+
+    pose_req = PoseEditRequest(
+        source_image="https://x.supabase.co/i.png",
+        pose=PoseType.SITTING, characterId="c1",
+    )
+    asyncio.run(populate_identity_anchors(store, pose_req))
+    assert pose_req.identityAnchors.startswith("warm dark-brown skin")
+    pose_prompt = pose_ep.build_pose_prompt(
+        pose_req.pose, identity_anchors=pose_req.identityAnchors
+    )
+    assert "warm dark-brown skin" in pose_prompt
+
+    bg_req = BackgroundEditRequest(
+        source_image="https://x.supabase.co/i.png",
+        prompt="a sunny beach", characterId="c1",
+    )
+    asyncio.run(populate_identity_anchors(store, bg_req))
+    assert bg_req.identityAnchors.startswith("warm dark-brown skin")
+    bg_prompt = background_ep.build_background_prompt(
+        bg_req.prompt, identity_anchors=bg_req.identityAnchors
+    )
+    assert "warm dark-brown skin" in bg_prompt
+    print("populate-pose-bg OK: helper populates Pose/Background requests; anchor reaches both builders")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -1175,7 +1374,8 @@ def _run_all():
         test_pose_prompt_outfit_continuity_phrasing,
         test_outfit_continuity_text,
         test_outfit_dress_mode_lead,
-        test_outfit_detail_dominant_renders_caption_alone,
+        test_outfit_detail_dominant_renders_caption_plus_tier_prose,
+        test_outfit_detail_dominant_missing_enum_uses_exposure_fallback,
         test_pose_prompt_identity_anchors_appended,
         test_outfit_prompt_identity_anchors_appended,
         test_age_phrase_buckets,
@@ -1184,6 +1384,9 @@ def _run_all():
         test_generation_pose_text_verbatim_suppresses_pool,
         test_generation_flavor_gating_by_nudity,
         test_variety_preserves_locked_identity,
+        test_background_prompt_identity_anchors_appended,
+        test_populate_identity_anchors_resolves_skin_tone_from_character_id,
+        test_populate_identity_anchors_pose_and_background_requests,
     ]
     failures = 0
     for fn in tests:

@@ -369,3 +369,70 @@ draft editor) mark all five fields with the hint + an explanatory tooltip.
 `SOLO_BG_PERSON_THRESHOLD`, `COMFYUI_POSE_WORKFLOW_PATH_2511`, and the
 soft-LoRA outfit workflow variant are server `.env` A/B experiments (default
 OFF), handled on the API deployment side.
+
+---
+
+## 9. Addendum (2026-07-13) — variety-only batches, single-photo rerun, trait-aware edits
+
+Server-side overhaul landed 2026-07-13. Panel impact is deliberately small.
+
+### 9.1 Story mode is retired (no panel change required)
+
+`controls.story_mode` is now accepted-but-IGNORED; every batch runs "variety
+mode": the deterministic planner picks coherent outfit<->location<->activity
+combos from the vetted pools, nudity per photo is assigned EXACTLY from the
+ramp (start_nudity -> max_nudity; no more under-shoot), and the LLM no longer
+authors scenes (opt-in garnish only via server env `STORY_PLANNER_PROVIDER`).
+Consequences for the panel:
+- New batches have no `story_title` / per-item `narrative` — hide or
+  collapse story-prose UI for batches whose items lack `narrative`.
+- Everything else (launch, dry-run preview, results, retry) is unchanged.
+- The batch row's `controls` jsonb now carries `_planner_provider`
+  (e.g. "deterministic") — display it in batch detail if convenient.
+
+### 9.2 NEW — edit + rerun a single photo (panel work item)
+
+Two new admin endpoints (both `require_admin`, item must be status
+`succeeded` or `failed`, else 409):
+
+`PATCH /v1/batches/{batch_id}/items/{item_id}` — body `BatchItemEdit`
+(all fields optional; only present keys applied to the stored scene_spec):
+
+```jsonc
+{
+  "outfit": "casual_dress",        // enum-coerced; null clears (skip outfit step)
+  "location": "home_bedroom",
+  "pose": "standing_relaxed",      // null clears (skip pose step)
+  "nudity_level": "high",          // 422 if above the batch's max_nudity or sfw_only
+  "time_of_day": "evening",
+  "lighting": "warm_lamplight",
+  "setting": "…", "activity": "…", // free text — server scrubs identity/companions
+  "pose_detail": "…", "outfit_detail": "…", "expression": "…"
+}
+```
+422 on blocked/unknown enum values (allow/block lists still apply); returns
+the updated item.
+
+`POST /v1/batches/{batch_id}/items/{item_id}/rerun` — body `BatchItemRerun`:
+
+```jsonc
+{ "new_seed": 123456, "reseed": false }
+// omit both -> re-render with the item's stored seed (same-scene do-over)
+// reseed: true -> fresh random seed (different take on the same scene)
+```
+Resets the item to `pending`, flips a completed batch back to `running`, and
+the worker re-renders it. The OLD published gallery image is deleted/replaced
+on success (no duplicates). Suggested UI: per-photo "Edit scene" form +
+"Re-run" button with a "new seed" toggle; poll the batch as during a normal
+run.
+
+### 9.3 NEW — send `characterId` on standalone edit calls (panel work item)
+
+`OutfitEditRequest`, `PoseEditRequest`, `BackgroundEditRequest`,
+`PipelineEditRequest` all accept optional `characterId`. When set (and
+`identityAnchors` not explicitly provided) the server loads the character and
+injects concrete identity anchors — skin tone FIRST (e.g. "warm dark-brown
+skin, straight black hair, brown eyes") — into the edit prompts. This is the
+fix for dark-skinned characters coming back with a white body after edits.
+Panel action: include `characterId` in every edit call made from a character
+context. No other payload change.

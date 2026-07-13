@@ -1683,6 +1683,151 @@ def _enforce_usage_caps(
     return scenes
 
 
+# ---------------------------------------------------------------------------
+# Location <-> nudity coherence (public-explicitness guard)
+# ---------------------------------------------------------------------------
+# Per-location nudity CEILING: the MOST explicit level that still reads as coherent at
+# each place. The nudity ramp is positional (ramp[i] per photo, monotonic) and picked
+# INDEPENDENTLY of where each beat is set, so a HIGH ramp slot can otherwise land on a
+# public street/cafe/gym (observed: nudity=high, location=city_street). This table lets
+# validate_and_repair keep the two in sync by SWAPPING scenes across ramp positions (the
+# ramp stays positional; the scenes move), relocating to a private place only when no
+# swap fits. Every LocationType value is covered; an unmapped value defaults to REVEALING
+# (permissive, but never full-public nudity). Grouped by how exposed the place is:
+LOCATION_NUDITY_CEILING: Dict[str, NudityLevel] = {
+    # Fully private interiors -> HIGH (full nudity reads fine, nobody else is present).
+    LocationType.HOME_BEDROOM.value: NudityLevel.HIGH,
+    LocationType.HOME_LIVING_ROOM.value: NudityLevel.HIGH,
+    LocationType.HOME_KITCHEN.value: NudityLevel.HIGH,
+    LocationType.HOME_BATHROOM.value: NudityLevel.HIGH,
+    LocationType.HOME_OFFICE.value: NudityLevel.HIGH,
+    LocationType.HOTEL_ROOM.value: NudityLevel.HIGH,
+    LocationType.PHOTO_STUDIO.value: NudityLevel.HIGH,   # closed pro set, private interior
+    # Semi-private / plausibly-revealing -> REVEALING (swimwear/robe/overlooked spaces).
+    LocationType.HOME_BALCONY.value: NudityLevel.REVEALING,
+    LocationType.BEACH.value: NudityLevel.REVEALING,
+    LocationType.POOLSIDE.value: NudityLevel.REVEALING,
+    LocationType.GARDEN.value: NudityLevel.REVEALING,
+    LocationType.ROOFTOP.value: NudityLevel.REVEALING,
+    LocationType.LUXURY_LOUNGE.value: NudityLevel.REVEALING,  # exclusive VIP interior
+    LocationType.CAR_INTERIOR.value: NudityLevel.REVEALING,   # enclosed personal cabin
+    # Clearly PUBLIC places -> SUGGESTIVE (teasing/tight is the most that stays coherent).
+    LocationType.OFFICE.value: NudityLevel.SUGGESTIVE,
+    LocationType.HOSPITAL_WARD.value: NudityLevel.SUGGESTIVE,
+    LocationType.CLASSROOM.value: NudityLevel.SUGGESTIVE,
+    LocationType.GYM.value: NudityLevel.SUGGESTIVE,
+    LocationType.YOGA_STUDIO.value: NudityLevel.SUGGESTIVE,
+    LocationType.RESTAURANT_KITCHEN.value: NudityLevel.SUGGESTIVE,
+    LocationType.LIBRARY.value: NudityLevel.SUGGESTIVE,
+    LocationType.SALON.value: NudityLevel.SUGGESTIVE,
+    LocationType.STAGE.value: NudityLevel.SUGGESTIVE,
+    LocationType.LAB.value: NudityLevel.SUGGESTIVE,
+    LocationType.PARK.value: NudityLevel.SUGGESTIVE,
+    LocationType.CITY_STREET.value: NudityLevel.SUGGESTIVE,
+    LocationType.FOREST_TRAIL.value: NudityLevel.SUGGESTIVE,
+    LocationType.CAFE.value: NudityLevel.SUGGESTIVE,
+    LocationType.RESTAURANT.value: NudityLevel.SUGGESTIVE,
+    LocationType.BAR.value: NudityLevel.SUGGESTIVE,
+    LocationType.NIGHTCLUB.value: NudityLevel.SUGGESTIVE,
+}
+
+
+def _location_ceiling(location) -> NudityLevel:
+    """Per-location nudity ceiling; unmapped/unknown -> REVEALING (permissive, not full public)."""
+    return LOCATION_NUDITY_CEILING.get(_val(location), NudityLevel.REVEALING)
+
+
+def _private_relocation_pool(controls: BatchControls, need_idx: int) -> List[LocationType]:
+    """
+    Private-enough locations to relocate an over-exposed beat to, ranked home_bedroom-first,
+    whose ceiling reaches `need_idx`. Respects blocked_locations and any allowed_locations
+    filter, so a relocation never introduces a location the batch forbade.
+    """
+    ranked = [
+        LocationType.HOME_BEDROOM, LocationType.HOTEL_ROOM, LocationType.HOME_BATHROOM,
+        LocationType.HOME_LIVING_ROOM, LocationType.HOME_OFFICE, LocationType.HOME_KITCHEN,
+        LocationType.PHOTO_STUDIO,
+    ]
+    out: List[LocationType] = []
+    for loc in ranked:
+        if loc in (controls.blocked_locations or []):
+            continue
+        if controls.allowed_locations and loc not in controls.allowed_locations:
+            continue
+        if _nudity_index(_location_ceiling(loc)) >= need_idx:
+            out.append(loc)
+    return out
+
+
+def _enforce_location_nudity_ceiling(
+    scenes: List[SceneSpec], ramp: List[NudityLevel], controls: BatchControls
+) -> List[SceneSpec]:
+    """
+    Keep the positional nudity ramp COHERENT with each photo's location: no photo may carry a
+    level above its location's LOCATION_NUDITY_CEILING (so a HIGH ramp slot never lands on a
+    public street/cafe/gym). The ramp is authoritative and positional — it never drops — so the
+    SCENES are made to fit it: for each position that over-exposes its place, SWAP the whole
+    scene with another position whose scene fits here AND whose own ramp slot this scene can
+    satisfy. A swap is a PERMUTATION — it preserves the location/pose/outfit multiset, so the
+    just-run variety + usage-cap guarantees stay intact. Only when no swap fits do we RELOCATE
+    the scene to a private place (deterministic/seeded, honoring allow/block/allowed filters,
+    home_bedroom-first) — keeping the pose (kept simple; a stray pose is far less bad than public
+    explicitness). Finally each position's nudity is re-set from the ramp, clamped to the
+    (possibly new) location ceiling — the clamp only bites in the degenerate case where NO private
+    location is allowed at all; otherwise the ramp is preserved exactly, so it stays monotonic.
+
+    Runs LAST (after _enforce_variety + _enforce_usage_caps) so it sees the FINAL locations those
+    passes produced and gets the final say on the ceiling invariant; because swaps are permutations
+    they cannot re-introduce a variety/cap violation. No-op for sfw_only / an all-LOW ramp (LOW <=
+    every ceiling).
+    """
+    n = len(scenes)
+    if n == 0 or not ramp or controls.sfw_only:
+        return scenes
+    if all(_nudity_index(lvl) == 0 for lvl in ramp[:n]):
+        return scenes  # all-LOW ramp fits every location — nothing to do
+
+    def fits(location, need_idx: int) -> bool:
+        return _nudity_index(_location_ceiling(location)) >= need_idx
+
+    # Highest-nudity positions first: they are the hardest to place, so satisfy them before the
+    # easy low slots consume the scarce private-location scenes.
+    for i in sorted(range(n), key=lambda k: _nudity_index(ramp[k]), reverse=True):
+        need = _nudity_index(ramp[i])
+        if fits(scenes[i].location, need):
+            continue
+        # Prefer the lowest-ramp partners so the over-exposed public scene drifts to a low slot.
+        swapped = False
+        for j in sorted(range(n), key=lambda k: _nudity_index(ramp[k])):
+            if j == i:
+                continue
+            if fits(scenes[j].location, need) and fits(scenes[i].location, _nudity_index(ramp[j])):
+                scenes[i], scenes[j] = scenes[j], scenes[i]
+                swapped = True
+                break
+        if swapped:
+            continue
+        # No swap fits -> relocate to a private place (seeded pick spreads them; keep the pose).
+        pool = _private_relocation_pool(controls, need)
+        if pool:
+            rng = random.Random((controls.base_seed or 0) + 1300021 * (i + 1))
+            scenes[i].location = rng.choice(pool)
+
+    # Re-set nudity from the ramp, clamped to the final location's ceiling (clamp only bites when
+    # no private location was allowed at all). Refresh a now-exposed scene that has no outfit so
+    # the exposure actually renders (the outfit step only runs when an outfit enum is set).
+    fill_pool = _outfit_fill_pool(controls)
+    for i in range(n):
+        if i >= len(ramp):
+            continue
+        lvl_idx = min(_nudity_index(ramp[i]), _nudity_index(_location_ceiling(scenes[i].location)))
+        scenes[i].nudityLevel = _NUDITY_LADDER[lvl_idx]
+        if scenes[i].nudityLevel != NudityLevel.LOW and scenes[i].outfit is None and fill_pool:
+            rng = random.Random((controls.base_seed or 0) + 1700003 * (i + 1))
+            scenes[i].outfit = rng.choice(fill_pool)
+    return scenes
+
+
 def validate_and_repair(
     scenes: List[SceneSpec],
     character: Character,
@@ -1708,9 +1853,12 @@ def validate_and_repair(
     count guarantee) still apply — manual mode overrides planner choices, not
     safety controls.
 
-    ``enforce_nudity_ramp`` clamps each photo DOWN to the per-photo guided-ceiling
-    ramp (and auto-fills an outfit for a medium/high scene that has none, since
-    nudity renders only through the outfit step). ``enforce_variety`` runs the
+    ``enforce_nudity_ramp`` ASSIGNS each photo's nudity EXACTLY to the per-photo ramp
+    value (``ramp[i]``) — the ramp is authoritative for every provider, so no planner
+    can under- or over-shoot the arc (this kills nudity drip). It also auto-fills an
+    outfit for a medium/high scene that has none, since nudity renders only through the
+    outfit step. Only the manual path (``enforce_nudity_ramp=False``) keeps a plain
+    down-clamp to ``max_nudity`` on the admin's exact levels. ``enforce_variety`` runs the
     set-level dedup pass plus the per-batch pose/location usage caps
     (_enforce_usage_caps: no pose more than max(2, ceil(count/8)) times, no
     location more than max(2, ceil(count/6))). ``enforce_time_ramp`` overrides each photo's time_of_day
@@ -1728,13 +1876,18 @@ def validate_and_repair(
     for i, scene in enumerate(scenes[:count]):
         s = scene.model_copy(deep=True)
 
-        # Nudity clamp. sfw_only -> LOW. Guided-ceiling: clamp DOWN to the per-photo
-        # ramp ceiling when enforcing the arc, else the flat max_nudity ceiling. Never
-        # forces a level UP (an LLM "low" mid-batch stays low).
+        # Nudity: ASSIGN, don't clamp. Variety batches are independent scenarios (no story
+        # reason to let a provider under-shoot), so the ramp is AUTHORITATIVE for every
+        # provider: each photo's level is set EXACTLY to ramp[i] — mirroring how the
+        # deterministic planner assigns ramp[gidx] up front. This kills "nudity drip" (the
+        # old down-only clamp let an LLM "low" mid-batch stay low, weakening the arc).
+        # sfw_only is already covered because _nudity_ramp returns all-LOW then. The manual
+        # path (enforce_nudity_ramp=False) is the only caller that keeps a plain ceiling
+        # clamp — an admin's exact per-scene levels are honored, only capped at max_nudity.
         if controls.sfw_only:
             s.nudityLevel = NudityLevel.LOW
         elif enforce_nudity_ramp and i < len(ramp):
-            s.nudityLevel = _NUDITY_LADDER[min(_nudity_index(s.nudityLevel), _nudity_index(ramp[i]))]
+            s.nudityLevel = ramp[i]
         else:
             s.nudityLevel = _NUDITY_LADDER[min(_nudity_index(s.nudityLevel), max_idx)]
 
@@ -1810,9 +1963,11 @@ def validate_and_repair(
                     # "cotton robe", "towel wrapped snugly"): the just-picked random enum
                     # exists ONLY to gate the outfit step and feed variety bookkeeping — it
                     # does NOT describe what she wears. Mark the scene detail-dominant so the
-                    # outfit step renders the CAPTION alone (build_prompt skips the random
-                    # enum's tier prose) and the gallery card matches the image. A caption
-                    # that DID map but to a blocked/disallowed type stays enum-driven:
+                    # outfit step renders the CAPTION as the lead garment text. Under the
+                    # additive detail-dominant contract (see build_prompt) the graded tier
+                    # exposure prose for the nudity level is appended ALONGSIDE the caption,
+                    # so the gallery card matches the image AND the nudity always renders. A
+                    # caption that DID map but to a blocked/disallowed type stays enum-driven:
                     # honoring it would re-introduce the blocked garment.
                     if s.outfit_detail and derived is None:
                         s.outfit_detail_dominant = True
@@ -1823,16 +1978,18 @@ def validate_and_repair(
         # Runs right after the fill (a just-filled enum already matches its detail -> no-op).
         _reconcile_outfit(s, controls)
 
-        # Caption-first outfits (C2): the director's garment caption is ALWAYS the rendered
-        # garment text now — whenever a scene carries an outfit_detail (and a real,
-        # non-NAKED outfit gates the step), mark it detail-dominant so the outfit step
-        # renders the caption ALONE and the enum's tier prose only supplies the
-        # garment-neutral exposure clause (the nudity ramp) via the existing
-        # detail-dominant mechanism. This widens the earlier unmapped/conflict-only rule
-        # (the fill/reconcile settings above remain in place — now subsumed but harmless).
-        # EXCEPTION: a caption that confidently names a BLOCKED/disallowed garment stays
-        # enum-driven — rendering that caption alone would re-introduce the blocked type
-        # (the same allow/block-wins rule the fill above applies).
+        # Caption-first outfits (C2), ADDITIVE contract: whenever a scene carries an
+        # outfit_detail (and a real, non-NAKED outfit gates the step), mark it detail-
+        # dominant. Detail-dominant is the additive signal to the outfit step: render the
+        # director's caption AS the lead garment text AND append the graded tier exposure
+        # prose (OUTFIT_DESCRIPTIONS[outfit][nudity_level]) for the nudity level, rather than
+        # dropping the graded explicit language for a single generic exposure clause (the
+        # rendering half lives in build_prompt's detail_dominant handling). So the caption is
+        # always the rendered garment and the explicit tier prose always renders alongside it
+        # (the nudity never silently weakens). The fill/reconcile above remain in place (now
+        # subsumed but harmless). EXCEPTION: a caption that confidently names a
+        # BLOCKED/disallowed garment stays enum-driven — rendering that caption would
+        # re-introduce the blocked type (the same allow/block-wins rule the fill above applies).
         if s.outfit is not None and s.outfit != OutfitType.NAKED and s.outfit_detail:
             derived = _outfit_from_detail(s.outfit_detail)
             if derived is None or _outfit_allowed(derived, controls):
@@ -1884,6 +2041,15 @@ def validate_and_repair(
         # clamp above so the cap re-picks never fight those repairs (they only move
         # pose/location, and clear a now-stale pose_detail).
         repaired = _enforce_usage_caps(repaired, slots, controls)
+
+    # Location<->nudity coherence: keep the positional nudity ramp from landing explicit
+    # exposure on a public place. Runs LAST — after variety + usage caps — so it sees the
+    # FINAL locations and gets the final say on the ceiling invariant; its swaps are
+    # permutations, so they can't re-break the variety/cap guarantees just enforced. Gated
+    # on the ramp being authoritative (enforce_nudity_ramp); the manual path keeps the
+    # admin's exact levels/locations untouched. See _enforce_location_nudity_ceiling.
+    if enforce_nudity_ramp and ramp:
+        repaired = _enforce_location_nudity_ceiling(repaired, ramp, controls)
 
     # Re-index global order so downstream ordering is contiguous.
     for i, s in enumerate(repaired):
@@ -1984,6 +2150,120 @@ def _scrub_expression(text) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Single-item scene edit (Phase 3: PATCH one batch item's scene_spec).
+#
+# Reuses the SAME enum coercion (_coerce_enum), controls filters, and free-text
+# scrubs the planner applies at plan time, so an admin edit of one photo can never
+# bypass the batch's allow/block lists, sfw_only, or the max_nudity ceiling, and
+# free-text detail fields can't leak identity/company into the render.
+# ---------------------------------------------------------------------------
+class SceneEditError(ValueError):
+    """A single-item scene edit carried an invalid enum value or violated the
+    batch's stored controls. The endpoint maps this to HTTP 422."""
+
+
+# Edit-request field -> (SceneSpec attribute, enum class). Enum fields are coerced
+# via _coerce_enum (difflib near-miss repair — identical to the planner's parse).
+_EDIT_ENUM_FIELDS = {
+    "outfit": ("outfit", OutfitType),
+    "location": ("location", LocationType),
+    "pose": ("pose", PoseType),
+    "nudity_level": ("nudityLevel", NudityLevel),
+    "time_of_day": ("time_of_day", TimeOfDayType),
+    "lighting": ("lighting", LightingType),
+}
+
+# Nullable scene steps: an explicit null clears the step (skips it). location /
+# nudity_level / time_of_day / lighting are structurally required, so null is rejected.
+_EDIT_NULLABLE = {"outfit", "pose"}
+
+
+def _validate_edit_enum(key: str, value, controls: BatchControls) -> None:
+    """Reject an edited enum the batch's stored controls forbid (-> SceneEditError)."""
+    if key == "outfit":
+        if controls.sfw_only and value == OutfitType.NAKED:
+            raise SceneEditError("outfit 'naked' is not allowed on an sfw_only batch")
+        if value in (controls.blocked_outfits or []):
+            raise SceneEditError(f"outfit '{value.value}' is blocked for this batch")
+        if controls.allowed_outfits and value not in controls.allowed_outfits:
+            raise SceneEditError(f"outfit '{value.value}' is not in this batch's allowlist")
+    elif key == "pose":
+        if value in (controls.blocked_poses or []):
+            raise SceneEditError(f"pose '{value.value}' is blocked for this batch")
+    elif key == "location":
+        if value in (controls.blocked_locations or []):
+            raise SceneEditError(f"location '{value.value}' is blocked for this batch")
+        if controls.allowed_locations and value not in controls.allowed_locations:
+            raise SceneEditError(f"location '{value.value}' is not in this batch's allowlist")
+    elif key == "nudity_level":
+        if controls.sfw_only and value != NudityLevel.LOW:
+            raise SceneEditError("nudity must be 'low' on an sfw_only batch")
+        if _nudity_index(value) > _nudity_index(controls.max_nudity):
+            raise SceneEditError(
+                f"nudity '{value.value}' exceeds this batch's max_nudity "
+                f"'{_val(controls.max_nudity)}'"
+            )
+
+
+def _scrub_edit_field(field: str, value):
+    """Apply the planner's free-text scrub for one render-safe detail field."""
+    if value is None:
+        return None
+    if field == "setting":
+        return _scrub_scene_text(value, 400)
+    if field == "activity":
+        return sv.strip_companions(_scrub_scene_text(value, 200))
+    if field == "pose_detail":
+        return sv.strip_companions(_scrub_scene_text(value, 200))
+    if field == "outfit_detail":
+        return _scrub_scene_text(value, 160)
+    if field == "expression":
+        return _scrub_expression(value)
+    return value
+
+
+def apply_item_scene_edit(
+    scene_spec: dict, edit: dict, controls: BatchControls
+) -> SceneSpec:
+    """
+    Apply a partial edit (only the keys present in ``edit``) onto a stored
+    ``scene_spec`` dict, validating each field exactly as the planner would, and
+    return the updated SceneSpec.
+
+    Enum fields (outfit, location, pose, nudity_level, time_of_day, lighting) are
+    coerced with _coerce_enum then checked against ``controls`` — an outfit/pose/
+    location the allow/block lists forbid, or a nudity above ``max_nudity`` (or
+    non-LOW under sfw_only), raises SceneEditError. An explicit null clears the
+    nullable steps (outfit/pose). Free-text detail fields (setting, activity,
+    pose_detail, outfit_detail, expression) get the planner's identity scrub,
+    companion strip, and length caps (_scrub_scene_text / strip_companions /
+    _scrub_expression). Raises SceneEditError on any violation.
+    """
+    spec = dict(scene_spec or {})
+
+    for key, (attr, enum_cls) in _EDIT_ENUM_FIELDS.items():
+        if key not in edit:
+            continue
+        raw = edit[key]
+        if raw is None:
+            if key in _EDIT_NULLABLE:
+                spec[attr] = None
+                continue
+            raise SceneEditError(f"{key} cannot be null")
+        value = _coerce_enum(enum_cls, raw)
+        if value is None:
+            raise SceneEditError(f"invalid {key}: {raw!r}")
+        _validate_edit_enum(key, value, controls)
+        spec[attr] = value.value
+
+    for key in ("setting", "activity", "pose_detail", "outfit_detail", "expression"):
+        if key in edit:
+            spec[key] = _scrub_edit_field(key, edit[key])
+
+    return SceneSpec(**spec)
+
+
+# ---------------------------------------------------------------------------
 # Provider selection + top-level entry point
 # ---------------------------------------------------------------------------
 def build_planner(name: str, *, settings) -> StoryPlanner:
@@ -2013,7 +2293,6 @@ async def plan_scenes(
     gate. Returns (validated_scenes, provider_name_used).
     """
     is_nsfw = _val(controls.content_rating) != "sfw"
-    story_mode = getattr(controls, "story_mode", False)
 
     # Manual override wins.
     if manual_scenes or provider_override == "manual":
@@ -2028,17 +2307,17 @@ async def plan_scenes(
             "manual",
         )
 
-    # Build the provider order.
+    # Build the provider order. Variety-only batches default to the DETERMINISTIC planner
+    # (coherent, correctly-ramped, seeded-variety plans from the controls alone, zero
+    # hallucination). Venice/Claude are NO LONGER auto-selected just because a key is set —
+    # they are opt-in ONLY via an explicit STORY_PLANNER_PROVIDER (or provider_override).
+    # An explicit provider is still honored as before (e.g. STORY_PLANNER_PROVIDER=venice
+    # runs the per-beat menu path as a bounded garnish; the NSFW gate below still applies).
     configured = provider_override or getattr(settings, "STORY_PLANNER_PROVIDER", "") or ""
     if configured:
         order = [configured]
     else:
-        order = []
-        if settings.VENICE_API_KEY:
-            order.append("venice")
-        if not is_nsfw and settings.ANTHROPIC_API_KEY:
-            order.append("claude")
-        order.append("deterministic")
+        order = ["deterministic"]
 
     for name in order:
         planner = build_planner(name, settings=settings)
@@ -2051,13 +2330,15 @@ async def plan_scenes(
             logger.warning(f"planner {name} raised {e}; falling back")
             scenes = []
         if scenes:
-            # Venice in story-director mode (story_mode) picks FREELY from the full vocab —
-            # snapping it back to hand-authored beat pools would undo the whole point. The
-            # deterministic planner's picks are already in-pool, so enforcement there is a
-            # safe no-op; legacy scene-only Venice still gets snapped (it was given menus).
-            enforce = not (name == "venice" and story_mode)
+            # Variety-only: beat-pool coherence is ALWAYS enforced now (story mode is
+            # retired, so the free-picking story-director path is unreachable via controls).
+            # Venice, when opted in, runs the per-beat MENU path and gets snapped back into
+            # the hand-authored pools; the deterministic planner's picks are already in-pool,
+            # so enforcement there is a safe no-op. validate_and_repair additionally
+            # hard-assigns nudity from the ramp (enforce_nudity_ramp defaults True), so no
+            # provider — Venice included — ever chooses the nudity level.
             return (
-                validate_and_repair(scenes, character, count, controls, enforce_beat_pool=enforce),
+                validate_and_repair(scenes, character, count, controls, enforce_beat_pool=True),
                 name,
             )
 

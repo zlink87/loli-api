@@ -26,12 +26,16 @@ class _FakeBatchStore:
     def __init__(self):
         self.item_updates = []
         self.item_row = {}
+        self.debug_merges = []
 
     async def update_item_result(self, item_id, **fields):
         self.item_updates.append((item_id, fields))
 
     async def _get_item(self, item_id):
         return self.item_row
+
+    async def merge_item_debug(self, item_id, debug):
+        self.debug_merges.append((item_id, debug))
 
 
 class _FakeImageStore:
@@ -151,6 +155,73 @@ def test_existing_character_image_id_skips_reinsert():
     _, fields = store.item_updates[0]
     assert fields["status"] == "succeeded"
     assert fields["character_image_id"] == "img-9"
+
+
+def _job_with_debug_meta():
+    return SimpleNamespace(
+        job_id="batjob_1", preview_url="https://x/preview.png",
+        image_hash="deadbeef", seed_used=42,
+        debug_meta={
+            "steps": [
+                {
+                    "step": "outfit",
+                    "workflow_path": "/wf/outfit_cropstitch_2511full_API.json",
+                    "tier": "2511full",
+                    "seed": 42,
+                    "positive_prompt": "Change the person's outfit to: silk pajamas",
+                    "negative_prompt": "low quality, airbrushed skin",
+                },
+                {
+                    "step": "pose",
+                    "workflow_path": "/wf/pose_2511_API.json",
+                    "tier": "pose_2511",
+                    "seed": 42,
+                    "positive_prompt": "sitting upright on a chair or seat",
+                    "negative_prompt": "low quality, airbrushed skin",
+                },
+            ]
+        },
+    )
+
+
+def test_success_persists_per_step_debug_onto_item_pipeline_request():
+    # Phase 5 observability: once the item goes terminal, _handle_succeeded must
+    # additionally merge the live-captured per-step positive/negative prompts (plus
+    # the resolved planner provider) into the item's own pipeline_request jsonb —
+    # attributable per item, without cross-referencing character_images.
+    store, images = _FakeBatchStore(), _FakeImageStore()
+    store.item_row = {"pipeline_request": {"prompt": "kitchen at dawn, golden light"}}
+    rec = _reconciler(store, images)
+    batch = _batch()
+    batch.planner_provider = "deterministic"
+
+    asyncio.run(rec._handle_succeeded(batch, _item(), _job_with_debug_meta()))
+
+    assert len(store.debug_merges) == 1
+    item_id, debug = store.debug_merges[0]
+    assert item_id == "i1"
+    assert debug["planner_provider"] == "deterministic"
+    assert len(debug["steps"]) == 2
+    outfit_step = next(s for s in debug["steps"] if s["step"] == "outfit")
+    assert outfit_step["tier"] == "2511full"
+    assert "silk pajamas" in outfit_step["positive"]
+    assert outfit_step["negative"]
+    pose_step = next(s for s in debug["steps"] if s["step"] == "pose")
+    assert "sitting upright" in pose_step["positive"]
+    assert pose_step["negative"]
+
+
+def test_success_without_debug_meta_skips_debug_merge():
+    # A job without debug_meta (e.g. an older in-memory Job shape, or a test
+    # double) must not blow up on a missing merge_item_debug — and indeed the
+    # FakeBatchStore here doesn't even need the method for this path.
+    store, images = _FakeBatchStore(), _FakeImageStore()
+    store.item_row = {"pipeline_request": {"prompt": "kitchen at dawn, golden light"}}
+    rec = _reconciler(store, images)
+
+    asyncio.run(rec._handle_succeeded(_batch(), _item(), _job()))
+
+    assert store.debug_merges == []
 
 
 def test_no_image_store_still_marks_item():

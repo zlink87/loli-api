@@ -20,6 +20,7 @@ from models.enums import OutfitType, AccessoryType, JobStatus, NudityLevel
 from models.requests import OutfitEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
+from services.character_anchors import populate_identity_anchors
 from services import prompt_constants as pc
 from services import scene_vocab as sv
 from services.outfit_vocab import (
@@ -39,6 +40,10 @@ _job_manager = None
 _notification_service: Optional[NotificationService] = None
 _outfit_workflow_path: Optional[str] = None
 _outfit_workflow_template: Optional[dict] = None
+# Optional (Supabase-gated) character store, wired in router.configure_services.
+# Used only to auto-populate identityAnchors from OutfitEditRequest.characterId;
+# None (store not configured) degrades gracefully — see populate_identity_anchors.
+_character_store = None
 
 
 
@@ -57,6 +62,12 @@ def set_notification_service(service: NotificationService) -> None:
     """Set notification service instance."""
     global _notification_service
     _notification_service = service
+
+
+def set_character_store(store) -> None:
+    """Set the (optional) character store used to resolve identityAnchors."""
+    global _character_store
+    _character_store = store
 
 
 def set_outfit_workflow_path(workflow_path: str) -> None:
@@ -151,11 +162,15 @@ def outfit_continuity_text(
     single source of what "that state" is, matching what the outfit step actually
     rendered:
 
-      * ``outfit_detail`` (stripped) when non-empty — the concrete garment the outfit
-        step was sharpened with wins over the generic tier prose;
-      * else the ``OUTFIT_DESCRIPTIONS[outfit][nudity_level]`` tier prose, with the
-        SAME fallbacks build_prompt uses (missing level -> the LOW tier; an outfit
-        absent from the map -> ``str(outfit.value)``);
+      * the ``OUTFIT_DESCRIPTIONS[outfit][nudity_level]`` tier prose, with the SAME
+        fallbacks build_prompt uses (missing level -> the LOW tier; an outfit absent
+        from the map -> ``str(outfit.value)``);
+      * ADDITIVELY prefixed with ``outfit_detail`` (stripped) when non-empty — the
+        concrete caption the outfit step was sharpened with is comma-joined AHEAD of
+        the graded tier prose ("{detail}, {tier prose}") so the pose step preserves
+        BOTH the caption garment AND the graded exposure, mirroring build_prompt's
+        additive detail-dominant behavior. When the detail equals the tier prose it
+        is emitted once (dedupe);
       * ``None`` when ``outfit`` is None — there was no outfit step, so there is no
         state of dress to assert.
 
@@ -165,12 +180,17 @@ def outfit_continuity_text(
     """
     if outfit is None:
         return None
-    if outfit_detail and outfit_detail.strip():
-        return outfit_detail.strip()
     outfit_levels = OUTFIT_DESCRIPTIONS.get(outfit)
     if outfit_levels:
-        return outfit_levels.get(nudity_level, outfit_levels[NudityLevel.LOW])
-    return str(outfit.value)
+        tier_prose = outfit_levels.get(nudity_level, outfit_levels[NudityLevel.LOW])
+    else:
+        tier_prose = str(outfit.value)
+    detail = outfit_detail.strip() if outfit_detail and outfit_detail.strip() else None
+    if detail:
+        if detail == tier_prose:
+            return detail
+        return f"{detail}, {tier_prose}"
+    return tier_prose
 
 
 # Garment-NEUTRAL exposure clauses for the detail-dominant outfit path. When the freeform
@@ -248,18 +268,21 @@ def build_prompt(
             build_pose_prompt's lighting param). None, or a value absent from
             the map, leaves the prompt unchanged.
         detail_dominant: When True AND ``outfit_detail`` is non-empty AND ``outfit`` is
-            not NAKED, the garment description becomes the DETAIL alone — the enum's
-            OUTFIT_DESCRIPTIONS tier prose is skipped entirely. Used when the planner's
-            director caption had no confident enum mapping (or conflicted with the enum),
-            so the enum is only a step-gate / nudity carrier and mixing its prose with the
-            caption would render two contradictory garments. The lead phrasing still follows
-            ``prompt_mode`` (the detail is passed to the same change/replace/dress helper in
-            place of the tier prose), and ``outfit_detail`` is NOT appended again (it IS the
-            description here). Because the tier prose carried the nudity ramp, a
-            garment-neutral exposure clause from ``_DETAIL_DOMINANT_EXPOSURE`` is appended
-            for every level above LOW so the nudity still renders without naming a garment.
-            NAKED and empty-detail calls ignore this flag (unchanged behavior); default
-            False everywhere else.
+            not NAKED, the caption LEADS the garment description — it is passed to the
+            change/replace/dress helper in place of the tier prose — and the enum's
+            graded ``OUTFIT_DESCRIPTIONS[outfit][nudity_level]`` tier prose is then
+            appended ADDITIVELY after it (", {tier prose}"). This keeps the concrete
+            caption garment AND the graded per-nudity-tier explicitness together, rather
+            than the old behavior that REPLACED the tier prose with the caption plus a
+            generic ``_DETAIL_DOMINANT_EXPOSURE`` clause (which systematically weakened
+            explicitness). Used when the planner's director caption had no confident enum
+            mapping (or conflicted with the enum), so the enum is a step-gate / nudity
+            carrier whose graded prose is still wanted. Only when the outfit enum is
+            missing from the map (no tier prose exists) does the garment-neutral
+            ``_DETAIL_DOMINANT_EXPOSURE`` clause remain as the fallback nudity ramp.
+            ``outfit_detail`` is NOT appended a second time (it IS the lead description
+            here). NAKED and empty-detail calls ignore this flag (unchanged behavior);
+            default False everywhere else.
         identity_anchors: Optional concrete identity-attribute phrase for THIS
             character (e.g. from services.scene_mapper.identity_anchor_text —
             "straight blonde hair, green eyes, curvy build with medium breasts").
@@ -313,11 +336,11 @@ def build_prompt(
             prompt_parts.append(anchors_clause)
         prompt_parts.append("only change the clothing and covering, nothing else")
     else:
-        # Dressed branch. In detail-dominant mode the garment description IS the caption
-        # alone: the enum's tier prose named a DIFFERENT garment than the caption, so
-        # feeding both would render two contradictory garments. Swap the tier prose out
-        # for the detail as the lead's description; the enum then only gated the step and
-        # carried the nudity level (re-expressed as a garment-neutral exposure clause below).
+        # Dressed branch. In detail-dominant mode the caption LEADS the garment
+        # description (the director caption had no confident enum mapping, so it wins the
+        # lead position), and the enum's graded tier prose is appended ADDITIVELY after it
+        # below — keeping BOTH the concrete caption garment and the graded per-nudity-tier
+        # explicitness, rather than replacing the tier prose with a generic exposure clause.
         detail = (outfit_detail or "").strip()
         detail_active = detail_dominant and bool(detail)
         lead_desc = detail if detail_active else outfit_desc
@@ -333,12 +356,17 @@ def build_prompt(
             lead = _outfit_change_lead(outfit, lead_desc)
 
         if detail_active:
-            # The detail is already the description; DON'T append it again. Instead ramp
-            # the nudity with a garment-neutral clause (the tier prose that normally
-            # carried it was skipped). LOW / unknown levels map to "" -> nothing appended.
-            exposure = _DETAIL_DOMINANT_EXPOSURE.get(nudity_level, "")
-            if exposure:
-                lead += f", {exposure}"
+            # The caption already leads the description; DON'T append it again. Append the
+            # enum's graded tier prose ADDITIVELY so the per-nudity-tier explicitness rides
+            # alongside the caption garment. Only when the outfit is absent from the map (no
+            # tier prose exists) do we fall back to the garment-neutral exposure clause to
+            # carry the nudity ramp (LOW / unknown levels map to "" -> nothing appended).
+            if outfit_levels:
+                lead += f", {outfit_desc}"
+            else:
+                exposure = _DETAIL_DOMINANT_EXPOSURE.get(nudity_level, "")
+                if exposure:
+                    lead += f", {exposure}"
         elif detail:
             lead += f", {detail}"
         if lighting_text:
@@ -647,6 +675,10 @@ async def submit_outfit_edit_job(request: OutfitEditRequest, user_id: str):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Outfit edit queue is full. Please try again later."
         )
+
+    # Trait-aware edit: resolve identityAnchors from characterId when the caller
+    # supplied an id but not explicit anchors (best-effort; never raises).
+    await populate_identity_anchors(_character_store, request)
 
     notification_service = get_notification_service()
     if notification_service:

@@ -18,6 +18,7 @@ from models.enums import JobStatus, NudityLevel
 from models.requests import BackgroundEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
+from services.character_anchors import populate_identity_anchors
 from services import prompt_constants as pc
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,10 @@ _job_manager = None
 _notification_service: Optional[NotificationService] = None
 _background_workflow_path: Optional[str] = None
 _background_workflow_template: Optional[dict] = None
+# Optional (Supabase-gated) character store, wired in router.configure_services.
+# Used only to auto-populate identityAnchors from BackgroundEditRequest.characterId;
+# None (store not configured) degrades gracefully — see populate_identity_anchors.
+_character_store = None
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +49,12 @@ def set_job_manager(job_manager) -> None:
 def set_notification_service(service: NotificationService) -> None:
     global _notification_service
     _notification_service = service
+
+
+def set_character_store(store) -> None:
+    """Set the (optional) character store used to resolve identityAnchors."""
+    global _character_store
+    _character_store = store
 
 
 def set_background_workflow_path(workflow_path: str) -> None:
@@ -72,7 +83,10 @@ def get_notification_service() -> Optional[NotificationService]:
 # ---------------------------------------------------------------------------
 # Helper functions (used by BackgroundEditWorker and PipelineWorker via import)
 # ---------------------------------------------------------------------------
-def build_background_prompt(prompt: str) -> str:
+def build_background_prompt(
+    prompt: str,
+    identity_anchors: Optional[str] = None,
+) -> str:
     """
     Build the positive prompt for environment/scene editing.
     Conceptualized as "environment change" — the person stays identical but
@@ -80,6 +94,16 @@ def build_background_prompt(prompt: str) -> str:
 
     Args:
         prompt: User-provided scene/environment description
+        identity_anchors: Optional concrete identity-attribute phrase for THIS
+            character (e.g. from services.scene_mapper.identity_anchor_text —
+            "warm dark-brown skin, straight black hair, brown eyes, curvy build").
+            The background edit repaints skin at the person/background boundary as
+            it relights the subject, so a concrete skin-tone/build anchor keeps the
+            character's real skin tone there. When set, appended right after
+            pc.identity_clause(...) as "she has {anchors}, kept exactly unchanged"
+            — the same clause shape outfit.build_prompt uses. None/empty
+            (interactive /v1/edit/background and any caller without a character
+            profile) appends nothing — unchanged behavior.
 
     Returns:
         Complete prompt string for the workflow
@@ -87,9 +111,13 @@ def build_background_prompt(prompt: str) -> str:
     prompt_parts = [
         f"Change the environment and background to: {prompt}",
         pc.identity_clause("the background and surroundings"),
-        "adapt lighting and shadows on the person to match the new environment naturally",
-        "blend the person seamlessly into the new scene",
     ]
+    if identity_anchors and identity_anchors.strip():
+        prompt_parts.append(f"she has {identity_anchors.strip()}, kept exactly unchanged")
+    prompt_parts.append(
+        "adapt lighting and shadows on the person to match the new environment naturally"
+    )
+    prompt_parts.append("blend the person seamlessly into the new scene")
     return ", ".join(prompt_parts)
 
 
@@ -277,6 +305,10 @@ async def edit_background(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Background edit queue is full. Please try again later.",
             )
+
+        # Trait-aware edit: resolve identityAnchors from characterId when the caller
+        # supplied an id but not explicit anchors (best-effort; never raises).
+        await populate_identity_anchors(_character_store, request)
 
         # Log payload
         notification_service = get_notification_service()

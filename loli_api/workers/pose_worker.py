@@ -74,7 +74,17 @@ class PoseBackgroundWorker(BaseEditWorker):
 
             # Step 4: Prepare seed and prompt
             seed = request.seed if request.seed is not None else random.randint(1, 999_999_999)
-            prompt = apply_edit_photo_style(build_pose_prompt(request.pose), PhotoStyleType.POLISHED)
+            prompt = apply_edit_photo_style(
+            # Trait-aware edit: identityAnchors (skin tone/hair/build) is populated in
+            # the endpoint from characterId. The pose step fully re-diffuses the frame,
+            # so this anchor keeps the character's real skin tone. None (no character)
+            # leaves the prompt unchanged.
+            build_pose_prompt(
+                request.pose,
+                identity_anchors=getattr(request, "identityAnchors", None),
+            ),
+            PhotoStyleType.POLISHED,
+        )
             logger.info(f"[POSE] {job.job_id} | Pose: {request.pose.value} | Seed: {seed}")
             logger.info(f"[POSE] {job.job_id} | Prompt: {prompt[:80]}...")
 

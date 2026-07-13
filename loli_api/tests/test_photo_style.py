@@ -161,6 +161,50 @@ def test_build_step_workflow_explicit_none_or_candid_is_legacy_no_style():
             assert suffix not in _positive_prompt(wf_none, step)
 
 
+# --- Phase 5 observability: _extract_step_prompts reads back the EXACT prompt
+# text a step's workflow was built with, off the injected node ids -----------
+
+def test_extract_step_prompts_outfit_positive_carries_caption_marker_and_has_negative():
+    from workers.pipeline_worker import _extract_step_prompts
+
+    w = _worker()
+    req = _request(outfitDetail="a cropped emerald silk camisole")
+    wf = w._build_step_workflow("outfit", req, "src.png", 42, "job-1")
+    prompts = _extract_step_prompts("outfit", wf)
+
+    # Positive carries the concrete caption (known marker) the planner asked for.
+    assert prompts["positive"]
+    assert "a cropped emerald silk camisole" in prompts["positive"]
+    assert prompts["positive"] == wf["16"]["inputs"]["positive"]
+    # The V1 outfit graph always wires SOME text onto node 117 (inert at cfg 1,
+    # but the text itself is real, not empty) -- present, not None.
+    assert prompts["negative"]
+    assert prompts["negative"] == wf["117"]["inputs"]["negative"]
+
+
+def test_extract_step_prompts_unknown_step_or_missing_nodes_are_none():
+    from workers.pipeline_worker import _extract_step_prompts
+
+    assert _extract_step_prompts("bogus_step", {"16": {"inputs": {"positive": "x"}}}) == {
+        "positive": None,
+        "negative": None,
+    }
+    assert _extract_step_prompts("outfit", {}) == {"positive": None, "negative": None}
+
+
+def test_extract_step_prompts_truncates_long_text():
+    from workers.pipeline_worker import _extract_step_prompts, _DEBUG_PROMPT_TRUNC_CHARS
+
+    long_text = "x" * (_DEBUG_PROMPT_TRUNC_CHARS + 500)
+    wf = {
+        "16": {"inputs": {"positive": long_text}},
+        "117": {"inputs": {"negative": long_text}},
+    }
+    prompts = _extract_step_prompts("outfit", wf)
+    assert len(prompts["positive"]) == _DEBUG_PROMPT_TRUNC_CHARS
+    assert len(prompts["negative"]) == _DEBUG_PROMPT_TRUNC_CHARS
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

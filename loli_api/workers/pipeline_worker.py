@@ -103,6 +103,67 @@ def _select_primary_output(
     return outputs[0] if outputs else None
 
 
+# Phase 5 observability: node-id contract for reading back the EXACT final
+# positive/negative prompt text a step's workflow will render, straight off
+# the injected workflow dict `_build_step_workflow` just returned. Mirrors the
+# node maps documented in `prepare_outfit_workflow`/`prepare_pose_workflow`/
+# `prepare_background_workflow`'s own docstrings — kept here as a small,
+# read-only lookup rather than re-deriving it from the request/response, so a
+# bad image is attributable to "what the planner asked for" (scene_spec) vs.
+# "what actually got rendered" (this) in one look. Node 115 (pose negative)
+# only exists on the Tier-A 2511 pose graph, so pose on the v1 template
+# reports negative=None — that matches the v1 tier's inert-negative design
+# (cfg=1, ConditioningZeroOut) rather than fabricating a value nothing uses.
+_POSITIVE_NODE_BY_STEP = {
+    "pose": ("114", "prompt"),
+    "outfit": ("16", "positive"),
+    "background": ("16", "positive"),
+}
+_NEGATIVE_NODE_BY_STEP = {
+    "pose": ("115", "prompt"),
+    "outfit": ("117", "negative"),
+    "background": ("117", "negative"),
+}
+# Truncation cap for persisted debug prompts (per Phase 5 plan: ~2000 chars) so
+# a pathological caption can't bloat the batch item's pipeline_request jsonb
+# or the character_images metadata blob.
+_DEBUG_PROMPT_TRUNC_CHARS = 2000
+
+
+def _truncate_debug_prompt(text: Optional[str]) -> Optional[str]:
+    if not isinstance(text, str):
+        return None
+    return text[:_DEBUG_PROMPT_TRUNC_CHARS]
+
+
+def _extract_step_prompts(step_name: str, workflow: dict) -> Dict[str, Optional[str]]:
+    """
+    Read back the composed positive/negative prompt text off a JUST-BUILT step
+    workflow dict (the same one ``_build_step_workflow`` returns), keyed by the
+    node ids each step builder actually writes to. Zero signature churn on
+    ``_build_step_workflow`` itself (it stays a pure dict-in/dict-out builder
+    that many tests call directly) — this is a separate, read-only pass over
+    its output.
+
+    Returns ``{"positive": str|None, "negative": str|None}``, each truncated
+    to ``_DEBUG_PROMPT_TRUNC_CHARS``. An unrecognized step name or a workflow
+    missing the expected node yields None for that side rather than raising —
+    debug capture must never fail the pipeline.
+    """
+    positive = None
+    negative = None
+    pos_node, pos_key = _POSITIVE_NODE_BY_STEP.get(step_name, (None, None))
+    if pos_node and pos_node in workflow:
+        positive = workflow[pos_node].get("inputs", {}).get(pos_key)
+    neg_node, neg_key = _NEGATIVE_NODE_BY_STEP.get(step_name, (None, None))
+    if neg_node and neg_node in workflow:
+        negative = workflow[neg_node].get("inputs", {}).get(neg_key)
+    return {
+        "positive": _truncate_debug_prompt(positive),
+        "negative": _truncate_debug_prompt(negative),
+    }
+
+
 class PipelineBackgroundWorker:
     """
     Async worker that processes unified pipeline edit jobs.
@@ -450,10 +511,16 @@ class PipelineBackgroundWorker:
         self, step_name: str, request, source_bytes: bytes, seed: int, job_id: str,
         progress_start: float, progress_end: float,
         is_final_step: bool = True,
-    ) -> bytes:
+    ) -> tuple:
         """
         Run one pipeline step on RunPod with source_bytes as the input image.
-        Returns the output image bytes (downloading the worker's S3 URL if needed).
+
+        Returns ``(image_bytes, step_prompts)`` — the output image bytes
+        (downloading the worker's S3 URL if needed) alongside the EXACT
+        positive/negative prompt text this step's workflow was built with
+        (Phase 5 observability; see ``_extract_step_prompts``). Callers append
+        ``step_prompts`` onto ``job.debug_meta["steps"]`` so a bad image is
+        attributable to planner vs. render in one look.
         """
         step_meta = self.workflow_meta.get(step_name, {})
         step_path = step_meta.get("path")
@@ -501,6 +568,12 @@ class PipelineBackgroundWorker:
             pose_ref_name=pose_ref_name, head_mask_name=head_mask_name,
             is_final_step=is_final_step,
         )
+        # Phase 5 observability: capture the EXACT composed prompt strings right
+        # off the workflow we're about to submit — before any network I/O, so
+        # this is a pure local read with no cross-request race risk even though
+        # the engine (self) is shared across concurrent BatchPipelineWorker
+        # instances/jobs.
+        step_prompts = _extract_step_prompts(step_name, workflow)
 
         outputs = await runpod_runner.run_workflow(
             self.runpod_client, self.job_manager, job_id, workflow,
@@ -521,11 +594,12 @@ class PipelineBackgroundWorker:
             await self._capture_pose_debug_frame(outputs, primary, job_id)
 
         if primary.get("url"):
-            return await asyncio.to_thread(_download_image, primary["url"])
+            image_bytes = await asyncio.to_thread(_download_image, primary["url"])
+            return image_bytes, step_prompts
         data = primary.get("data")
         if not data:
             raise RuntimeError(f"No image data from {step_name} step")
-        return base64.b64decode(data)
+        return base64.b64decode(data), step_prompts
 
     async def _capture_pose_debug_frame(
         self,
@@ -654,7 +728,7 @@ class PipelineBackgroundWorker:
                     f"[PIPELINE] {job.job_id} | Step {i+1}/{num_steps}: {step_name}"
                 )
 
-                current_bytes = await self._run_step(
+                current_bytes, step_prompts = await self._run_step(
                     step_name, request, current_bytes, seed, job.job_id,
                     progress_start=step_progress_start, progress_end=step_progress_end,
                     is_final_step=(i == num_steps - 1),
@@ -663,12 +737,17 @@ class PipelineBackgroundWorker:
                 # WS3.1 observability: record which workflow tier/path actually ran
                 # this step, live, on the Job itself — surfaced later in
                 # character_images.metadata by batch_orchestrator._publish_image.
+                # Phase 5: also carries the EXACT composed positive/negative prompt
+                # text (from _run_step's step_prompts) so a bad image is
+                # attributable to planner (scene_spec) vs. render (this) in one look.
                 step_meta = self.workflow_meta.get(step_name, {})
                 job.debug_meta.setdefault("steps", []).append({
                     "step": step_name,
                     "workflow_path": step_meta.get("path"),
                     "tier": step_meta.get("tier"),
                     "seed": seed,
+                    "positive_prompt": step_prompts.get("positive"),
+                    "negative_prompt": step_prompts.get("negative"),
                 })
 
                 logger.info(

@@ -66,11 +66,21 @@ def compute_estimate(scenes: List[SceneSpec], controls: BatchControls, settings)
 
 
 class BatchOrchestrator:
-    def __init__(self, job_manager, character_store: CharacterStore, batch_store: BatchStore, settings):
+    def __init__(
+        self,
+        job_manager,
+        character_store: CharacterStore,
+        batch_store: BatchStore,
+        settings,
+        character_image_store: Optional[CharacterImageStore] = None,
+    ):
         self.job_manager = job_manager
         self.character_store = character_store
         self.batch_store = batch_store
         self.settings = settings
+        # Optional — used by rerun_item to supersede a previously published gallery
+        # image so a rerun REPLACES it instead of orphaning/duplicating a row.
+        self.character_image_store = character_image_store
 
     async def launch_batch(
         self, character_id: str, body: BatchCreate
@@ -84,8 +94,14 @@ class BatchOrchestrator:
             likes=body.likes, dislikes=body.dislikes,
         )
 
-        # Ensure a base seed so PER_ITEM/FIXED strategies are reproducible.
+        # Variety-only batches: story mode is retired from the admin flow. Force it OFF
+        # before planning so a stale admin payload (story_mode=True) can never re-enable the
+        # old story-director path — batches always run the coherent variety planner now.
         controls = body.controls
+        if getattr(controls, "story_mode", False):
+            controls = controls.model_copy(update={"story_mode": False})
+
+        # Ensure a base seed so PER_ITEM/FIXED strategies are reproducible.
         if controls.base_seed is None and story_planner._val(controls.seed_strategy) != "random":
             controls = controls.model_copy(update={"base_seed": (abs(hash(batch.id)) % 1_000_000_000) or 1})
 
@@ -99,7 +115,10 @@ class BatchOrchestrator:
         scenes, provider = await story_planner.plan_scenes(
             planner_character, body.count, controls, settings=self.settings
         )
-        logger.info(f"[BATCH {batch.id}] planned {len(scenes)} scenes via '{provider}'")
+        logger.info(f"[BATCH {batch.id}] planned {len(scenes)} scenes via provider '{provider}'")
+        # Persist the resolved provider on the batch row so silent Venice->deterministic
+        # fallbacks (the Venice client never raises) are visible after the fact.
+        await self.batch_store.set_planner_provider(batch.id, provider)
 
         rows = []
         for s in scenes:
@@ -148,6 +167,51 @@ class BatchOrchestrator:
         failed = await self.batch_store.list_items(batch_id, statuses=["failed"])
         for item in failed:
             await self.batch_store.reset_item_for_retry(item.id)
+        await self.batch_store.set_batch_status(batch_id, "running")
+        return await self.batch_store.update_batch_aggregate(batch_id)
+
+    async def rerun_item(
+        self, batch_id: str, item_id: str, *, seed: Optional[int] = None
+    ) -> Optional[BatchRead]:
+        """
+        Re-run a single item (Phase 3), mirroring retry_failed for one photo.
+
+        Supersedes the item's previously published gallery image + quick action (so
+        the rerun REPLACES it rather than leaving the old character_images row orphaned
+        and inserting a duplicate on the next success), resets the item to 'pending'
+        with cleared error/image fields and the resolved seed, and flips a settled
+        (completed/partial/failed) batch back to 'running'. The reconciler's normal
+        poll loop then picks the pending item up and enqueues it via _enqueue_item.
+
+        Returns the refreshed batch, or None if the batch/item doesn't exist. The
+        endpoint enforces the succeeded/failed status precondition.
+        """
+        batch = await self.batch_store.get_batch(batch_id)
+        if batch is None:
+            return None
+        item = await self.batch_store.get_item(item_id, batch_id=batch_id)
+        if item is None:
+            return None
+
+        # Supersede the previously published gallery image so the rerun replaces it.
+        # _handle_succeeded's idempotency guard is item.character_image_id, which
+        # reset_item_for_rerun clears below — so without this delete the next success
+        # would insert a SECOND character_images row and orphan the old one.
+        if item.character_image_id and self.character_image_store is not None:
+            try:
+                await self.character_image_store.delete_image(
+                    batch.character_id, item.character_image_id
+                )
+            except Exception as e:  # noqa: BLE001 — a stale image must not block the rerun
+                logger.warning(
+                    f"[BATCH {batch_id}] could not delete previous image "
+                    f"{item.character_image_id} for item {item_id}: {e}"
+                )
+
+        await self.batch_store.reset_item_for_rerun(item_id, seed=seed)
+        # Flip a settled batch back to running; update_batch_aggregate then recomputes
+        # counters (the now-pending item drops out of items_succeeded/items_failed) and
+        # re-derives the status as 'running' since done < total.
         await self.batch_store.set_batch_status(batch_id, "running")
         return await self.batch_store.update_batch_aggregate(batch_id)
 
@@ -367,6 +431,54 @@ class BatchReconciler:
             seed=job.seed_used,
             character_image_id=character_image_id,
         )
+
+        # Phase 5 observability: persist the EXACT per-step positive/negative
+        # prompts (captured live during execution — see workers/pipeline_worker.py
+        # ``_extract_step_prompts`` / ``job.debug_meta``) into the item's OWN
+        # pipeline_request jsonb, alongside the resolved planner provider, so a bad
+        # image is attributable to planner (scene_spec) vs. render (this) in one
+        # look without cross-referencing character_images. Best-effort and AFTER
+        # the terminal update above: unlike the gallery write, a failure here must
+        # never leave the item stuck non-terminal — it's pure diagnostics.
+        await self._persist_item_debug(batch, item, job)
+
+    async def _persist_item_debug(self, batch: BatchRead, item, job) -> None:
+        """
+        Phase 5: extend the existing WS3.1 per-step trace (``job.debug_meta``,
+        already reused verbatim in ``_publish_image`` as
+        ``character_images.metadata.workflow_meta``) with the composed
+        positive/negative prompt strings, and additionally persist it onto the
+        batch item's own ``pipeline_request["_debug"]`` (no DB migration — the
+        column already exists) so it's queryable per-item without a join.
+
+        A no-op when the job carries no step trace (e.g. a hand-built test
+        double, or a job type that predates ``debug_meta``) — nothing to persist.
+        """
+        debug_meta = getattr(job, "debug_meta", None) or {}
+        steps = debug_meta.get("steps") or []
+        if not steps:
+            return
+        payload = {
+            "steps": [
+                {
+                    "step": s.get("step"),
+                    "tier": s.get("tier"),
+                    "seed": s.get("seed"),
+                    "positive": s.get("positive_prompt"),
+                    "negative": s.get("negative_prompt"),
+                }
+                for s in steps
+            ],
+            # Cheap: already read off the batch row (BatchStore._row_to_batch)
+            # with no extra query — see BatchRead.planner_provider's docstring.
+            "planner_provider": getattr(batch, "planner_provider", None),
+        }
+        try:
+            await self.batch_store.merge_item_debug(item.id, payload)
+        except Exception as e:  # noqa: BLE001 — diagnostics must never block the item
+            logger.warning(
+                f"[BATCH {batch.id}] failed to persist item debug for {item.id}: {e}"
+            )
 
     async def _publish_image(self, batch: BatchRead, item, job, image_url: str) -> str:
         """Create the character_images row + its chat quick action; returns the image id."""

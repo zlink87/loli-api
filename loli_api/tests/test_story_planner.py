@@ -18,6 +18,7 @@ from services import story_planner as sp
 from services.story_planner import (
     Character, DeterministicScenePlanner, validate_and_repair, plan_scenes,
     _parse_arcs_json, _coerce_enum, _nudity_index, _nudity_ramp,
+    LOCATION_NUDITY_CEILING, _location_ceiling,
 )
 
 
@@ -66,6 +67,12 @@ def test_batch_controls_defaults_to_low_nudity_and_polished_style():
     # Batch now defaults to POLISHED so edited items match the generated hero's
     # retouched finish (was NATURAL, which rendered flatter).
     assert controls.photo_style == PhotoStyleType.POLISHED
+
+
+def test_story_mode_defaults_off_variety_only():
+    # Story mode is retired from the admin flow: the field is accepted for API compat but
+    # defaults False so every batch runs the coherent variety planner.
+    assert BatchControls().story_mode is False
 
 
 # --- deterministic planner ---
@@ -223,6 +230,33 @@ def test_nsfw_never_selects_claude():
     scenes, provider = asyncio.run(plan_scenes(char, 10, controls, settings=settings))
     assert provider == "deterministic"
     assert len(scenes) == 10
+
+
+def test_default_provider_order_is_deterministic_first():
+    # Variety-only: the deterministic planner is the default. Venice/Claude are NO LONGER
+    # auto-selected just because a key is configured — even with BOTH keys set and no
+    # explicit STORY_PLANNER_PROVIDER, planning resolves to deterministic.
+    char = _character()
+    settings = _fake_settings(venice="venice-key", anthropic="claude-key")
+    scenes, provider = asyncio.run(
+        plan_scenes(char, 12, BatchControls(base_seed=1), settings=settings)
+    )
+    assert provider == "deterministic"   # venice NOT auto-selected despite the key
+    assert len(scenes) == 12
+
+
+def test_explicit_venice_still_honored_via_setting():
+    # An explicit STORY_PLANNER_PROVIDER=venice still builds a venice-first order (opt-in
+    # garnish). We assert the ORDER building, not a live call: with no venice key the client
+    # returns empty and planning falls back to deterministic without a network hit.
+    char = _character()
+    settings = _fake_settings(venice="", provider="venice")
+    scenes, provider = asyncio.run(
+        plan_scenes(char, 6, BatchControls(base_seed=1), settings=settings)
+    )
+    # venice produced nothing (no key) -> deterministic fallback, but the opt-in was honored.
+    assert provider == "deterministic"
+    assert len(scenes) == 6
 
 
 def test_provider_override_claude_on_nsfw_falls_back():
@@ -394,7 +428,7 @@ def test_deterministic_planner_honors_start_nudity():
     assert idxs[-1] == _nudity_index(NudityLevel.HIGH)    # reaches the finish level
 
 
-# --- guided-ceiling clamp (per-photo ceiling; never forces up) ---
+# --- nudity: ASSIGN exactly to the ramp (authoritative; no drip, no under/over-shoot) ---
 def _flat_scenes(n, nudity, location=LocationType.HOME_BEDROOM):
     return [
         SceneSpec(arc_id="a", arc_title="A", beat_index=i, global_index=i, beat_description="b",
@@ -403,23 +437,33 @@ def _flat_scenes(n, nudity, location=LocationType.HOME_BEDROOM):
     ]
 
 
-def test_guided_ceiling_clamps_high_early_down_to_ramp():
-    # LLM emits HIGH on every photo; the rising ramp clamps the early ones DOWN.
+def test_nudity_assigned_exactly_to_ramp_regardless_of_input():
+    # The ramp is authoritative: whatever nudity the provider emitted (HIGH-everywhere OR
+    # LOW-everywhere), each photo's level is set EXACTLY to ramp[i] — this is the anti-drip
+    # invariant. Both inputs must yield the identical rising ramp.
     controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=1)
-    out = validate_and_repair(
-        _flat_scenes(8, NudityLevel.HIGH), _character(), 8, controls, enforce_beat_pool=False
-    )
-    assert out[0].nudityLevel == NudityLevel.LOW    # early photo clamped down to the ramp
-    assert out[-1].nudityLevel == NudityLevel.HIGH  # final photo reaches the finish
+    ramp = _nudity_ramp(8, controls)
+    for seed_nudity in (NudityLevel.HIGH, NudityLevel.LOW, NudityLevel.MEDIUM):
+        out = validate_and_repair(
+            _flat_scenes(8, seed_nudity), _character(), 8, controls, enforce_beat_pool=False
+        )
+        assert [s.nudityLevel for s in out] == ramp, f"input {seed_nudity} did not snap to the ramp"
+    # And the arc still starts low and finishes at max_nudity.
+    assert ramp[0] == NudityLevel.LOW
+    assert ramp[-1] == NudityLevel.HIGH
 
 
-def test_guided_ceiling_keeps_low_mid_batch():
-    # LLM emits LOW everywhere though the ramp ceiling rises — LOW is KEPT (never forced up).
+def test_nudity_exact_assignment_holds_for_venice_path_scenes():
+    # Venice, when opted in, emits its own (possibly wrong) nudity; the exact-assign in
+    # validate_and_repair overrides it so the provider never chooses the level. A LOW-emitting
+    # provider mid-batch is FORCED up to the ramp (the old clamp would have kept it low).
     controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=1)
+    ramp = _nudity_ramp(8, controls)
     out = validate_and_repair(
         _flat_scenes(8, NudityLevel.LOW), _character(), 8, controls, enforce_beat_pool=False
     )
-    assert all(s.nudityLevel == NudityLevel.LOW for s in out)
+    assert out[-1].nudityLevel == NudityLevel.HIGH   # forced UP to the ramp finish (was kept LOW before)
+    assert [s.nudityLevel for s in out] == ramp
 
 
 # --- outfit-fill (medium/high scene with no outfit gets a safe garment) ---
@@ -759,6 +803,82 @@ def test_nudity_ramp_spans_suggestive_to_high():
     idxs = [_nudity_index(x) for x in ramp]
     assert idxs == sorted(idxs)
     assert NudityLevel.REVEALING in ramp               # traverses the new mid-high level
+
+
+# --- location <-> nudity ceiling (public-explicitness guard) ---
+def test_location_nudity_ceiling_covers_every_location():
+    # Every LocationType value must have a ceiling, so no location is silently unmapped
+    # (the default is permissive REVEALING, but coverage is intentional not accidental).
+    for loc in LocationType:
+        assert loc.value in LOCATION_NUDITY_CEILING, f"missing ceiling for {loc.value}"
+
+
+def test_high_ramp_never_exceeds_public_location_ceiling():
+    # A public-heavy set (all city_street) with a high building ramp: no photo may end up
+    # more explicit than its final location allows. Nudity is authoritative, so the guard
+    # RELOCATES the over-exposed high slots to private places rather than lowering nudity.
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=7)
+    out = validate_and_repair(
+        _flat_scenes(8, NudityLevel.LOW, location=LocationType.CITY_STREET),
+        _character(), 8, controls, enforce_beat_pool=False, enforce_variety=False,
+    )
+    for s in out:
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location)), (
+            f"{s.nudityLevel} at {s.location} exceeds ceiling"
+        )
+    # The finish is still high — it moved to a private place, it was not toned down.
+    assert out[-1].nudityLevel == NudityLevel.HIGH
+    assert _location_ceiling(out[-1].location) == NudityLevel.HIGH
+
+
+def test_ceiling_enforcement_preserves_monotonic_ramp():
+    # Mixed public/private locations give the guard swap partners; the resulting nudity
+    # sequence must stay monotonic non-decreasing (the ramp is positional and preserved).
+    scenes = _flat_scenes(10, NudityLevel.LOW)
+    for i, s in enumerate(scenes):
+        s.location = LocationType.CITY_STREET if i % 2 == 0 else LocationType.HOME_BEDROOM
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=3)
+    out = validate_and_repair(
+        scenes, _character(), 10, controls,
+        enforce_beat_pool=False, enforce_variety=False,
+    )
+    idxs = [_nudity_index(s.nudityLevel) for s in out]
+    assert idxs == sorted(idxs), f"ramp no longer monotonic: {idxs}"
+    for s in out:
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location))
+
+
+def test_ceiling_enforcement_is_noop_for_sfw():
+    # sfw_only -> the ramp is all-LOW, which fits every ceiling, so the guard must not move
+    # or relocate anything: locations stay public and nudity stays LOW.
+    controls = BatchControls(sfw_only=True, max_nudity=NudityLevel.HIGH, base_seed=1)
+    out = validate_and_repair(
+        _flat_scenes(6, NudityLevel.LOW, location=LocationType.CITY_STREET),
+        _character(), 6, controls, enforce_beat_pool=False, enforce_variety=False,
+    )
+    assert all(s.nudityLevel == NudityLevel.LOW for s in out)
+    assert all(s.location == LocationType.CITY_STREET for s in out)
+
+
+def test_ceiling_relocation_respects_blocked_locations():
+    # When relocating an over-exposed high slot, the guard must never introduce a blocked
+    # location — even under the ceiling constraint. Block every private location but the
+    # kitchen; relocations must land there and never on a blocked one.
+    blocked = [
+        LocationType.HOME_BEDROOM, LocationType.HOTEL_ROOM, LocationType.HOME_BATHROOM,
+        LocationType.HOME_LIVING_ROOM, LocationType.HOME_OFFICE, LocationType.PHOTO_STUDIO,
+    ]
+    controls = BatchControls(
+        max_nudity=NudityLevel.HIGH, escalation="building",
+        blocked_locations=blocked, base_seed=2,
+    )
+    out = validate_and_repair(
+        _flat_scenes(8, NudityLevel.LOW, location=LocationType.CITY_STREET),
+        _character(), 8, controls, enforce_beat_pool=False, enforce_variety=False,
+    )
+    for s in out:
+        assert s.location not in blocked, f"relocated onto blocked {s.location}"
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location))
 
 
 if __name__ == "__main__":

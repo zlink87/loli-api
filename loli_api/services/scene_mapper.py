@@ -106,22 +106,33 @@ def identity_anchor_text(character) -> Optional[str]:
     Values are the raw enum-value strings with underscores normalized to spaces,
     NOT the flowery attribute_phrases.py catalog — so any attribute value degrades
     to plain text instead of silently vanishing when it isn't in a hand-curated map.
+    The one exception is the SKIN-TONE part, which is looked up through
+    attribute_phrases.skin_tone_phrase so the anchor carries a paintable visual
+    descriptor ("warm dark-brown skin") rather than the demographic label.
 
-    Deliberately excludes persona.name/age/ethnicity: those aren't the attributes
-    that drift frame-to-frame (hair/eyes/build are — see the PR6 background), and
-    age/ethnicity are already governed elsewhere (ADULT_APPEARANCE_NEGATIVE; the
-    locked ETHNICITY_PHRASES block at generation time).
+    Includes a skin-tone part (placed FIRST — skin tone is the most drift-prone
+    attribute during a body repaint) derived from ``persona.ethnicity``. Edits
+    repaint the body (outfit denoise 0.85-0.9, pose denoise 1.0 full-frame) while
+    ReActor restores only the face, so without a skin-tone token in the edit prompt
+    a dark-skinned character comes back with a white body. This is why the earlier
+    "ethnicity is governed at generation time" rationale was WRONG for edits: the
+    ETHNICITY_PHRASES block only reaches the text-to-image generation prompt, never
+    the edit prompts these anchors feed, so the edit path needs its own skin-tone
+    signal. The demographic LABEL itself (name/age, and the "a Black woman" style
+    ethnicity label) is still excluded — only the skin-tone descriptor rides along,
+    a visual attribute rather than a category word that would fight the render.
 
-    Each of the three parts (hair / eyes / build+breasts) is included only when at
-    least one of its source attributes is present, so a partial profile degrades
-    gracefully. Returns None when ``character``/``character.persona`` is missing,
-    or none of the five attributes are set, so callers can skip the clause entirely
-    rather than emit an empty one.
+    Each part (skin / hair / eyes / build+breasts) is included only when its source
+    attribute is present, so a partial profile degrades gracefully. Returns None
+    when ``character``/``character.persona`` is missing, or none of the source
+    attributes are set, so callers can skip the clause entirely rather than emit an
+    empty one.
     """
     persona = getattr(character, "persona", None)
     if persona is None:
         return None
 
+    skin_tone = ap.skin_tone_phrase(getattr(persona, "ethnicity", None))
     hair_style = _norm_attr(getattr(persona, "hairStyle", None))
     hair_color = _norm_attr(getattr(persona, "hairColor", None))
     eye_color = _norm_attr(getattr(persona, "eyeColor", None))
@@ -129,6 +140,10 @@ def identity_anchor_text(character) -> Optional[str]:
     breast_size = _norm_attr(getattr(persona, "breastSize", None))
 
     parts: List[str] = []
+    # Skin tone leads: it is the attribute most prone to drift when the body is
+    # re-diffused, and the one the white-body-on-dark-skin bug is about.
+    if skin_tone:
+        parts.append(skin_tone)
     if hair_style and hair_color:
         parts.append(f"{hair_style} {hair_color} hair")
     elif hair_style or hair_color:

@@ -114,6 +114,11 @@ class OutfitBackgroundWorker(BaseEditWorker):
                     # call. Kept explicit/defensive so the interactive path picks
                     # up any future prompt-mode field with no further change.
                     prompt_mode=(getattr(request, "outfitPromptMode", None) or "standard"),
+                    # Trait-aware edit: skin-tone/hair/build anchor derived from the
+                    # character (populated in the endpoint from characterId). Keeps the
+                    # re-diffused body's skin tone. None (no character) leaves the prompt
+                    # unchanged — getattr for back-compat with requests lacking the field.
+                    identity_anchors=getattr(request, "identityAnchors", None),
                 ),
                 PhotoStyleType.POLISHED,
             )

@@ -24,7 +24,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from models.enums import NudityLevel
+from models.enums import NudityLevel, PoseType
 from api.v1.endpoints.pose import prepare_pose_workflow, _is_pose_2511_template
 from services import prompt_constants as pc
 
@@ -229,6 +229,71 @@ def test_pipeline_worker_reports_pose_2511_tier():
     assert w.workflow_meta["pose"]["sampler"] == {"steps": 20, "cfg": 2.5, "denoise": 1.0}
     # The outfit 2511 graph (also has node 301) must NOT be confused for a pose graph.
     assert w.workflow_meta["outfit"]["tier"] == "2511full"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 observability: _extract_step_prompts reads back the EXACT composed
+# positive/negative off a just-built pose step workflow. Negative is LIVE on
+# the 2511 tier (node 115) and absent (no node 115 at all) on v1.
+# ---------------------------------------------------------------------------
+class _FakePoseRequest:
+    """Minimal request stand-in exposing the fields _build_step_workflow reads."""
+
+    def __init__(self, pose, nudity_level=NudityLevel.MEDIUM):
+        self.pose = pose
+        self.outfit = None
+        self.nudityLevel = nudity_level
+        self.accessories = None
+        self.negativePrompt = None
+
+
+def test_extract_step_prompts_pose_2511_positive_marker_and_live_negative():
+    from workers.pipeline_worker import PipelineBackgroundWorker, _extract_step_prompts
+
+    w = PipelineBackgroundWorker(
+        job_manager=None, comfyui_client=None, storage_service=None,
+        pose_workflow_path=str(_WF_DIR / "pose_2511_API.json"),
+        outfit_workflow_path=str(_WF_DIR / "outfit_cropstitch_2511full_API.json"),
+        background_workflow_path=str(_WF_DIR / "test_final_API.json"),
+    )
+    asyncio.run(w._load_workflows())
+
+    req = _FakePoseRequest(pose=PoseType.SITTING)
+    wf = w._build_step_workflow(
+        "pose", req, "src.png", seed=42, job_id="job-debug", pose_ref_name="ref.png",
+    )
+    prompts = _extract_step_prompts("pose", wf)
+
+    # Known marker: the pose's own canned description leads the positive prompt.
+    assert prompts["positive"]
+    assert "sitting upright on a chair or seat" in prompts["positive"]
+    assert prompts["positive"] == wf["114"]["inputs"]["prompt"]
+    # Negative is LIVE on the 2511 tier -- non-empty, carries the standard
+    # edit-negative fragment other tests in this file already key off.
+    assert prompts["negative"]
+    assert "airbrushed skin" in prompts["negative"]
+    assert prompts["negative"] == wf["115"]["inputs"]["prompt"]
+
+
+def test_extract_step_prompts_pose_v1_negative_is_none_inert_tier():
+    from workers.pipeline_worker import PipelineBackgroundWorker, _extract_step_prompts
+
+    w = PipelineBackgroundWorker(
+        job_manager=None, comfyui_client=None, storage_service=None,
+        pose_workflow_path=str(_WF_DIR / "edit_pose_action.json"),
+        outfit_workflow_path=str(_WF_DIR / "test_final_API.json"),
+    )
+    asyncio.run(w._load_workflows())
+
+    req = _FakePoseRequest(pose=PoseType.SITTING)
+    wf = w._build_step_workflow(
+        "pose", req, "src.png", seed=42, job_id="job-debug-v1", pose_ref_name="ref.png",
+    )
+    prompts = _extract_step_prompts("pose", wf)
+
+    assert prompts["positive"]
+    assert "115" not in wf  # v1 graph has no live-negative node at all
+    assert prompts["negative"] is None
 
 
 if __name__ == "__main__":

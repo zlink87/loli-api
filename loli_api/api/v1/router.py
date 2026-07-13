@@ -84,6 +84,15 @@ def configure_services(
     pipeline.set_job_manager(job_manager)
     if notification_service:
         pipeline.set_notification_service(notification_service)
+    # Trait-aware standalone edits (Phase 4): the outfit/pose/background/pipeline
+    # edit endpoints can auto-populate identityAnchors from a characterId. Wired
+    # only when the Supabase-backed character store exists; the endpoints degrade
+    # gracefully (proceed without anchors) when it is absent.
+    if character_store is not None:
+        outfit.set_character_store(character_store)
+        pose.set_character_store(character_store)
+        background.set_character_store(character_store)
+        pipeline.set_character_store(character_store)
     # Story Batches (optional — only wired when the Supabase DB is configured)
     if character_store is not None:
         characters.set_character_store(character_store)

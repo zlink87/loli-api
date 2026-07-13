@@ -334,6 +334,70 @@ def test_director_prompt_examples_carry_no_banned_style_words():
     assert not has_banned_style_words(STORY_DIRECTOR_SYSTEM_PROMPT)
 
 
+# --- variety-only: the orchestrator FORCES story_mode off before planning ---
+def test_launch_batch_forces_story_mode_off_even_for_stale_payload():
+    # An old admin payload may still carry story_mode=True. BatchLaunchService must strip it
+    # to False before planning so the retired story-director path can never re-activate.
+    import services.batch_orchestrator as bo
+    from services.batch_orchestrator import BatchOrchestrator
+    from models.batch import BatchCreate
+
+    captured = {}
+
+    async def _fake_plan_scenes(character, count, controls, *, settings, **kw):
+        captured["story_mode"] = getattr(controls, "story_mode", None)
+        scenes = DeterministicScenePlanner().plan_scenes_sync(character, count, controls)
+        return scenes, "deterministic"
+
+    orig = bo.story_planner.plan_scenes
+    bo.story_planner.plan_scenes = _fake_plan_scenes
+    try:
+        char = _character()
+        char_ns = SimpleNamespace(
+            persona=char.persona, hero_image_url="https://x/img.png", bio=None,
+        )
+
+        class _FakeCharStore:
+            async def get(self, cid):
+                return char_ns
+
+        class _FakeBatchStore:
+            def __init__(self):
+                self.batch = SimpleNamespace(id="batch-1")
+                self.provider = None
+
+            async def create_batch(self, *a, **k):
+                return self.batch
+
+            async def set_planner_provider(self, batch_id, provider):
+                self.provider = provider
+
+            async def insert_items(self, batch_id, rows):
+                return rows
+
+            async def set_batch_status(self, *a, **k):
+                return None
+
+            async def get_batch(self, batch_id):
+                return self.batch
+
+        settings = SimpleNamespace(
+            RUNPOD_AVG_STEP_SECONDS=5, BATCH_WORKER_POOL_SIZE=3, RUNPOD_GPU_USD_PER_SECOND=0.0,
+        )
+        store = _FakeBatchStore()
+        orch = BatchOrchestrator(
+            job_manager=None, character_store=_FakeCharStore(), batch_store=store, settings=settings,
+        )
+        body = BatchCreate(
+            count=4, controls=BatchControls(story_mode=True, base_seed=1), dry_run=True,
+        )
+        asyncio.run(orch.launch_batch("char-1", body))
+        assert captured["story_mode"] is False, "orchestrator must force story_mode off before planning"
+        assert store.provider == "deterministic", "resolved planner provider must be persisted"
+    finally:
+        bo.story_planner.plan_scenes = orig
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

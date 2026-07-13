@@ -440,6 +440,28 @@ class OutfitEditRequest(BaseModel):
             "would find nothing to segment, so the whole-body mask is used instead."
         )
     )
+    characterId: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional id of the character being edited. When set AND identityAnchors "
+            "is absent, the server loads the character and auto-populates identityAnchors "
+            "from its persona (skin tone / hair / eyes / build) so the outfit step's "
+            "body repaint keeps the character's real skin tone — the fix for the "
+            "white-body-on-dark-skin bug. Best-effort: an unknown id or an unconfigured "
+            "character store leaves identityAnchors unset (unchanged behavior)."
+        ),
+    )
+    identityAnchors: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional concrete identity-attribute phrase for THIS character (skin tone, "
+            "hair, eyes, build — never name/age/ethnicity label), appended to the outfit "
+            "step's identity clause so the re-diffused body keeps the character's real "
+            "skin tone and proportions. Usually left unset and derived server-side from "
+            "characterId; an explicit value here is respected and NOT overridden."
+        ),
+    )
 
     @field_validator("source_image")
     @classmethod
@@ -487,6 +509,27 @@ class PoseEditRequest(BaseModel):
         ge=1,
         le=1000000000,
         description="Random seed for reproducibility"
+    )
+    characterId: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional id of the character being edited. When set AND identityAnchors "
+            "is absent, the server loads the character and auto-populates identityAnchors "
+            "from its persona (skin tone / hair / eyes / build). The pose step fully "
+            "re-diffuses the frame, so this keeps the character's real skin tone and "
+            "proportions — the fix for the white-body-on-dark-skin bug. Best-effort: an "
+            "unknown id or an unconfigured character store leaves identityAnchors unset."
+        ),
+    )
+    identityAnchors: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional concrete identity-attribute phrase for THIS character (skin tone, "
+            "hair, eyes, build — never name/age/ethnicity label), appended to the pose "
+            "step's identity clause. Usually left unset and derived server-side from "
+            "characterId; an explicit value here is respected and NOT overridden."
+        ),
     )
 
     @field_validator("source_image")
@@ -648,6 +691,27 @@ class BackgroundEditRequest(BaseModel):
         le=1000000000,
         description="Random seed for reproducibility"
     )
+    characterId: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional id of the character being edited. When set AND identityAnchors "
+            "is absent, the server loads the character and auto-populates identityAnchors "
+            "from its persona (skin tone / hair / eyes / build) so an edit that repaints "
+            "skin at the person/background boundary keeps the character's real skin tone. "
+            "Best-effort: an unknown id or an unconfigured character store leaves "
+            "identityAnchors unset (unchanged behavior)."
+        ),
+    )
+    identityAnchors: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional concrete identity-attribute phrase for THIS character (skin tone, "
+            "hair, eyes, build — never name/age/ethnicity label), appended to the "
+            "background step's identity clause. Usually left unset and derived server-side "
+            "from characterId; an explicit value here is respected and NOT overridden."
+        ),
+    )
 
     @field_validator("source_image")
     @classmethod
@@ -711,6 +775,18 @@ class PipelineEditRequest(BaseModel):
             "edit model, and a generic 'keep the same hair' instruction binds far more "
             "weakly than the character's actual hair color (D1). None (interactive "
             "callers / no character profile) leaves both prompts unchanged."
+        ),
+    )
+    characterId: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional id of the character being edited. When set AND identityAnchors "
+            "is absent, the server loads the character and auto-populates identityAnchors "
+            "from its persona (skin tone / hair / eyes / build) before the pipeline runs — "
+            "the fix for the white-body-on-dark-skin bug for standalone (non-batch) edits. "
+            "Batch items already arrive with identityAnchors set by scene_mapper, so this "
+            "only fires for direct /v1/edit callers. Best-effort: an unknown id or an "
+            "unconfigured character store leaves identityAnchors unset."
         ),
     )
     reactorRestoreVisibility: Optional[float] = Field(

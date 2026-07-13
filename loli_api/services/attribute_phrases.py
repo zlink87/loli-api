@@ -35,6 +35,23 @@ ETHNICITY_PHRASES = {
     "arab": "a Middle Eastern woman with olive skin",
 }
 
+# Just the SKIN-TONE descriptor for each ethnicity — the visual attribute pulled
+# out of ETHNICITY_PHRASES above, with the demographic label ("a Black woman")
+# deliberately dropped. Edits repaint the body (outfit denoise 0.85-0.9, pose
+# denoise 1.0 full-frame) while ReActor restores only the face, so without a skin
+# tone in the edit prompt a dark-skinned character comes back with a white body.
+# This map feeds scene_mapper.identity_anchor_text so the edit prompts carry
+# "warm dark-brown skin" (a paintable attribute) rather than the label — which
+# would fight the render the same way an age-down word does. Keyed by the
+# EthnicityType enum value (models/enums.py).
+SKIN_TONE_PHRASES = {
+    "caucasian": "fair skin",
+    "asian": "light skin",
+    "black_afro": "warm dark-brown skin",
+    "latina": "warm tan skin",
+    "arab": "olive skin",
+}
+
 HAIR_STYLE_PHRASES = {
     "straight": "long straight hair",
     "bangs": "hair with blunt bangs",
@@ -197,6 +214,23 @@ def phrase(mapping: dict, value, default: str = "") -> str:
     if key is None:
         return default
     return mapping.get(key, default)
+
+
+def skin_tone_phrase(ethnicity) -> Optional[str]:
+    """
+    The bare skin-tone descriptor for an ethnicity (e.g. ``black_afro`` ->
+    "warm dark-brown skin"), or None for an unknown/None value.
+
+    Case- and underscore-tolerant: an enum member, "BLACK_AFRO", or "black-afro"
+    all resolve to the ``black_afro`` key. Returns just the paintable skin
+    attribute from SKIN_TONE_PHRASES, never the demographic label — see that map's
+    note for why the label is excluded from edit prompts.
+    """
+    key = _val(ethnicity)
+    if key is None:
+        return None
+    key = str(key).strip().lower().replace("-", "_").replace(" ", "_")
+    return SKIN_TONE_PHRASES.get(key)
 
 
 def age_phrase(age: Optional[int]) -> str:

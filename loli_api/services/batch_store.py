@@ -27,11 +27,12 @@ TERMINAL_ITEM_STATUSES = {"succeeded", "failed", "cancelled"}
 
 
 def _row_to_batch(row: dict) -> BatchRead:
+    raw_controls = row.get("controls") or {}
     return BatchRead(
         id=row["id"],
         character_id=row["character_id"],
         count=row["count"],
-        controls=BatchControls(**(row.get("controls") or {})),
+        controls=BatchControls(**raw_controls),
         likes=row.get("likes") or [],
         dislikes=row.get("dislikes") or [],
         status=row["status"],
@@ -42,6 +43,10 @@ def _row_to_batch(row: dict) -> BatchRead:
         error=row.get("error"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        # Read off the RAW controls dict (not the parsed BatchControls, which
+        # drops the underscore-prefixed key via extra='ignore') — see
+        # set_planner_provider and BatchRead.planner_provider's docstrings.
+        planner_provider=raw_controls.get("_planner_provider"),
     )
 
 
@@ -106,6 +111,39 @@ class BatchStore:
 
         def _update():
             return self.client.table(_BATCHES).update(updates).eq("id", batch_id).execute()
+
+        await asyncio.to_thread(_update)
+
+    async def set_planner_provider(self, batch_id: str, provider: str) -> None:
+        """
+        Persist the planner provider used for this batch into the existing ``controls``
+        jsonb under the ``_planner_provider`` key (no new migration/column). This makes
+        silent Venice->deterministic fallbacks (venice_client never raises) attributable
+        after the fact. The key is underscore-prefixed and ignored by BatchControls on
+        read (pydantic extra='ignore'), so it round-trips harmlessly.
+        """
+        def _get():
+            return (
+                self.client.table(_BATCHES)
+                .select("controls")
+                .eq("id", batch_id)
+                .limit(1)
+                .execute()
+            )
+
+        res = await asyncio.to_thread(_get)
+        if not res.data:
+            return
+        controls = dict(res.data[0].get("controls") or {})
+        controls["_planner_provider"] = provider
+
+        def _update():
+            return (
+                self.client.table(_BATCHES)
+                .update({"controls": controls})
+                .eq("id", batch_id)
+                .execute()
+            )
 
         await asyncio.to_thread(_update)
 
@@ -200,6 +238,90 @@ class BatchStore:
                 .eq("id", item_id)
                 .execute()
             )
+
+        await asyncio.to_thread(_update)
+
+    async def get_item(
+        self, item_id: str, batch_id: Optional[str] = None
+    ) -> Optional[BatchItemRead]:
+        """Fetch one item by id (optionally scoped to its batch for ownership checks)."""
+        def _select():
+            q = self.client.table(_ITEMS).select("*").eq("id", item_id)
+            if batch_id is not None:
+                q = q.eq("batch_id", batch_id)
+            return q.limit(1).execute()
+
+        res = await asyncio.to_thread(_select)
+        return _row_to_item(res.data[0]) if res.data else None
+
+    async def merge_item_debug(self, item_id: str, debug: dict) -> None:
+        """
+        Phase 5 observability: merge a ``_debug`` block into the item's persisted
+        ``pipeline_request`` jsonb (read-modify-write — batch items have no
+        dedicated debug column and this ships with no DB migration).
+
+        ``debug`` REPLACES ``pipeline_request["_debug"]`` wholesale. Safe as a
+        blind overwrite: the reconciler calls this at most once per terminal
+        success per item (from ``BatchReconciler._handle_succeeded``, right
+        before the item goes terminal), so there is no concurrent writer for
+        the same item to race against. A missing/never-enqueued row (no prior
+        ``pipeline_request``) still gets a fresh dict with just ``_debug`` —
+        this never raises on a partial row.
+        """
+        row = await self._get_item(item_id)
+        if row is None:
+            return
+        pipeline_request = dict(row.get("pipeline_request") or {})
+        pipeline_request["_debug"] = debug
+
+        def _update():
+            return (
+                self.client.table(_ITEMS)
+                .update({"pipeline_request": pipeline_request})
+                .eq("id", item_id)
+                .execute()
+            )
+
+        await asyncio.to_thread(_update)
+
+    async def update_item_scene_spec(self, item_id: str, scene_spec: dict) -> None:
+        """Persist an edited scene_spec (Phase 3 single-item edit)."""
+        def _update():
+            return (
+                self.client.table(_ITEMS)
+                .update({"scene_spec": scene_spec})
+                .eq("id", item_id)
+                .execute()
+            )
+
+        await asyncio.to_thread(_update)
+
+    async def reset_item_for_rerun(self, item_id: str, seed: Optional[int] = None) -> None:
+        """
+        Reset a succeeded/failed item to 'pending' for a single-photo rerun.
+
+        Clears the job link, error fields, published-image link, and the stale image
+        URLs/hash, and resets the attempt counter so the retry cap applies fresh. When
+        ``seed`` is provided it replaces the stored per-item seed (else the seed is left
+        untouched — a plain rerun keeps the deterministic seed). The reconciler then
+        re-enqueues the pending item via its normal _enqueue_item path.
+        """
+        updates: dict = {
+            "status": "pending",
+            "job_id": None,
+            "error_code": None,
+            "error_message": None,
+            "character_image_id": None,
+            "preview_url": None,
+            "image_url": None,
+            "image_hash": None,
+            "attempts": 0,
+        }
+        if seed is not None:
+            updates["seed"] = seed
+
+        def _update():
+            return self.client.table(_ITEMS).update(updates).eq("id", item_id).execute()
 
         await asyncio.to_thread(_update)
 

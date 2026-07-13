@@ -158,7 +158,7 @@ class BatchPipelineWorker:
             for i, step_name in enumerate(active_steps):
                 p_start = 0.15 + i * per_step
                 p_end = 0.15 + (i + 1) * per_step
-                current_bytes = await self.engine._run_step(
+                current_bytes, step_prompts = await self.engine._run_step(
                     step_name, request, current_bytes, seed, job.job_id,
                     progress_start=p_start, progress_end=p_end,
                     is_final_step=(i == num_steps - 1),
@@ -168,12 +168,17 @@ class BatchPipelineWorker:
                 # PipelineBackgroundWorker._process_job, sourced from the shared
                 # engine's workflow_meta (this worker only drives step execution
                 # via self.engine._run_step; it has no template state of its own).
+                # Phase 5: step_prompts (returned by _run_step, a pure local value —
+                # safe even though the engine is shared across concurrent batch
+                # workers) carries the EXACT composed positive/negative prompt text.
                 step_meta = self.engine.workflow_meta.get(step_name, {})
                 job.debug_meta.setdefault("steps", []).append({
                     "step": step_name,
                     "workflow_path": step_meta.get("path"),
                     "tier": step_meta.get("tier"),
                     "seed": seed,
+                    "positive_prompt": step_prompts.get("positive"),
+                    "negative_prompt": step_prompts.get("negative"),
                 })
 
             await self.job_manager.update_job_status(

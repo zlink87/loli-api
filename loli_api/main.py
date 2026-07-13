@@ -294,7 +294,12 @@ if supabase_db.is_configured():
     chat_persona_store = ChatPersonaStore(_db)
     batch_store = BatchStore(_db)
     nude_base_store = NudeBaseStore(_db)
-    batch_orchestrator = BatchOrchestrator(job_manager, character_store, batch_store, settings)
+    batch_orchestrator = BatchOrchestrator(
+        job_manager, character_store, batch_store, settings,
+        # Lets rerun_item supersede a previously published gallery image so a
+        # single-photo rerun replaces it instead of duplicating the row.
+        character_image_store=character_image_store,
+    )
     batch_reconciler = BatchReconciler(
         job_manager, character_store, batch_store, settings,
         supabase_storage_service=supabase_storage_service,

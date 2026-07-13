@@ -16,6 +16,7 @@ from models.responses import JobCreateResponse
 from services import pose_assets
 from services import prompt_constants as pc
 from services import scene_vocab as sv
+from services.character_anchors import populate_identity_anchors
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ _job_manager = None
 _notification_service: Optional[NotificationService] = None
 _pose_workflow_path: Optional[str] = None
 _pose_workflow_template: Optional[dict] = None
+# Optional (Supabase-gated) character store, wired in router.configure_services.
+# Used only to auto-populate identityAnchors from PoseEditRequest.characterId;
+# None (store not configured) degrades gracefully — see populate_identity_anchors.
+_character_store = None
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +72,12 @@ def set_job_manager(job_manager) -> None:
 def set_notification_service(service: NotificationService) -> None:
     global _notification_service
     _notification_service = service
+
+
+def set_character_store(store) -> None:
+    """Set the (optional) character store used to resolve identityAnchors."""
+    global _character_store
+    _character_store = store
 
 
 def set_pose_workflow_path(workflow_path: str) -> None:
@@ -534,6 +545,11 @@ async def edit_pose(
                     f"Run scripts/generate_pose_refs.py."
                 ),
             )
+
+        # Trait-aware edit: resolve identityAnchors from characterId when the caller
+        # supplied an id but not explicit anchors (best-effort; never raises). The
+        # pose step's build_pose_prompt already consumes request.identityAnchors.
+        await populate_identity_anchors(_character_store, request)
 
         # Log payload
         notification_service = get_notification_service()

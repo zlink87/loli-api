@@ -70,7 +70,16 @@ class BackgroundEditWorker(BaseEditWorker):
             )
 
             # Step 3: Build prompt
-            prompt = apply_edit_photo_style(build_background_prompt(request.prompt), PhotoStyleType.POLISHED)
+            prompt = apply_edit_photo_style(
+                # Trait-aware edit: identityAnchors (skin tone/hair/build) is populated
+                # in the endpoint from characterId; keeps skin tone correct where the
+                # background edit relights the subject. None leaves the prompt unchanged.
+                build_background_prompt(
+                    request.prompt,
+                    identity_anchors=getattr(request, "identityAnchors", None),
+                ),
+                PhotoStyleType.POLISHED,
+            )
             seed = (
                 request.seed
                 if request.seed is not None

@@ -104,12 +104,14 @@ class BatchControls(BaseModel):
         ),
     )
     story_mode: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Emit one coherent multi-part story (a story title + per-beat narrative prose, "
-            "one scene per photo). The narrative/beat_description prose is gallery-only, but "
-            "the story director ALSO drives render fields: setting, activity, pose_detail, "
-            "outfit_detail and expression reach the image prompt via scene_mapper."
+            "RETIRED from the admin flow. Batches always run variety mode now: the "
+            "deterministic planner (or opt-in Venice per-beat garnish) picks coherent, "
+            "correctly-ramped scenes from the batch controls alone, with no narrative arc. "
+            "This field is still accepted for API/back-compat with old admin payloads, but "
+            "it is IGNORED — BatchLaunchService forces story_mode=False before planning, so a "
+            "stale payload can never re-enable the old story-director path. Default is False."
         ),
     )
     reactor_restore_visibility: Optional[float] = Field(
@@ -174,6 +176,52 @@ class BatchCreate(BaseModel):
         }
 
 
+class BatchItemEdit(BaseModel):
+    """
+    PATCH body for a single batch item's scene (Phase 3).
+
+    All fields are optional; only the keys actually present in the request payload
+    are applied onto the stored ``scene_spec`` (use ``model_dump(exclude_unset=True)``
+    to read them). Enum fields are accepted as raw strings and coerced through the
+    SAME ``_coerce_enum`` + controls filters the planner uses (story_planner.
+    apply_item_scene_edit), so near-miss values are repaired and an edit can never
+    bypass the batch's allow/block lists, ``sfw_only``, or the ``max_nudity`` ceiling.
+    Free-text detail fields get the planner's identity scrub, companion strip, and
+    length caps. Passing ``null`` for the nullable steps (``outfit``/``pose``) clears
+    that step.
+    """
+
+    outfit: Optional[str] = Field(default=None, description="Outfit enum; null clears the outfit step")
+    location: Optional[str] = None
+    pose: Optional[str] = Field(default=None, description="Pose enum; null clears the pose step")
+    nudity_level: Optional[str] = Field(default=None, description="Nudity level (capped at the batch max_nudity)")
+    time_of_day: Optional[str] = None
+    lighting: Optional[str] = None
+    setting: Optional[str] = None
+    activity: Optional[str] = None
+    pose_detail: Optional[str] = None
+    outfit_detail: Optional[str] = None
+    expression: Optional[str] = None
+
+
+class BatchItemRerun(BaseModel):
+    """POST body for re-running one succeeded/failed batch item (Phase 3)."""
+
+    new_seed: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=1_000_000_000,
+        description="Explicit seed for the rerun. Ignored when reseed=True.",
+    )
+    reseed: bool = Field(
+        default=False,
+        description=(
+            "Derive a fresh random seed for the rerun (overrides new_seed). "
+            "Default False keeps the item's stored deterministic seed."
+        ),
+    )
+
+
 class BatchItemRead(BaseModel):
     """One item (one planned scene / one child job) of a batch."""
 
@@ -214,6 +262,18 @@ class BatchRead(BaseModel):
     error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    planner_provider: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which planner actually produced this batch's scenes ('deterministic' | "
+            "'venice' | ...), read back from controls._planner_provider (set once at "
+            "launch by BatchStore.set_planner_provider). Surfaced as a top-level field "
+            "rather than through BatchControls because pydantic's extra='ignore' would "
+            "silently drop the underscore-prefixed key when BatchControls is "
+            "reconstructed from the row. None for batches launched before this field "
+            "existed."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

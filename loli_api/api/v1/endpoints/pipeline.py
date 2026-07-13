@@ -13,6 +13,7 @@ from models.enums import JobStatus
 from models.requests import PipelineEditRequest
 from models.responses import JobCreateResponse
 from services import pose_assets
+from services.character_anchors import populate_identity_anchors
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,10 @@ router = APIRouter(tags=["Pipeline Edit"])
 # ---------------------------------------------------------------------------
 _job_manager = None
 _notification_service: Optional[NotificationService] = None
+# Optional (Supabase-gated) character store, wired in router.configure_services.
+# Used only to auto-populate identityAnchors from PipelineEditRequest.characterId;
+# None (store not configured) degrades gracefully — see populate_identity_anchors.
+_character_store = None
 
 
 def set_job_manager(job_manager) -> None:
@@ -34,6 +39,12 @@ def set_job_manager(job_manager) -> None:
 def set_notification_service(service: NotificationService) -> None:
     global _notification_service
     _notification_service = service
+
+
+def set_character_store(store) -> None:
+    """Set the (optional) character store used to resolve identityAnchors."""
+    global _character_store
+    _character_store = store
 
 
 def get_job_manager():
@@ -79,6 +90,12 @@ async def submit_pipeline_edit_job(request: PipelineEditRequest, user_id: str):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Pipeline edit queue is full. Please try again later.",
         )
+
+    # Trait-aware edit: resolve identityAnchors from characterId when a standalone
+    # caller supplied an id but not explicit anchors (best-effort; never raises).
+    # Batch items already arrive with identityAnchors set by scene_mapper, so this
+    # is a no-op for them. pipeline_worker consumes request.identityAnchors.
+    await populate_identity_anchors(_character_store, request)
 
     notification_service = get_notification_service()
     if notification_service:

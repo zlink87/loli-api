@@ -153,10 +153,26 @@ config default:
 3. **Per-image, after the fact** — every generated batch photo records which tier
    actually rendered it, written at publish time from the live job's step trace:
    ```
-   character_images.metadata -> workflow_meta -> steps[] -> {step: "outfit", tier: "2511full", workflow_path, seed}
+   character_images.metadata -> workflow_meta -> steps[] ->
+     {step: "outfit", tier: "2511full", workflow_path, seed, positive_prompt, negative_prompt}
    ```
    Query new batch items and confirm `tier == "2511full"` on the `"outfit"` step
    entry — not `"rapid_cropstitch"` or `"v1"`.
+
+   `positive_prompt`/`negative_prompt` (Phase 5 observability) are the EXACT text
+   that landed on the step's text-encode nodes (node 16/117 for outfit+background,
+   node 114/115 for pose — 115 only exists on the 2511 pose tier, so pose reports
+   `negative_prompt: null` on v1, matching that tier's inert-negative design),
+   truncated to ~2000 chars. The same per-step list, unchanged, ALSO lands on the
+   batch item itself (no join needed) at:
+   ```
+   character_batch_items.pipeline_request -> _debug -> steps[] ->
+     {step, tier, seed, positive, negative}
+   character_batch_items.pipeline_request -> _debug -> planner_provider
+   ```
+   written once by `BatchReconciler._persist_item_debug` right after the item goes
+   `succeeded`. Use this to attribute a bad image to the planner (compare against
+   `scene_spec` on the same item) vs. the renderer (read the exact prompt that ran).
 
 ---
 
