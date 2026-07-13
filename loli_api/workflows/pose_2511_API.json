@@ -17,6 +17,15 @@
       "title": "Image2 (pose reference)"
     }
   },
+  "210": {
+    "inputs": {
+      "image": "hero_face.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Face reference (hero) - ReActor source"
+    }
+  },
   "301": {
     "inputs": {
       "unet_name": "qwen_image_edit_2511_fp8mixed.safetensors",
@@ -246,7 +255,7 @@
       "source_faces_index": "0",
       "console_log_level": 1,
       "source_image": [
-        "109",
+        "210",
         0
       ]
     },

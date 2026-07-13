@@ -9,7 +9,7 @@ from typing import Dict, Optional, Any, Union
 from dataclasses import dataclass, field
 
 from models.enums import JobStatus
-from models.requests import GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest
+from models.requests import GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest, NudeBaseGenerateRequest
 
 
 @dataclass
@@ -18,7 +18,7 @@ class Job:
     job_id: str
     job_type: str  # "text_to_image", "outfit_edit", "pose_edit", "background_edit", or "pipeline_edit"
     status: JobStatus
-    request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest]
+    request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest, NudeBaseGenerateRequest]
     user_id: str
     created_at: datetime
     updated_at: datetime
@@ -76,6 +76,10 @@ class JobManager:
         self.batch_pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         # Dedicated queue for admin image-to-video (reel) jobs.
         self.video_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        # Dedicated queue for admin nude-base generation jobs (WS-N text-to-image +
+        # ReActor face lock), isolated from interactive traffic. One job runs both
+        # chained GPU steps (t2i base -> face pass); see workers/nude_base_worker.py.
+        self.nude_base_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         # Dedicated queue for Batch Character Creation text_to_image jobs, isolated
         # from the interactive single-generate queue (self.queue) so a big batch can't
         # starve interactive traffic. Jobs on it KEEP job_type="text_to_image" (the
@@ -134,7 +138,7 @@ class JobManager:
 
     async def create_job(
         self,
-        request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest],
+        request: Union[GenerateImageRequest, OutfitEditRequest, PoseEditRequest, BackgroundEditRequest, PipelineEditRequest, VideoGenerateRequest, NudeBaseGenerateRequest],
         user_id: str,
         job_type: str = "text_to_image",
         queue: str = "default"
@@ -157,7 +161,7 @@ class JobManager:
         Raises:
             asyncio.QueueFull: If queue is at capacity
         """
-        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob", "batch_pipeline_edit": "batjob", "video_gen": "vidjob"}
+        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob", "batch_pipeline_edit": "batjob", "video_gen": "vidjob", "nude_base": "nudejob"}
         prefix = prefix_map.get(job_type, "job")
         job_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow()
@@ -200,6 +204,8 @@ class JobManager:
             await self.batch_pipeline_queue.put(job_id)
         elif job_type == "video_gen":
             await self.video_queue.put(job_id)
+        elif job_type == "nude_base":
+            await self.nude_base_queue.put(job_id)
         else:
             await self.queue.put(job_id)
         return job
@@ -403,6 +409,14 @@ class JobManager:
         """Mark current Batch Character Creation queue task as done."""
         self.creation_queue.task_done()
 
+    async def get_next_nude_base_job(self) -> Optional[str]:
+        """Get the next job ID from the dedicated nude-base queue (blocking)."""
+        return await self.nude_base_queue.get()
+
+    def mark_nude_base_done(self) -> None:
+        """Mark current nude-base queue task as done."""
+        self.nude_base_queue.task_done()
+
     def can_enqueue_creation(self, count: int) -> bool:
         """
         True if `count` more jobs fit on the creation_queue without exceeding its
@@ -427,6 +441,8 @@ class JobManager:
             return self.video_queue.qsize()
         elif job_type == "creation":
             return self.creation_queue.qsize()
+        elif job_type == "nude_base":
+            return self.nude_base_queue.qsize()
         return self.queue.qsize()
 
     def is_queue_full(self, job_type: str = "text_to_image") -> bool:
@@ -445,6 +461,8 @@ class JobManager:
             return self.batch_pipeline_queue.qsize() >= self._max_queue_size
         elif job_type == "video_gen":
             return self.video_queue.qsize() >= self._max_queue_size
+        elif job_type == "nude_base":
+            return self.nude_base_queue.qsize() >= self._max_queue_size
         return self.queue.qsize() >= self._max_queue_size
 
     async def list_jobs(

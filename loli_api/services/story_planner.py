@@ -41,6 +41,7 @@ from models.enums import (
     KinkType,
     PersonalityType,
     DemeanorType,
+    WardrobeStyleType,
 )
 from models.batch import BatchControls
 from models.scene import SceneSpec
@@ -314,7 +315,18 @@ class StoryPlanner(ABC):
 # with a location/pose it wasn't authored alongside.
 # ---------------------------------------------------------------------------
 def _allowed_pose_pool(tmpl, controls: BatchControls) -> List[PoseType]:
-    return [p for p in tmpl.pose_pool if p not in (controls.blocked_poses or [])]
+    pool = [p for p in tmpl.pose_pool if p not in (controls.blocked_poses or [])]
+    # WS-P pick-time compat: an ATHLETIC pose (jogging/squatting) can only ever pair
+    # incoherently when the batch's effective wardrobe has NO athletic-compatible outfit — so
+    # remove athletic poses from the pool up front in that case (drop the pose, NEVER the outfit:
+    # the wardrobe is identity). This is a formal-wardrobe character (e.g. velvet/maxi dresses)
+    # never being served "jogging". The any()-guard keeps this a strict NO-OP — byte-identical
+    # pool — for every beat that offers no athletic pose, and for every batch that DOES own an
+    # athletic-compatible outfit (the all-compatible regression-lock case). The repair-time pass
+    # (_enforce_pose_compat) is the precise per-scene backstop when SOME athletic outfit exists.
+    if any(p in ATHLETIC_POSES for p in pool) and not _athletic_poses_allowed(controls):
+        pool = [p for p in pool if p not in ATHLETIC_POSES]
+    return pool
 
 
 def _prefer_wardrobe(
@@ -1543,13 +1555,64 @@ _SWIM_SPOTS = {
     LocationType.HOTEL_ROOM.value,
 }
 
+# WS-P private/interior location groups for the pose<->location guard. Values (not enum
+# members) to match _POSE_LOCATION_GUARD's shape. "home_*" is every home interior; private
+# interiors add the hotel room + the closed pro photo studio; the lying/lounging group also
+# allows semi-private outdoor lounging (poolside/beach) and the VIP lounge. Each group is a
+# SUPERSET of the locations the hand-authored templates already pair these poses with (verified
+# in test_pose_location_guard_never_breaks_authored_beats), so enforcing the guard never
+# "repairs" a coherent authored beat — the sole deliberate exclusion is jogging @ cafe.
+_HOME_INTERIORS = {
+    LocationType.HOME_BEDROOM.value, LocationType.HOME_LIVING_ROOM.value,
+    LocationType.HOME_KITCHEN.value, LocationType.HOME_BATHROOM.value,
+    LocationType.HOME_BALCONY.value, LocationType.HOME_OFFICE.value,
+}
+_PRIVATE_INTERIORS = _HOME_INTERIORS | {
+    LocationType.HOTEL_ROOM.value, LocationType.PHOTO_STUDIO.value,
+}
+_LYING_SPOTS = _PRIVATE_INTERIORS | {
+    LocationType.POOLSIDE.value, LocationType.BEACH.value, LocationType.LUXURY_LOUNGE.value,
+}
+# Jogging reads coherent only on a runnable outdoor path or in a gym — NOT a cafe (the reported
+# "jogging @ cafe" bug) nor the decorative garden/poolside/rooftop the old _OUTDOORS set let
+# through. Judged from LocationType: park/city_street/beach/forest_trail are open paths, the gym
+# has treadmills.
+_JOG_SPOTS = {
+    LocationType.PARK.value, LocationType.CITY_STREET.value, LocationType.BEACH.value,
+    LocationType.FOREST_TRAIL.value, LocationType.GYM.value,
+}
+
+# Pose -> the set of LOCATION values where that pose reads as coherent (WS-P extends this for
+# the reported bad pairs). A pose absent from this map is location-agnostic (allowed anywhere).
+# Each entry is DOCUMENTED with its rationale + the authored pairings it must cover:
 _POSE_LOCATION_GUARD: Dict[str, set] = {
+    # kitchen work — only makes sense at a stove/counter.
     PoseType.COOKING.value: _KITCHENS,
     PoseType.OPENING_FRIDGE.value: _KITCHENS,
+    # dining — kitchens, cafe/restaurant, the living room, AND the garden (outdoor dining is
+    # authored: OUT_AND_ABOUT "a relaxed moment at a cafe" pools garden). ADDED: garden.
     PoseType.EATING.value: _KITCHENS | {
-        LocationType.CAFE.value, LocationType.RESTAURANT.value, LocationType.HOME_LIVING_ROOM.value,
+        LocationType.CAFE.value, LocationType.RESTAURANT.value,
+        LocationType.HOME_LIVING_ROOM.value, LocationType.GARDEN.value,
     },
-    PoseType.JOGGING.value: _OUTDOORS | {LocationType.GYM.value},
+    # WS-P jogging: TIGHTENED to outdoor paths + gym (was _OUTDOORS | {gym}); drops cafe (the
+    # bug) and the decorative garden/poolside/rooftop. Covers authored {city_street, park}.
+    PoseType.JOGGING.value: _JOG_SPOTS,
+    # WS-P lying_back / lying_stomach: private/intimate lounging places only. Covers authored
+    # {home_balcony, home_bathroom, home_bedroom, home_living_room, hotel_room, photo_studio}
+    # for lying_back and {home_bedroom} for lying_stomach; poolside/beach lounging allowed too.
+    PoseType.LYING_BACK.value: _LYING_SPOTS,
+    PoseType.LYING_STOMACH.value: _LYING_SPOTS,
+    # WS-P all_fours: private interiors + photo studio, PLUS gym/yoga_studio — the GYM arc's
+    # "stretching, glistening after a session" authors all_fours at yoga_studio/gym (a coherent
+    # post-workout stretch), so those stay allowed. Covers authored {gym, home_bedroom,
+    # hotel_room, photo_studio, yoga_studio}.
+    PoseType.ALL_FOURS.value: _PRIVATE_INTERIORS | {
+        LocationType.GYM.value, LocationType.YOGA_STUDIO.value,
+    },
+    # WS-P kneeling: private interiors + photo studio. Covers authored {home_bathroom,
+    # home_bedroom, hotel_room, photo_studio}.
+    PoseType.KNEELING.value: _PRIVATE_INTERIORS,
 }
 
 _OUTFIT_LOCATION_GUARD: Dict[str, set] = {
@@ -1569,6 +1632,27 @@ _UNIFORM_OUTFITS = {
     OutfitType.NURSE_UNIFORM, OutfitType.SCHOOL_UNIFORM,
     OutfitType.MILITARY_UNIFORM, OutfitType.CHEF_UNIFORM,
 }
+
+
+# ---------------------------------------------------------------------------
+# Pose <-> outfit coherence (athletic-attire guard) — WS-P
+# ---------------------------------------------------------------------------
+# The ATHLETIC poses (running/exercise) read as incoherent on formal/elegant attire — the
+# reported "Jogging planned with velvet/maxi dresses". The compat RULE: an athletic pose may
+# only pair with an outfit whose OUTFIT_STYLE_TAGS intersect this athletic-style set (sporty /
+# streetwear / casual). Uniforms are EXEMPT (a work chapter keeps its uniform regardless —
+# handled in _pose_outfit_ok, mirroring _prefer_wardrobe's _UNIFORM_OUTFITS retention).
+_ATHLETIC_OUTFIT_STYLES: frozenset = frozenset({
+    WardrobeStyleType.SPORTY, WardrobeStyleType.STREETWEAR, WardrobeStyleType.CASUAL_MINIMAL,
+})
+# The athletic pose set: jogging + squatting (the only PoseType members that are clearly
+# sport/exercise). Removed from a batch's pose pools up front when the wardrobe has no
+# athletic-compatible outfit (see _allowed_pose_pool), and enforced per-scene at repair time.
+ATHLETIC_POSES: frozenset = frozenset({PoseType.JOGGING, PoseType.SQUATTING})
+# pose value -> required outfit-style set (same {sporty, streetwear, casual} for every athletic
+# pose). Shape mirrors _POSE_LOCATION_GUARD (value-keyed) so _pose_outfit_ok reads off it the
+# same way _pose_ok_at reads _POSE_LOCATION_GUARD; a pose absent here is outfit-agnostic.
+POSE_OUTFIT_COMPAT: Dict[str, frozenset] = {p.value: _ATHLETIC_OUTFIT_STYLES for p in ATHLETIC_POSES}
 
 
 def _outfit_fill_pool(controls: BatchControls) -> List[OutfitType]:
@@ -1803,9 +1887,71 @@ def _outfit_ok_at(outfit, location) -> bool:
     return allowed is None or _val(location) in allowed
 
 
+def _outfit_is_athletic(outfit) -> bool:
+    """True when `outfit` carries a style tag in the athletic-compatible set
+    ({sporty, streetwear, casual_minimal}). Uniforms are professional-tagged, so they are
+    naturally False here — they are compat-EXEMPT (see _pose_outfit_ok) but are not themselves
+    athletic garments for the 'does the wardrobe offer one' pick-time test."""
+    tags = ov.OUTFIT_STYLE_TAGS.get(outfit, frozenset())
+    return bool(tags & _ATHLETIC_OUTFIT_STYLES)
+
+
+def _pose_outfit_ok(pose, outfit) -> bool:
+    """
+    Pose<->outfit compatibility (WS-P). Non-athletic poses are UNCONSTRAINED (return True). An
+    athletic pose (POSE_OUTFIT_COMPAT) may only pair with:
+      * a uniform (ALWAYS exempt — the work-chapter carve-out, like _prefer_wardrobe), or
+      * an outfit whose OUTFIT_STYLE_TAGS intersect the required athletic-style set.
+    A None outfit (the outfit step is skipped -> the avatar's own clothes render) is treated as
+    compatible: there is no dress-class garment being painted, so nothing to repair.
+    """
+    required = POSE_OUTFIT_COMPAT.get(_val(pose))
+    if required is None:
+        return True
+    if outfit is None:
+        return True
+    if outfit in _UNIFORM_OUTFITS:
+        return True
+    return bool(ov.OUTFIT_STYLE_TAGS.get(outfit, frozenset()) & required)
+
+
+def _athletic_poses_allowed(controls: BatchControls) -> bool:
+    """
+    May ATHLETIC poses (jogging/squatting) appear ANYWHERE in this batch? (WS-P, batch-level.)
+    True iff the batch's effective wardrobe offers an athletic-compatible outfit:
+    controls.wardrobe_outfits when the trait profile set one (the character's OWN wardrobe —
+    identity, used directly so a beat-pool min_keep fallback can't dilute it), else the batch-wide
+    fill pool (_outfit_fill_pool: every allow/block-permitted non-NAKED outfit — a superset of the
+    template pools post-filter). Uniforms don't count (professional-tagged -> _outfit_is_athletic
+    False), so a formal-only or formal-plus-uniform wardrobe correctly reports "no athletic
+    outfit". A single batch-level gate (rather than per-beat) so the primary pick pool
+    (_allowed_pose_pool) and EVERY slot=None re-pick fallback (_controls_pose_vocab) agree — no
+    repair path can re-introduce an athletic pose the pick-time filter is dropping.
+    """
+    wardrobe = getattr(controls, "wardrobe_outfits", None)
+    candidates = wardrobe if wardrobe else _outfit_fill_pool(controls)
+    return any(_outfit_is_athletic(o) for o in candidates)
+
+
+def _controls_pose_vocab(controls: BatchControls) -> List[PoseType]:
+    """
+    The full controls-filtered pose vocabulary for slot=None re-pick fallbacks (usage caps,
+    variety, compat): every PoseType minus blocked_poses, minus ATHLETIC_POSES when the batch has
+    no athletic-compatible outfit (_athletic_poses_allowed). Mirrors the athletic drop
+    _allowed_pose_pool applies to a beat's own pool, so a fallback re-pick can never re-introduce
+    an athletic pose the batch's wardrobe can't dress.
+    """
+    allow_athletic = _athletic_poses_allowed(controls)
+    return [
+        p for p in PoseType
+        if p not in (controls.blocked_poses or [])
+        and (allow_athletic or p not in ATHLETIC_POSES)
+    ]
+
+
 def _variety_pose_candidates(scene: SceneSpec, slot, controls: BatchControls) -> List[PoseType]:
     base = _allowed_pose_pool(slot.tmpl, controls) if slot is not None \
-        else [p for p in PoseType if p not in (controls.blocked_poses or [])]
+        else _controls_pose_vocab(controls)
     return [p for p in base if _pose_ok_at(p, scene.location)]
 
 
@@ -2328,25 +2474,185 @@ def _enforce_outfit_exposure_cap(
 
 
 # ---------------------------------------------------------------------------
+# Pose <-> outfit + pose <-> location coherence (WS-P repair)
+# ---------------------------------------------------------------------------
+def _pose_compat_candidates(scene: SceneSpec, slot, controls: BatchControls) -> List[PoseType]:
+    """
+    Poses a compat re-pick may assign to `scene`: the beat's own allowed pose pool when a slot
+    constrains it (mirrors _variety_pose_candidates / _cap_location_candidates), else the full
+    controls-filtered pose vocab — kept coherent with the scene's FINAL location AND outfit via
+    BOTH guards (_pose_ok_at + _pose_outfit_ok), so a re-pick never strands an athletic pose on
+    an elegant dress or a floor pose in a public place.
+    """
+    base = _allowed_pose_pool(slot.tmpl, controls) if slot is not None \
+        else _controls_pose_vocab(controls)
+    return [p for p in base if _pose_ok_at(p, scene.location) and _pose_outfit_ok(p, scene.outfit)]
+
+
+def _enforce_pose_compat(
+    scenes: List[SceneSpec], slots: List[_BeatSlot], controls: BatchControls
+) -> List[SceneSpec]:
+    """
+    WS-P repair: every scene's POSE must be coherent with its FINAL location (_POSE_LOCATION_GUARD
+    via _pose_ok_at) AND its FINAL outfit (POSE_OUTFIT_COMPAT via _pose_outfit_ok). Fixes both
+    reported incoherences in one pass — an athletic pose on an elegant dress (outfit), and
+    "jogging @ cafe" (location) — using the SAME swap-first pattern as the ceiling/exposure/
+    adjacency guards.
+
+    ORDER (documented at the call site too): runs AFTER _enforce_location_nudity_ceiling +
+    _enforce_outfit_exposure_cap, so each scene's location and outfit are already FINAL (the
+    exposure pass can re-pick an outfit onto an athletic-pose scene, so this must see the final
+    outfit), and BEFORE _enforce_pose_adjacency, so any consecutive-pose duplicate a pose MOVE
+    introduces is cleaned up by the very next pass. It never touches nudity/outfit/location/
+    expression, so the monotonic ramp, location ceilings, exposure caps and the A2 expression
+    invariants are all preserved unchanged.
+
+    Per offending scene, the fix is chosen from this priority ladder — every rung EXCEPT the
+    last preserves the pose usage cap (a swap preserves the pose MULTISET exactly; an under-cap
+    re-pick stays under the cap):
+      1) STRICT SWAP  — swap the pose (+ its matched pose_detail) with a partner j where both
+                        ends end location+outfit-compliant AND neither move creates a new pose
+                        adjacency. Multiset-preserving -> cap + adjacency both intact.
+      2) under-cap, non-adjacent RE-PICK from _pose_compat_candidates (clean: cap + adjacency).
+      3) under-cap RE-PICK (may sit adjacent -> the next pass, _enforce_pose_adjacency, fixes it).
+      4) LOOSE SWAP   — a compliant partner that creates an adjacency (cleaned up next pass);
+                        still multiset-preserving, so the cap is untouched.
+      5) any compat RE-PICK — LAST RESORT only (no swap partner and no under-cap pose exist at
+                        all); the only rung that may nudge one pose +1 over the cap, mirroring
+                        _enforce_usage_caps' own best-effort "unresolved overflow" behavior.
+    A re-pick drops the stale pose_detail (it described the old pose). An utterly unresolvable
+    scene (no compatible pose anywhere) is left as-is and logged — soft failure, never a crash.
+    """
+    n = len(scenes)
+    if n == 0:
+        return scenes
+    pose_cap = max(2, math.ceil(n / 8))
+    counts: Dict[str, int] = {}
+    for s in scenes:
+        if s.pose is not None:
+            counts[_val(s.pose)] = counts.get(_val(s.pose), 0) + 1
+
+    def compliant(sc: SceneSpec) -> bool:
+        return sc.pose is None or (
+            _pose_ok_at(sc.pose, sc.location) and _pose_outfit_ok(sc.pose, sc.outfit)
+        )
+
+    def neighbors_ok(pose, idx: int, ignore: int) -> bool:
+        """No neighbour of `idx` (other than `ignore`, the swap partner) already holds `pose`."""
+        pv = _val(pose)
+        for nb in (idx - 1, idx + 1):
+            if nb == ignore or not (0 <= nb < n):
+                continue
+            if scenes[nb].pose is not None and _val(scenes[nb].pose) == pv:
+                return False
+        return True
+
+    def do_swap(i: int, j: int) -> None:
+        scenes[i].pose, scenes[j].pose = scenes[j].pose, scenes[i].pose
+        scenes[i].pose_detail, scenes[j].pose_detail = scenes[j].pose_detail, scenes[i].pose_detail
+        # multiset preserved -> counts unchanged.
+
+    def do_repick(i: int, new_pose) -> None:
+        counts[_val(scenes[i].pose)] = counts.get(_val(scenes[i].pose), 0) - 1
+        counts[_val(new_pose)] = counts.get(_val(new_pose), 0) + 1
+        scenes[i].pose = new_pose
+        scenes[i].pose_detail = None  # stale: described the OLD pose (see the other re-picks).
+
+    for i in range(n):
+        s = scenes[i]
+        if compliant(s):
+            continue
+        pi = s.pose
+        # Multiset-preserving swap partners (both ends location+outfit compliant) — the FIRST
+        # (lowest-index, deterministic) strict/loose partner is kept.
+        strict_swap: Optional[int] = None
+        loose_swap: Optional[int] = None
+        for j in range(n):
+            if j == i or scenes[j].pose is None:
+                continue
+            pj = scenes[j].pose
+            if _val(pj) == _val(pi):
+                continue
+            if not (_pose_ok_at(pj, s.location) and _pose_outfit_ok(pj, s.outfit)):
+                continue
+            if not (_pose_ok_at(pi, scenes[j].location) and _pose_outfit_ok(pi, scenes[j].outfit)):
+                continue
+            if neighbors_ok(pj, i, j) and neighbors_ok(pi, j, i):
+                if strict_swap is None:
+                    strict_swap = j
+            elif loose_swap is None:
+                loose_swap = j
+        # Compat re-pick candidates. Draw from the FULL controls-compat vocab (not just this
+        # beat's tiny authored pose pool — e.g. the jogging beat authors only {standing_leaning,
+        # jogging}, so staying in-pool would force standing_leaning even when it is already at
+        # cap). Members of the beat's own pool are PREFERRED (coherence) via the sort key, but
+        # breaking out keeps the usage cap + adjacency satisfiable — exactly how _enforce_usage_caps
+        # falls back to the full vocab. Seeded-shuffled so ties break deterministically yet spread.
+        slot = slots[i] if i < len(slots) else None
+        slot_set = set(_pose_compat_candidates(s, slot, controls)) if slot is not None else set()
+        cands = [p for p in _pose_compat_candidates(s, None, controls) if _val(p) != _val(pi)]
+        rng = random.Random((controls.base_seed or 0) + 2100011 * (i + 1))
+        rng.shuffle(cands)
+        under_nonadj = [p for p in cands if counts.get(_val(p), 0) < pose_cap and neighbors_ok(p, i, -1)]
+        under = [p for p in cands if counts.get(_val(p), 0) < pose_cap]
+
+        def _best(pool):
+            # prefer an in-beat-pool pose (coherence), then the least-used (spreads the cap);
+            # `pool` is seeded-shuffled so equal keys resolve deterministically.
+            return min(pool, key=lambda p: (p not in slot_set, counts.get(_val(p), 0)))
+
+        if strict_swap is not None:              # (1) cap + adjacency preserved
+            do_swap(i, strict_swap)
+        elif under_nonadj:                        # (2) cap + adjacency preserved
+            do_repick(i, _best(under_nonadj))
+        elif under:                               # (3) cap preserved (adjacency fixed next pass)
+            do_repick(i, _best(under))
+        elif loose_swap is not None:              # (4) cap preserved (adjacency fixed next pass)
+            do_swap(i, loose_swap)
+        elif cands:                               # (5) LAST RESORT — may nudge +1 over cap
+            do_repick(i, _best(cands))
+        else:
+            logger.debug(
+                "pose compat: unresolved beat %d (pose=%s loc=%s outfit=%s)",
+                i, _val(pi), _val(s.location), _val(s.outfit),
+            )
+    return scenes
+
+
+# ---------------------------------------------------------------------------
 # Adjacency variety (A2 item 5): no identical pose/expression in consecutive items
 # ---------------------------------------------------------------------------
 def _enforce_pose_adjacency(scenes: List[SceneSpec], controls: BatchControls) -> List[SceneSpec]:
     """
-    Best-effort: no identical pose in two CONSECUTIVE items (a sliding window of 2). Repairs
-    by SWAPPING the pose field between the offending position and a donor — its pose_detail
-    travels WITH the pose (they are a matched pair describing the same body position, so
-    moving them together keeps the detail non-stale). A swap preserves the global pose
-    MULTISET, so the global pose usage cap just enforced stays satisfied, and it touches
-    neither nudity/outfit/location nor the scene order, so the location-ceiling and
-    exposure-cap invariants are left intact. A donor is valid only when it keeps BOTH ends
-    location-coherent (_pose_ok_at) and creates NO new adjacency at either site. If no donor
-    fits, the pair is left as-is — a soft constraint never overrides the hard ones.
+    Best-effort: no identical pose in two CONSECUTIVE items (a sliding window of 2).
+
+    Primary repair — SWAP the pose field (with its matched pose_detail) between the offending
+    position and a donor. A swap preserves the global pose MULTISET (so the usage cap holds) and
+    touches neither nudity/outfit/location nor scene order (so the location-ceiling + exposure-cap
+    invariants are intact). A donor is valid only when it keeps BOTH ends location-coherent
+    (_pose_ok_at) AND pose<->outfit compatible (_pose_outfit_ok — so this pass, which runs AFTER
+    _enforce_pose_compat, can never re-introduce an athletic pose on a non-athletic outfit) AND
+    creates NO new adjacency at either site.
+
+    Fallback — when NO donor swap fits (the compat constraint can make swaps scarce in a tight
+    batch), RE-PICK scenes[i].pose from the controls-compat vocab to a pose that is location- AND
+    outfit-compatible here and differs from both neighbours, PREFERRING poses still under the
+    usage cap so the cap survives. Only fires when a swap could not resolve the pair, so a batch
+    whose adjacencies the swap loop already clears (the common case) is byte-identical to the
+    swap-only behaviour. If neither a swap nor a compatible re-pick exists, the pair is left as-is
+    — a soft constraint never overrides the hard ones.
     """
     n = len(scenes)
+    pose_cap = max(2, math.ceil(n / 8))
+    counts: Dict[str, int] = {}
+    for s in scenes:
+        if s.pose is not None:
+            counts[_val(s.pose)] = counts.get(_val(s.pose), 0) + 1
     for i in range(1, n):
         a, b = scenes[i - 1].pose, scenes[i].pose
         if a is None or b is None or _val(a) != _val(b):
             continue
+        fixed = False
         for j in range(n):
             if j == i or scenes[j].pose is None:
                 continue
@@ -2354,6 +2660,11 @@ def _enforce_pose_adjacency(scenes: List[SceneSpec], controls: BatchControls) ->
             if _val(pj) == _val(b):
                 continue  # identical pose — swapping it in wouldn't break the duplicate
             if not _pose_ok_at(pj, scenes[i].location) or not _pose_ok_at(b, scenes[j].location):
+                continue
+            # WS-P: a donor swap must also keep BOTH ends pose<->outfit compatible, so this
+            # adjacency repair (which runs AFTER _enforce_pose_compat) can never re-introduce an
+            # athletic pose on a non-athletic outfit that the compat pass just resolved.
+            if not _pose_outfit_ok(pj, scenes[i].outfit) or not _pose_outfit_ok(b, scenes[j].outfit):
                 continue
             # pj lands at i: must differ from i's neighbors
             if _val(pj) == _val(scenes[i - 1].pose):
@@ -2367,7 +2678,31 @@ def _enforce_pose_adjacency(scenes: List[SceneSpec], controls: BatchControls) ->
                 continue
             scenes[i].pose, scenes[j].pose = pj, b
             scenes[i].pose_detail, scenes[j].pose_detail = scenes[j].pose_detail, scenes[i].pose_detail
+            fixed = True
             break
+        if fixed:
+            continue
+        # Fallback re-pick (only when no swap donor fit): a compat, non-adjacent pose, preferring
+        # under-cap so the usage cap survives. Keeps the WS-P compat guarantee AND clears the
+        # adjacency the compat pass may have left in a tight 3-way (compat/cap/adjacency) spot.
+        neighbours = {_val(scenes[i - 1].pose)}
+        if i + 1 < n and scenes[i + 1].pose is not None:
+            neighbours.add(_val(scenes[i + 1].pose))
+        cands = [
+            p for p in _controls_pose_vocab(controls)
+            if _val(p) != _val(b) and _val(p) not in neighbours
+            and _pose_ok_at(p, scenes[i].location) and _pose_outfit_ok(p, scenes[i].outfit)
+        ]
+        if not cands:
+            continue
+        rng = random.Random((controls.base_seed or 0) + 2500009 * (i + 1))
+        rng.shuffle(cands)
+        under = [p for p in cands if counts.get(_val(p), 0) < pose_cap]
+        new_pose = min(under or cands, key=lambda p: counts.get(_val(p), 0))
+        counts[_val(scenes[i].pose)] = counts.get(_val(scenes[i].pose), 0) - 1
+        counts[_val(new_pose)] = counts.get(_val(new_pose), 0) + 1
+        scenes[i].pose = new_pose
+        scenes[i].pose_detail = None  # stale: described the old pose.
     return scenes
 
 
@@ -2634,14 +2969,25 @@ def validate_and_repair(
         repaired = _enforce_location_nudity_ceiling(repaired, ramp, controls)
         repaired = _enforce_outfit_exposure_cap(repaired, ramp, controls)
 
-    # Conscious-model variety net (rides the variety gate, so the manual path is untouched):
-    #  * strip mood tags left on now-LOW/public scenes (a ceiling swap can move an intimate
-    #    mood-carrying scene onto a low positional slot) — the "no sultry tail on a clothed
-    #    classroom shot" invariant, enforced on the FINAL nudity+location of every provider;
-    #  * break any consecutive identical pose / expression left by the reordering swaps
-    #    (multiset-preserving field swaps, so caps + candid share survive).
+    # Conscious-model variety net + WS-P pose coherence (ride the variety gate, so the manual
+    # path is untouched). FINAL PASS ORDER (each pass sees the previous one's output):
+    #   1. _enforce_variety                 — pair-dedup + consecutive (pose,location)
+    #   2. _enforce_usage_caps              — per-batch pose/location usage caps
+    #   3. _enforce_location_nudity_ceiling — scenes swap so the ramp never over-exposes a place
+    #   4. _enforce_outfit_exposure_cap     — outfits swap/re-pick to the label they can render
+    #   5. _strip_ineligible_moods          — drop mood tags left on now-LOW/public scenes
+    #   6. _enforce_pose_compat  (WS-P)     — pose<->outfit + pose<->location, swap-first/re-pick;
+    #                                         runs AFTER 3+4 (locations+outfits FINAL) and BEFORE
+    #                                         7+8 so any adjacency a pose move makes is cleaned up
+    #   7. _enforce_pose_adjacency          — no identical pose in consecutive items
+    #   8. _enforce_expression_adjacency    — no identical expression in consecutive items
+    # 6 touches ONLY pose/pose_detail (multiset-preserving swaps + cap-aware re-picks), so the
+    # nudity ramp, location ceilings, exposure caps, mood strip and — critically — the A2
+    # expression pool / demeanor bias and its adjacency invariant are all left intact (8 still
+    # runs last on an untouched expression multiset).
     if enforce_variety:
         _strip_ineligible_moods(repaired)
+        repaired = _enforce_pose_compat(repaired, slots, controls)
         repaired = _enforce_pose_adjacency(repaired, controls)
         repaired = _enforce_expression_adjacency(repaired, controls)
 

@@ -34,6 +34,8 @@ from .enums import (
     LightingType,
     WardrobeStyleType,
     DemeanorType,
+    InteriorStyleType,
+    PaletteType,
 )
 
 
@@ -747,6 +749,37 @@ class BackgroundEditRequest(BaseModel):
             "from characterId; an explicit value here is respected and NOT overridden."
         ),
     )
+    location: Optional[str] = Field(
+        default=None,
+        max_length=60,
+        description=(
+            "Optional scene-location descriptor (a LocationType enum value, e.g. "
+            "'home_bedroom'/'cafe'). When it is a HOME-like room AND characterId is set, "
+            "the server fills interiorStyle/colorPalette below from the character's trait "
+            "profile so a manual home edit renders HER styled room (matching batches). "
+            "Non-home locations leave both unset; None keeps the raw `prompt` verbatim "
+            "(unchanged interactive behavior)."
+        ),
+    )
+    interiorStyle: Optional[InteriorStyleType] = Field(
+        default=None,
+        description=(
+            "Optional home interior style (a character's trait-profile interior_style). "
+            "For a HOME-like `location` its styled room description REPLACES the generic "
+            "scene text. Usually left unset and derived server-side from characterId; an "
+            "explicit value here is respected and NOT overridden. Ignored for non-home "
+            "locations."
+        ),
+    )
+    colorPalette: Optional[PaletteType] = Field(
+        default=None,
+        description=(
+            "Optional home color palette (a character's trait-profile color_palette), "
+            "folded into the scene's lighting clause for a HOME-like `location`. Usually "
+            "left unset and derived server-side from characterId; an explicit value here "
+            "is respected and NOT overridden. Ignored for non-home locations."
+        ),
+    )
 
     @field_validator("source_image")
     @classmethod
@@ -779,6 +812,20 @@ class PipelineEditRequest(BaseModel):
     source_image: str = Field(
         ...,
         description="Supabase URL of the source image to edit"
+    )
+    faceRefImage: Optional[str] = Field(
+        default=None,
+        description=(
+            "WS-S. Optional URL of a DEDICATED face donor for the pose step's ReActor "
+            "pass — the sharp ORIGINAL hero photo. When set, it is staged as an extra "
+            "input image and the pose graph swaps the face from it (node 210) instead "
+            "of from the already-multiply-edited pipeline intermediate (node 109), "
+            "whose 128px inswapper paste otherwise compounds into a blurred/repainted "
+            "face across a batch. Batch items get this from scene_mapper "
+            "(character.hero_photo_url); None (interactive callers) -> the ReActor donor "
+            "falls back to the step source, i.e. unchanged behavior. Only consumed by "
+            "the pose step."
+        ),
     )
     pose: Optional[PoseType] = Field(
         default=None,
@@ -957,6 +1004,28 @@ class PipelineEditRequest(BaseModel):
             "prompt unchanged."
         ),
     )
+    interiorStyle: Optional[InteriorStyleType] = Field(
+        default=None,
+        description=(
+            "Optional home interior style (a character's trait-profile interior_style; "
+            "WS-T). When the background step runs for a HOME-like `location`, her styled "
+            "room description REPLACES the generic scene text — the same personal home a "
+            "batch renders. Usually left unset and derived server-side from characterId "
+            "(populate_home_style); an explicit value is respected and NOT overridden. "
+            "Ignored for non-home locations. Batch items leave this None (scene_mapper "
+            "bakes the styled room straight into `prompt`), so their behavior is unchanged."
+        ),
+    )
+    colorPalette: Optional[PaletteType] = Field(
+        default=None,
+        description=(
+            "Optional home color palette (a character's trait-profile color_palette; "
+            "WS-T), folded into the background step's lighting clause for a HOME-like "
+            "`location`. Usually left unset and derived server-side from characterId; an "
+            "explicit value is respected and NOT overridden. Ignored for non-home "
+            "locations; None for batch items (unchanged)."
+        ),
+    )
     prompt: Optional[str] = Field(
         default=None,
         max_length=2000,
@@ -1029,6 +1098,18 @@ class PipelineEditRequest(BaseModel):
         except SourceImageError as e:
             raise ValueError(str(e))
 
+    @field_validator("faceRefImage")
+    @classmethod
+    def validate_face_ref_image_url(cls, v):
+        # The worker downloads this URL, so SSRF-validate it with the same guard as
+        # source_image; None (the common case) is left untouched.
+        if v is None:
+            return v
+        try:
+            return validate_source_image(v)
+        except SourceImageError as e:
+            raise ValueError(str(e))
+
     @field_validator("pipeline_order")
     @classmethod
     def validate_pipeline_order(cls, v):
@@ -1061,3 +1142,35 @@ class PipelineEditRequest(BaseModel):
                 "seed": 12345
             }
         }
+
+
+class NudeBaseGenerateRequest(BaseModel):
+    """
+    Internal carrier for the WS-N text-to-image nude-base job (job_type="nude_base").
+
+    Not a public endpoint body — it is built server-side by
+    api/v1/endpoints/nude_base.py from the resolved character and consumed by
+    workers/nude_base_worker.py. The worker runs TWO chained GPU steps in this one
+    job: (1) a text-to-image base render from ``persona`` (the character's locked
+    identity + forced NAKED clause + neutral standing pose + plain studio backdrop
+    + NATURAL photo style, deterministic ``seed``), then (2) a single ReActor face
+    pass that swaps the ORIGINAL ``hero_image_url`` face onto that base. The base's
+    face is therefore exactly ONE swap generation from the hero — never a
+    generated/intermediate image.
+    """
+
+    persona: PersonaOptions = Field(
+        ..., description="The character's locked identity/persona (drives the base render)."
+    )
+    hero_image_url: str = Field(
+        ...,
+        description=(
+            "The ORIGINAL hero photo URL — the ReActor face-swap source (never a "
+            "generated or intermediate image). Also recorded as the base's source_image_url."
+        ),
+    )
+    character_id: str = Field(..., description="Owning character id (for logging/provenance).")
+    seed: int = Field(
+        ...,
+        description="Deterministic sampling seed for the base render (zlib.crc32 of character_id).",
+    )

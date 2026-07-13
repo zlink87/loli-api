@@ -1318,6 +1318,232 @@ def test_profile_fields_actually_change_the_plan():
     assert sum(1 for s in b if s.expression in favor) >= 12
 
 
+# ---------------------------------------------------------------------------
+# WS-P: pose <-> outfit (and pose <-> location) compatibility
+# ---------------------------------------------------------------------------
+from services import story_templates as _st  # noqa: E402
+from services.outfit_vocab import outfit_exposure_cap as _exposure_cap  # noqa: E402
+
+# Dress/gown-class outfits — the garments an ATHLETIC pose must never pair with.
+_DRESS_CLASS = {
+    OutfitType.RED_EVENING_GOWN, OutfitType.LITTLE_BLACK_DRESS, OutfitType.WHITE_SUMMER_DRESS,
+    OutfitType.FLORAL_MAXI_DRESS, OutfitType.COCKTAIL_DRESS, OutfitType.BODYCON_DRESS,
+    OutfitType.VELVET_DRESS, OutfitType.SATIN_SLIP_DRESS, OutfitType.POLKA_DOT_DRESS_50S,
+    OutfitType.SEQUIN_TOP_SKIRT, OutfitType.RED_EVENING_GOWN,
+}
+_FORMAL_WARDROBE = [
+    OutfitType.VELVET_DRESS, OutfitType.FLORAL_MAXI_DRESS, OutfitType.COCKTAIL_DRESS,
+    OutfitType.RED_EVENING_GOWN, OutfitType.LITTLE_BLACK_DRESS, OutfitType.SATIN_SLIP_DRESS,
+]
+
+
+def _planned_without_ws_p(char, n, controls):
+    """A full plan with EVERY WS-P effect disabled (athletic-pose drop + the pose-compat pass +
+    the compat check the adjacency pass gained), by monkeypatching the module functions. Manual
+    save/restore (no pytest fixture) so the file still runs under the __main__ runner."""
+    saved = (sp._enforce_pose_compat, sp._athletic_poses_allowed, sp._pose_outfit_ok)
+    sp._enforce_pose_compat = lambda scenes, slots, controls: scenes
+    sp._athletic_poses_allowed = lambda controls: True
+    sp._pose_outfit_ok = lambda pose, outfit: True
+    try:
+        return _planned(char, n, controls)
+    finally:
+        sp._enforce_pose_compat, sp._athletic_poses_allowed, sp._pose_outfit_ok = saved
+
+
+def test_ws_p_athletic_pose_set_and_compat_map():
+    # The athletic set is exactly jogging + squatting; POSE_OUTFIT_COMPAT is keyed by those
+    # values and every athletic pose requires the {sporty, streetwear, casual_minimal} styles.
+    assert sp.ATHLETIC_POSES == frozenset({PoseType.JOGGING, PoseType.SQUATTING})
+    wanted = {WardrobeStyleType.SPORTY, WardrobeStyleType.STREETWEAR, WardrobeStyleType.CASUAL_MINIMAL}
+    assert set(sp.POSE_OUTFIT_COMPAT) == {p.value for p in sp.ATHLETIC_POSES}
+    for required in sp.POSE_OUTFIT_COMPAT.values():
+        assert set(required) == wanted
+
+
+def test_ws_p_pose_outfit_ok_semantics():
+    # Athletic pose blocked on a dress; allowed on activewear/streetwear/casual; uniforms and a
+    # None outfit are exempt; a non-athletic pose is unconstrained.
+    assert not sp._pose_outfit_ok(PoseType.JOGGING, OutfitType.VELVET_DRESS)
+    assert not sp._pose_outfit_ok(PoseType.SQUATTING, OutfitType.RED_EVENING_GOWN)
+    assert sp._pose_outfit_ok(PoseType.JOGGING, OutfitType.GYM_SET)          # sporty
+    assert sp._pose_outfit_ok(PoseType.JOGGING, OutfitType.DENIM_JACKET_JEANS)  # casual_minimal/streetwear
+    assert sp._pose_outfit_ok(PoseType.JOGGING, OutfitType.OVERSIZED_STREETWEAR)  # streetwear
+    assert sp._pose_outfit_ok(PoseType.JOGGING, OutfitType.NURSE_UNIFORM)    # uniform exempt
+    assert sp._pose_outfit_ok(PoseType.JOGGING, None)                        # no garment -> nothing to conflict
+    assert sp._pose_outfit_ok(PoseType.SITTING, OutfitType.VELVET_DRESS)     # non-athletic pose unconstrained
+    # _outfit_is_athletic: dresses/gowns/uniforms are not athletic; activewear/streetwear/casual are.
+    assert not sp._outfit_is_athletic(OutfitType.VELVET_DRESS)
+    assert not sp._outfit_is_athletic(OutfitType.NURSE_UNIFORM)
+    assert sp._outfit_is_athletic(OutfitType.RUNNING_GEAR)
+    assert sp._outfit_is_athletic(OutfitType.CROP_TOP_CARGO)
+
+
+def test_ws_p_athletic_compatible_outfit_set_matches_style_intersection():
+    # The athletic-compatible outfits are exactly those whose OUTFIT_STYLE_TAGS intersect
+    # {sporty, streetwear, casual_minimal} — activewear/streetwear/casual IN, dresses/gowns OUT.
+    compat = {o for o in OutfitType if sp._outfit_is_athletic(o)}
+    for o in (OutfitType.YOGA_OUTFIT, OutfitType.RUNNING_GEAR, OutfitType.GYM_SET,
+              OutfitType.DENIM_JACKET_JEANS, OutfitType.GRAPHIC_TEE_SHORTS,
+              OutfitType.HOODIE_JOGGERS, OutfitType.OVERSIZED_STREETWEAR):
+        assert o in compat, o
+    for o in _DRESS_CLASS | sp._UNIFORM_OUTFITS:
+        assert o not in compat, o
+
+
+def test_formal_wardrobe_drops_athletic_poses_entirely_any_seed():
+    # THE evidence case: a dress/gown-only wardrobe (velvet/maxi/...) owns no athletic-compatible
+    # outfit, so athletic poses are removed from the batch's pose pools UP FRONT — under every
+    # seed, occupation and period length, no athletic pose appears at all (and, a fortiori, never
+    # on a dress).
+    assert not sp._athletic_poses_allowed(BatchControls(wardrobe_outfits=_FORMAL_WARDROBE))
+    for occ in ("model", "nurse", "student", "singer_musician"):
+        char = _character(occupation=occ)
+        for seed in range(1, 13):
+            for pd in (1, 3):
+                controls = BatchControls(
+                    max_nudity=NudityLevel.HIGH, escalation="building", period_days=pd,
+                    base_seed=seed, wardrobe_outfits=_FORMAL_WARDROBE,
+                )
+                out = _planned(char, 24, controls)
+                assert not any(s.pose in sp.ATHLETIC_POSES for s in out), (occ, seed, pd)
+                assert not any(
+                    s.pose in sp.ATHLETIC_POSES and s.outfit in _DRESS_CLASS for s in out
+                ), (occ, seed, pd)
+
+
+def test_athletic_poses_survive_sporty_wardrobe_only_on_compatible_outfits():
+    # With a sporty/streetwear wardrobe, athletic poses may appear — but ONLY on an
+    # athletic-compatible (or uniform/None) outfit, never a dress.
+    sporty = sorted(outfits_for_styles([WardrobeStyleType.SPORTY, WardrobeStyleType.STREETWEAR]),
+                    key=lambda o: o.value)
+    assert sp._athletic_poses_allowed(BatchControls(wardrobe_outfits=sporty))
+    seen_athletic = False
+    for seed in range(1, 20):
+        controls = BatchControls(
+            max_nudity=NudityLevel.MEDIUM, escalation="building", period_days=2,
+            base_seed=seed, wardrobe_outfits=sporty,
+        )
+        out = _planned(_character(occupation="fitness_coach"), 16, controls)
+        for s in out:
+            if s.pose in sp.ATHLETIC_POSES:
+                seen_athletic = True
+                assert sp._pose_outfit_ok(s.pose, s.outfit), (seed, s.pose, s.outfit)
+                assert s.outfit not in _DRESS_CLASS, (seed, s.pose, s.outfit)
+    assert seen_athletic, "a sporty wardrobe should still produce some athletic poses"
+
+
+def test_jogging_only_in_outdoor_or_gym_locations_any_seed():
+    # Folds in the "jogging @ cafe" chip: jogging renders only on a runnable outdoor path or a
+    # gym — never a cafe/garden/poolside/rooftop. And every scene stays pose<->location and
+    # pose<->outfit coherent.
+    jog_ok = sp._POSE_LOCATION_GUARD[PoseType.JOGGING.value]
+    assert LocationType.CAFE.value not in jog_ok
+    for occ in ("student", "model", "yoga_instructor", "teacher", "nurse"):
+        char = _character(occupation=occ)
+        for seed in range(1, 26):
+            controls = BatchControls(max_nudity=NudityLevel.MEDIUM, escalation="building",
+                                     period_days=2, base_seed=seed)
+            out = _planned(char, 16, controls)
+            for s in out:
+                if s.pose == PoseType.JOGGING:
+                    assert s.location.value in jog_ok, (occ, seed, s.location.value)
+                assert sp._pose_ok_at(s.pose, s.location), (occ, seed, s.pose, s.location)
+                assert sp._pose_outfit_ok(s.pose, s.outfit), (occ, seed, s.pose, s.outfit)
+
+
+def test_pose_location_guard_never_breaks_authored_beats_except_jogging_cafe():
+    # The guard is a coherence-correct SUPERSET of every hand-authored (pose, location) pairing
+    # the planner can produce — the SOLE deliberate exclusion is jogging @ cafe (the fix). If a
+    # future template authors a new pairing outside the guard, this test flags it (the compat
+    # pass would otherwise silently "repair" a coherent beat).
+    arcs = {}
+    for lst in _st.ARC_TEMPLATES.values():
+        for a in lst:
+            arcs[a.arc_id] = a
+    for a in _st.GENERIC_ARCS:
+        arcs[a.arc_id] = a
+    for d in range(0, 6):
+        for a in _st.leisure_arcs_for_day(d):
+            arcs[a.arc_id] = a
+    rejected = set()
+    for a in arcs.values():
+        for beat in a.beats:
+            for pose in beat.pose_pool:
+                for loc in beat.location_pool:
+                    if not sp._pose_ok_at(pose, loc):
+                        rejected.add((pose.value, loc.value))
+    assert rejected == {(PoseType.JOGGING.value, LocationType.CAFE.value)}, rejected
+
+
+def test_ws_p_preserves_all_invariants_on_24_item_multiday_plan():
+    # Combined-invariant lock on a 24-item, multi-day plan that DOES need pose-compat repair.
+    char = _character(occupation="model")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=4)
+    out = _planned(char, 24, controls)
+    off = _planned_without_ws_p(char, 24, controls)
+    # It is a meaningful case: WS-P actually moved poses.
+    assert [s.pose for s in out] != [s.pose for s in off]
+
+    # (1) WS-P touched ONLY pose/pose_detail — so the nudity ramp, outfit, location, time and the
+    #     A2 expression assignment are all preserved EXACTLY (swaps never perturb them).
+    for a, b in zip(out, off):
+        da, db = a.model_dump(), b.model_dump()
+        changed = {k for k in da if da[k] != db.get(k)}
+        assert changed <= {"pose", "pose_detail"}, changed
+
+    # (2) pose <-> location AND pose <-> outfit compatible everywhere (the WS-P goal).
+    for s in out:
+        assert sp._pose_ok_at(s.pose, s.location), (s.pose, s.location)
+        assert sp._pose_outfit_ok(s.pose, s.outfit), (s.pose, s.outfit)
+
+    # (3) shipped invariants still hold: exposure cap, location ceiling, pose usage cap, and
+    #     pose + expression adjacency (all non-null expressions).
+    pose_cap = max(2, math.ceil(24 / 8))
+    pose_counts: dict = {}
+    for s in out:
+        if s.pose is not None:
+            pose_counts[s.pose.value] = pose_counts.get(s.pose.value, 0) + 1
+        if s.outfit is not None:
+            assert _nudity_index(s.nudityLevel) <= _nudity_index(_exposure_cap(s.outfit))
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location))
+    assert max(pose_counts.values()) <= pose_cap, pose_counts
+    for i in range(1, len(out)):
+        if out[i].pose is not None and out[i - 1].pose is not None:
+            assert out[i].pose != out[i - 1].pose, ("pose adjacency", i)
+        assert out[i].expression and out[i].expression != out[i - 1].expression, ("expr adjacency", i)
+    assert all(s.expression for s in out)
+
+    # (4) the nudity sequence (the guided ramp, post-ceiling/exposure) is byte-identical with WS-P
+    #     off — an explicit proof that the pose-only repair preserves the ramp.
+    assert [s.nudityLevel for s in out] == [s.nudityLevel for s in off]
+
+
+def test_ws_p_is_seeded_reproducible():
+    # The whole pipeline including the WS-P repair reproduces byte-for-byte under a fixed seed.
+    char = _character(occupation="student")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=2, base_seed=9)
+    a = _planned(char, 24, controls)
+    b = _planned(char, 24, controls)
+    assert [s.model_dump() for s in a] == [s.model_dump() for s in b]
+
+
+def test_all_compatible_batch_is_byte_identical_without_ws_p():
+    # Regression lock: a batch whose pools are already all-compatible (WS-P has nothing to drop,
+    # swap or re-pick) plans BYTE-IDENTICALLY whether or not the WS-P layer runs — proven by
+    # disabling every WS-P effect and comparing full model dumps.
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.MEDIUM, escalation="building", base_seed=1)
+    after = _planned(char, 24, controls)
+    before = _planned_without_ws_p(char, 24, controls)
+    assert [s.model_dump() for s in before] == [s.model_dump() for s in after]
+    # (and it really is all-compatible: WS-P found nothing to fix)
+    for s in after:
+        assert sp._pose_ok_at(s.pose, s.location) and sp._pose_outfit_ok(s.pose, s.outfit)
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

@@ -82,6 +82,17 @@ class CharacterCreate(BaseModel):
             "Best-effort: a failure never fails creation. Also covers /characters/bulk."
         ),
     )
+    generate_nude_base: bool = Field(
+        default=True,
+        description=(
+            "If true (default), immediately submit the character's identity-locked nude "
+            "base render (the same text-to-image + ReActor face-lock path as POST "
+            "/v1/characters/{id}/nude-base) right after creation, in this same call. Only "
+            "fires when the nude-base services are configured AND settings.NUDE_BASE_T2I "
+            "is on. Best-effort: a failure never fails creation. Also covers "
+            "/characters/bulk. Set false to skip the auto-render for this character."
+        ),
+    )
 
     @field_validator("hero_image_url")
     @classmethod

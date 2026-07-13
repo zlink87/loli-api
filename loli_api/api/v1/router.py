@@ -97,6 +97,14 @@ def configure_services(
         pose.set_character_store(character_store)
         background.set_character_store(character_store)
         pipeline.set_character_store(character_store)
+    # WS-T trait-aware edits: the outfit endpoint surfaces a never-wears advisory, and
+    # the background/pipeline endpoints resolve a HOME-like location's interiorStyle/
+    # colorPalette from the character's trait profile. Wired only when the Supabase-
+    # backed trait store exists; the endpoints degrade gracefully when it is absent.
+    if trait_profile_store is not None:
+        outfit.set_trait_profile_store(trait_profile_store)
+        background.set_trait_profile_store(trait_profile_store)
+        pipeline.set_trait_profile_store(trait_profile_store)
     # Story Batches (optional — only wired when the Supabase DB is configured)
     if character_store is not None:
         characters.set_character_store(character_store)
@@ -128,6 +136,11 @@ def configure_services(
         nude_base.set_character_store(character_store)
     if nude_base_store is not None:
         nude_base.set_nude_base_store(nude_base_store)
+        # Part 3: POST /v1/characters (+ /bulk) auto-submits a nude base on creation,
+        # reusing the SAME t2i submit path as POST /characters/{id}/nude-base. Wired
+        # only when the nude-base store exists; the submitter self-gates on the job
+        # manager + settings.NUDE_BASE_T2I, and characters degrades to a no-op without it.
+        characters.set_nude_base_submitter(nude_base.submit_nude_base_for_new_character)
     # Reels (image-to-video) — admin, Supabase-gated
     video.set_job_manager(job_manager)
     if notification_service:

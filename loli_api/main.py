@@ -42,6 +42,7 @@ from workers.background_edit_worker import BackgroundEditWorker
 from workers.pipeline_worker import PipelineBackgroundWorker
 from workers.batch_pipeline_worker import BatchPipelineWorker
 from workers.video_worker import VideoBackgroundWorker
+from workers.nude_base_worker import NudeBaseWorker
 from services import supabase_db
 from services.character_store import CharacterStore
 from services.character_image_store import CharacterImageStore
@@ -270,6 +271,25 @@ cleanup_worker = CleanupWorker(
     storage_service=storage_service
 )
 
+# WS-M — outfit mask diagnostics. When settings.OUTFIT_DEBUG_SAVE_MASK is set, every
+# outfit-step engine (interactive outfit worker, /v1/edit pipeline, batch engine) runs
+# the maskpreview graph instead of its normal render graph — same mask chain, but the
+# SaveImage emits the editable MASK instead of the edited photo. Resolved in one place so
+# the flag reaches all three workers; no-op (returns the passed-in path) when OFF.
+_OUTFIT_MASKPREVIEW_WORKFLOW = "workflows/outfit_cropstitch_maskpreview_API.json"
+
+
+def _outfit_workflow_or_mask_debug(resolved_path: str) -> str:
+    """Swap the resolved outfit graph for the maskpreview graph when the debug flag is on."""
+    if settings.OUTFIT_DEBUG_SAVE_MASK:
+        logger.warning(
+            "OUTFIT_DEBUG_SAVE_MASK is ON: outfit step runs the maskpreview graph "
+            "(saves the editable mask, not the edit). Turn OFF in production."
+        )
+        return _OUTFIT_MASKPREVIEW_WORKFLOW
+    return resolved_path
+
+
 outfit_worker = OutfitBackgroundWorker(
     job_manager=job_manager,
     comfyui_client=comfyui_client,
@@ -277,7 +297,7 @@ outfit_worker = OutfitBackgroundWorker(
     # Precedence: Tier A full-2511 (COMFYUI_OUTFIT_WORKFLOW_PATH_2511) -> Rapid V2
     # crop-and-stitch (_V2) -> V1. Only the interactive outfit path cuts over;
     # background/batch stay on the fast path for cost.
-    workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+    workflow_path=_outfit_workflow_or_mask_debug(settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH),
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
@@ -318,7 +338,7 @@ pipeline_worker = PipelineBackgroundWorker(
     pose_workflow_path=settings.COMFYUI_POSE_WORKFLOW_PATH_2511 or settings.COMFYUI_POSE_WORKFLOW_PATH,
     # Pipeline outfit step follows the same precedence as the interactive outfit worker
     # (Tier A full-2511 -> Rapid V2 -> V1; auto-detected by prepare_outfit_workflow).
-    outfit_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
+    outfit_workflow_path=_outfit_workflow_or_mask_debug(settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2 or settings.COMFYUI_OUTFIT_WORKFLOW_PATH),
     # Background step stays on V1 (whole-person composite-back); it is not a distortion
     # source and its preparer needs V1-only nodes absent from the crop-stitch tiers.
     background_workflow_path=settings.COMFYUI_OUTFIT_WORKFLOW_PATH,
@@ -326,6 +346,20 @@ pipeline_worker = PipelineBackgroundWorker(
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
     runpod_client=runpod_client
+)
+
+# WS-N nude-base worker: generates a text-to-image base from the char-gen graph
+# (COMFYUI_WORKFLOW_PATH) then ReActor-locks the ORIGINAL hero face onto it, both
+# steps in one `nude_base` job. Only engaged when settings.NUDE_BASE_T2I=True (the
+# default); the legacy edit-based path routes through pipeline_worker instead.
+nude_base_worker = NudeBaseWorker(
+    job_manager=job_manager,
+    comfyui_client=comfyui_client,
+    storage_service=storage_service,
+    workflow_path=settings.COMFYUI_WORKFLOW_PATH,
+    notification_service=notification_service,
+    supabase_storage_service=supabase_storage_service,
+    runpod_client=runpod_client,
 )
 
 # --- Character Batches subsystem (optional; requires Supabase DB) ---
@@ -382,7 +416,7 @@ if supabase_db.is_configured():
         # takes precedence when set; empty (default) falls through to that same
         # chain. Enabling _V2 / _2511 requires the worker image + volume models
         # staged first (see docs/RUNBOOK_masking_v2.md).
-        outfit_workflow_path=(
+        outfit_workflow_path=_outfit_workflow_or_mask_debug(
             settings.COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH
             or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_2511
             or settings.COMFYUI_OUTFIT_WORKFLOW_PATH_V2
@@ -549,6 +583,7 @@ async def lifespan(app: FastAPI):
         await background_edit_worker.start()
         await pipeline_worker.start()
         await video_worker.start()
+        await nude_base_worker.start()
         # await cleanup_worker.start()
         await image_cache_service.start_cleanup_worker()
         await keep_warm_service.start()
@@ -587,6 +622,7 @@ async def lifespan(app: FastAPI):
     await background_edit_worker.stop()
     await pipeline_worker.stop()
     await video_worker.stop()
+    await nude_base_worker.stop()
     for w in creation_workers:
         await w.stop()
     for w in batch_workers:

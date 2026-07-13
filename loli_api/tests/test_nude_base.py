@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import models.requests as _mr
 _mr.validate_source_image = lambda u: u  # type: ignore
 
+from config import settings
 from models.enums import JobStatus, NudityLevel, OutfitType, LocationType
 from models.nude_base import NudeBaseRead
 from models.requests import PersonaOptions
@@ -232,40 +233,47 @@ def _wire(job_manager, char_store, nude_store):
 # POST /nude-base
 # ---------------------------------------------------------------------------
 def test_post_builds_naked_high_nudity_outfit_job():
-    jm = _FakeJobManager()
-    nude = _FakeNudeStore(latest=None)  # nothing pending -> fresh generation
-    _wire(jm, _FakeCharStore(_character()), nude)
+    # LEGACY edit-based path (settings.NUDE_BASE_T2I=False). WS-N makes the t2i base
+    # + face lock the DEFAULT; this asserts the fallback path stays byte-identical.
+    prev = settings.NUDE_BASE_T2I
+    settings.NUDE_BASE_T2I = False
+    try:
+        jm = _FakeJobManager()
+        nude = _FakeNudeStore(latest=None)  # nothing pending -> fresh generation
+        _wire(jm, _FakeCharStore(_character()), nude)
 
-    resp = asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}))
+        resp = asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}))
 
-    # exactly one pipeline_edit job: NAKED at high nudity in the NEUTRAL "nude_base"
-    # prompt mode (a calm reference body, not the arousal-styled tier), pushed hard
-    # (outfit denoise) so the source garment is actually removed, plus a background
-    # step (via `prompt`) clearing the scene to a plain SOLO backdrop (background
-    # denoise + soloSubject) — all in one job.
-    assert len(jm.created) == 1
-    request, user_id, job_type = jm.created[0]
-    assert job_type == "pipeline_edit"
-    assert request.outfit == OutfitType.NAKED
-    assert request.nudityLevel == NudityLevel.HIGH
-    assert request.source_image == "https://x.supabase.co/hero.png"
-    assert request.sourceDressed is False  # NAKED is never a GARMENT_MODE_OUTFITS target
-    assert request.outfitDenoise == 0.92
-    assert request.outfitPromptMode == "nude_base"
-    assert request.prompt and "plain" in request.prompt and "grey studio" in request.prompt
-    # Solo backdrop (A5): clears the hero's crowd/props to an empty studio.
-    assert "only person in the frame" in request.prompt
-    assert request.backgroundDenoise == 0.95
-    assert request.soloSubject is True
+        # exactly one pipeline_edit job: NAKED at high nudity in the NEUTRAL "nude_base"
+        # prompt mode (a calm reference body, not the arousal-styled tier), pushed hard
+        # (outfit denoise) so the source garment is actually removed, plus a background
+        # step (via `prompt`) clearing the scene to a plain SOLO backdrop (background
+        # denoise + soloSubject) — all in one job.
+        assert len(jm.created) == 1
+        request, user_id, job_type = jm.created[0]
+        assert job_type == "pipeline_edit"
+        assert request.outfit == OutfitType.NAKED
+        assert request.nudityLevel == NudityLevel.HIGH
+        assert request.source_image == "https://x.supabase.co/hero.png"
+        assert request.sourceDressed is False  # NAKED is never a GARMENT_MODE_OUTFITS target
+        assert request.outfitDenoise == 0.92
+        assert request.outfitPromptMode == "nude_base"
+        assert request.prompt and "plain" in request.prompt and "grey studio" in request.prompt
+        # Solo backdrop (A5): clears the hero's crowd/props to an empty studio.
+        assert "only person in the frame" in request.prompt
+        assert request.backgroundDenoise == 0.95
+        assert request.soloSubject is True
 
-    # a pending base row was recorded against that job
-    assert nude.created == [{
-        "character_id": "c1", "job_id": "outjob_new",
-        "source_image_url": "https://x.supabase.co/hero.png",
-    }]
-    assert resp.status == "pending"
-    assert resp.jobId == "outjob_new"
-    assert resp.imageUrl is None
+        # a pending base row was recorded against that job
+        assert nude.created == [{
+            "character_id": "c1", "job_id": "outjob_new",
+            "source_image_url": "https://x.supabase.co/hero.png",
+        }]
+        assert resp.status == "pending"
+        assert resp.jobId == "outjob_new"
+        assert resp.imageUrl is None
+    finally:
+        settings.NUDE_BASE_T2I = prev
 
 
 def test_post_is_idempotent_while_a_job_is_live():

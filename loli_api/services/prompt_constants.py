@@ -61,10 +61,14 @@ IDENTITY_NEGATIVE = (
 # unconditional branch) — don't try to fix those steps' skin rendering via this
 # negative, it has no effect there; route it through positive prompt language
 # (EDIT_PHOTO_STYLE_SUFFIXES) instead.
+# WS-S skin-texture doctrine: extended with the anti-airbrush / anti-repaint terms
+# the "natural must look natural" work needs on the live-negative tiers. "plastic skin"
+# is intentionally NOT repeated here — it already ships in QUALITY_NEGATIVE, which
+# edit_negative() always prepends, so re-adding it would only duplicate the token.
 EDIT_SKIN_NEGATIVE = (
-    "airbrushed skin, waxy skin, over-smoothed skin, overprocessed, blurry skin texture, "
-    "oily skin, glossy skin, glistening skin, shiny skin, wet-look skin, oiled body, "
-    "greasy sheen"
+    "airbrushed skin, waxy skin, waxy smooth skin, over-smoothed skin, overprocessed, "
+    "blurry skin texture, blurred facial features, porcelain doll skin, oily skin, "
+    "glossy skin, glistening skin, shiny skin, wet-look skin, oiled body, greasy sheen"
 )
 
 # Positive identity-preservation clause appended to edit prompts. {what} is the
@@ -133,14 +137,20 @@ PHOTO_STYLE_TEMPLATES = {
         "YOUR PHOTO:\n"
         "{$@}"
     ),
-    # BYTE-IDENTICAL to the workflow JSON's baked-in node 125 value — preserves
-    # the legacy raw/candid phone-cam aesthetic as a selectable option.
+    # Legacy raw/candid phone-cam aesthetic as a selectable option. WS-S skin-texture
+    # doctrine: a texture-preservation line was added so even the "gritty phone-cam"
+    # look keeps real skin (no smoothing/airbrush) — so this is no longer byte-identical
+    # to the workflow JSON's baked-in node 125 value, but node 125 is overwritten at
+    # runtime by photo_style_template() anyway when a style is selected. The
+    # {$spicy-content-with} (erased by node 146) and {$@} substitution tokens are kept.
     "candid_phone": (
         "YOUR CONTEXT:\n"
         "Your photographs has android phone cam-quality.\n"
         "Your photographs exhibit {$spicy-content-with} surprising compositions, sharp "
         "complex backgrounds, natural lighting, and candid moments that feel immediate "
         "and authentic.\n"
+        "Your photographs show real skin with its natural fine texture and visible "
+        "pores.\n"
         "Your photographs are actual gritty candid photographic background.\n"
         "---\n"
         "YOUR PHOTO:\n"
@@ -256,53 +266,80 @@ def photo_style_template(style, time_of_day=None) -> str:
 #
 # The EDIT workflows (pose/outfit/background) have no node-125 wrapper — their
 # prompts are imperative instructions injected straight into a plain positive
-# field — so the finish is applied Python-side as a short appended sentence
-# rather than the generation-side "YOUR CONTEXT / YOUR PHOTO" template above.
-# Wording deliberately stays on lighting/grade/finish and NEVER touches
-# identity (face/hair/features remain governed by the identity clauses).
-# Keyed by PhotoStyleType values; "candid_phone" is empty so the legacy raw
-# look stays byte-identical.
+# field — so the finish is applied Python-side.
+#
+# WS-S: the clause now LEADS the positive (see apply_edit_photo_style) instead of
+# trailing it — at the tail it was the weakest binding and lost the fight to the
+# URP/NSFW LoRAs + the face repaint, so "natural" never actually read as natural.
+# Wording stays on light/exposure/contrast/color/DoF and NEVER touches identity
+# (face/hair/features remain governed by the identity clauses), and every non-empty
+# clause explicitly preserves real skin texture (no smoothing/airbrush/gloss — the
+# "natural must look natural" doctrine). Keyed by PhotoStyleType values;
+# "candid_phone" stays empty — the raw phone-cam opt-out adds no retouch clause, so
+# it can never smooth skin (fully doctrine-compliant by omission).
 # ---------------------------------------------------------------------------
 EDIT_PHOTO_STYLE_SUFFIXES = {
     "natural": (
-        "Keep the photo looking like a real, unstaged photo: accurate natural "
-        "exposure, true-to-life color, light that matches the scene's own light "
-        "sources, and realistic skin with visible fine texture and pores, skin "
-        "tone even and consistent with the face."
+        "Shoot this as a real, unstaged photo: accurate natural exposure, "
+        "true-to-life color, light that matches the scene's own light sources, "
+        "and realistic skin with visible fine texture and pores, skin tone even "
+        "and consistent with the face."
     ),
     "polished": (
-        "Render it as an ultra-realistic photograph, 85mm lens, crisp sharp focus, "
-        "true-to-life neutral color with accurate exposure, and natural skin with "
-        "clearly visible fine texture and pores, skin tone even and consistent "
-        "with the face; keep every fine detail of the clothing crisp and intact."
+        "Render this as an ultra-realistic retouched photograph: 85mm lens, crisp "
+        "sharp focus, a soft flattering key light, true-to-life neutral color with "
+        "accurate exposure, and natural skin with clearly visible fine texture and "
+        "pores, skin tone even and consistent with the face; keep every fine detail "
+        "of the clothing crisp and intact."
     ),
     "studio": (
-        "Give the photo a high-end portrait finish: controlled softbox lighting, "
-        "crisp focus, refined neutral color grading, clean lightly retouched skin "
-        "that keeps real texture."
+        "Give this a high-end studio portrait finish: controlled softbox lighting, "
+        "crisp focus, refined neutral color grading, and clean lightly retouched skin "
+        "that keeps its real fine texture, skin tone even and consistent with the face."
     ),
+    "candid_phone": "",
+}
+
+# Short (6-10 word) tail echo re-stating the finish at the END of a long edit
+# instruction, so the style still binds after the imperative body when the clause
+# leads. candid_phone stays empty (legacy raw look, no retouch echo). Doctrine:
+# texture-preserving, never smoothing.
+EDIT_PHOTO_STYLE_TAIL_ECHOES = {
+    "natural": "Keep it a real photo with natural skin texture.",
+    "polished": "Keep the retouched skin naturally textured with real pores.",
+    "studio": "Keep real skin texture under the studio light.",
     "candid_phone": "",
 }
 
 
 def apply_edit_photo_style(prompt: str, style=None) -> str:
     """
-    Append the photo-style clause for `style` to an edit-step prompt.
+    LEAD an edit-step prompt with the photo-style clause for `style`, keeping a
+    short tail echo so the finish binds at both ends of the positive.
+
+    WS-S: previously the clause was appended at the TAIL — the weakest binding
+    position — where it lost to the LoRAs + face repaint. It now PREPENDS the clause
+    (strongest position) and re-states a compact 6-10 word echo at the end. Node
+    injection still receives exactly one string, so every wrap call site
+    (pipeline/pose/outfit/background workers) is unchanged.
 
     Accepts a PhotoStyleType, its string value, or None. Returns the prompt
     unchanged for None, unknown styles, or styles with an empty clause
-    (candid_phone = legacy behavior).
+    (candid_phone = legacy raw behavior, adds no retouch language).
     """
     if not style:
         return prompt
     key = getattr(style, "value", style)
-    suffix = EDIT_PHOTO_STYLE_SUFFIXES.get(key)
-    if not suffix:
+    lead = EDIT_PHOTO_STYLE_SUFFIXES.get(key)
+    if not lead:
         return prompt
-    base = (prompt or "").rstrip()
-    if base and not base.endswith((".", "!", "?")):
-        base += "."
-    return f"{base} {suffix}" if base else suffix
+    body = (prompt or "").strip()
+    if not body:
+        return lead
+    if not body.endswith((".", "!", "?")):
+        body += "."
+    echo = EDIT_PHOTO_STYLE_TAIL_ECHOES.get(key, "")
+    return f"{lead} {body} {echo}".rstrip() if echo else f"{lead} {body}"
 
 
 def edit_negative(extra: Optional[str] = None, nudity_level=None) -> str:

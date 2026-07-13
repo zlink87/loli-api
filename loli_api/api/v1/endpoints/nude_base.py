@@ -1,8 +1,18 @@
 """
 Nude-base generation endpoints — ADMIN ONLY.
 
-A nude base is ONE identity-locked nude render per character, generated from the
-clothed hero photo via the pipeline edit machinery: an outfit step (outfit=NAKED,
+WS-N (default, settings.NUDE_BASE_T2I=True): the nude base is now GENERATED from
+scratch (text-to-image, like char-gen) from the character's locked identity + a
+forced NAKED clause + a neutral standing full-body pose + a plain studio backdrop
++ the NATURAL photo style, at a deterministic per-character seed, then ONE ReActor
+face pass swaps the ORIGINAL hero face onto it — see workers/nude_base_worker.py
+(_submit_t2i_nude_base below). This is pose-independent and mask-free, so an unusual
+hero crop can no longer make the model paint a second person into a mask (the old
+two-headed composite that poisoned every downstream batch photo). The LEGACY
+edit-based path below is preserved verbatim behind the flag (NUDE_BASE_T2I=False).
+
+LEGACY path (flag False): a nude base is generated from the clothed hero photo via
+the pipeline edit machinery: an outfit step (outfit=NAKED,
 prompt mode "nude_base" — a NEUTRAL anatomical reference body, not the arousal-
 styled NAKED scene tier — pushed hard, see _NUDE_BASE_OUTFIT_DENOISE /
 _NUDE_BASE_OUTFIT_PROMPT_MODE below) chained with a background step that clears the
@@ -54,9 +64,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth.admin import require_admin
 from api.v1.endpoints.pipeline import submit_pipeline_edit_job
+from config import settings
 from models.enums import JobStatus, NudityLevel, OutfitType
 from models.nude_base import NudeBaseRead, NudeBaseStatusResponse
-from models.requests import PipelineEditRequest
+from models.requests import PipelineEditRequest, NudeBaseGenerateRequest
+from workers.nude_base_worker import stable_nude_base_seed
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +196,97 @@ async def _finalize_if_ready(nb: NudeBaseRead) -> NudeBaseRead:
     return nb  # queued / running — still pending
 
 
+async def _submit_t2i_nude_base(character, character_id: str, nude_base_store, user_id: str):
+    """
+    NEW default path (settings.NUDE_BASE_T2I=True): a deterministic text-to-image
+    base render + a single ReActor face lock from the ORIGINAL hero, run as ONE
+    `nude_base` job (workers/nude_base_worker.py chains the two GPU steps). The seed
+    is a stable zlib.crc32 of the character id, so a regenerate reproduces the exact
+    same base body geometry. Records a `pending` base row against the created job.
+    """
+    if get_job_manager().is_queue_full(job_type="nude_base"):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Nude base generation queue is full. Please try again later.",
+        )
+    seed = stable_nude_base_seed(character_id)
+    request = NudeBaseGenerateRequest(
+        persona=character.persona,
+        hero_image_url=character.hero_image_url,
+        character_id=character_id,
+        seed=seed,
+    )
+    job = await get_job_manager().create_job(request, user_id, job_type="nude_base")
+    nb = await nude_base_store.create(
+        character_id, job_id=job.job_id, source_image_url=character.hero_image_url
+    )
+    logger.info(
+        f"[NUDE-BASE] character {character_id} -> job {job.job_id} "
+        f"(t2i base + ReActor face lock, seed={seed})"
+    )
+    return nb
+
+
+async def submit_nude_base_for_new_character(character, user_id: str):
+    """
+    Part 3 — best-effort auto nude-base submission on character creation.
+
+    Reuses the EXACT text-to-image submit path as POST /characters/{id}/nude-base
+    (``_submit_t2i_nude_base``): the same ``nude_base`` job, the same deterministic
+    per-character seed, the same pending-row bookkeeping — no duplicated logic.
+
+    Returns the pending ``NudeBaseRead`` on submit, or None when the feature is not
+    applicable: ``settings.NUDE_BASE_T2I`` is off (only the t2i path auto-runs; the
+    legacy edit path is never auto-triggered), the nude-base job manager / store are
+    not configured, or the character has no hero image. Submission errors (e.g. a full
+    queue -> 429) PROPAGATE to the caller; the character-create flow runs this
+    best-effort and swallows them so creation never fails.
+    """
+    if not settings.NUDE_BASE_T2I:
+        return None
+    if _job_manager is None or _nude_base_store is None:
+        return None
+    if not getattr(character, "hero_image_url", None):
+        return None
+    return await _submit_t2i_nude_base(character, character.id, _nude_base_store, user_id)
+
+
+async def _submit_legacy_nude_base(character, character_id: str, nude_base_store, user_id: str):
+    """
+    LEGACY path (settings.NUDE_BASE_T2I=False): edit-based undressing on the hero —
+    outfit=NAKED at high nudity, pushed hard (denoise + "nude_base" prompt mode) so
+    the source garment is actually removed rather than blended over, PLUS a background
+    step (via `prompt`) in the same job so the base isn't stuck in the hero's original
+    scene. Identity lock is automatic (the pipeline worker always stages the YuNet head
+    mask + composite-back on both steps). sourceDressed is left at its default (False):
+    NAKED is never a GARMENT_MODE_OUTFITS target, so it always uses the whole-body mask.
+
+    Preserved byte-for-byte behind the flag as a rollback fallback for the t2i path.
+    """
+    request = PipelineEditRequest(
+        source_image=character.hero_image_url,
+        outfit=OutfitType.NAKED,
+        nudityLevel=_NUDE_BASE_NUDITY,
+        outfitDenoise=_NUDE_BASE_OUTFIT_DENOISE,
+        outfitPromptMode=_NUDE_BASE_OUTFIT_PROMPT_MODE,
+        prompt=_NUDE_BASE_BACKGROUND_PROMPT,
+        backgroundDenoise=_NUDE_BASE_BACKGROUND_DENOISE,
+        soloSubject=True,
+    )
+    job = await submit_pipeline_edit_job(request, user_id)
+
+    nb = await nude_base_store.create(
+        character_id, job_id=job.job_id, source_image_url=character.hero_image_url
+    )
+    logger.info(
+        f"[NUDE-BASE] character {character_id} -> job {job.job_id} "
+        f"(LEGACY edit-based: outfit=naked, nudity=high, denoise={_NUDE_BASE_OUTFIT_DENOISE}, "
+        f"mode={_NUDE_BASE_OUTFIT_PROMPT_MODE}, background=plain solo "
+        f"denoise={_NUDE_BASE_BACKGROUND_DENOISE})"
+    )
+    return nb
+
+
 @router.post(
     "/{character_id}/nude-base",
     response_model=NudeBaseStatusResponse,
@@ -214,36 +317,18 @@ async def generate_nude_base(
         if job is not None and job.status not in (JobStatus.SUCCEEDED, JobStatus.FAILED):
             return _status_response(existing)
 
-    # Pipeline job: outfit=NAKED at high nudity, pushed hard (denoise + replace-mode)
-    # so the source garment is actually removed rather than blended over, PLUS a
-    # background step (via `prompt`) in the same job so the base isn't stuck in the
-    # hero's original scene. Identity lock is automatic (the pipeline worker always
-    # stages the YuNet head mask + composite-back on both steps) — nothing here can
-    # touch the head/face regardless of denoise. sourceDressed is left at its default
-    # (False): NAKED is never a GARMENT_MODE_OUTFITS target, so it always uses the
-    # whole-body mask either way — sourceDressed=True would be a no-op here, not a
-    # correctness issue, but leaving it unset keeps the request's meaning honest.
-    request = PipelineEditRequest(
-        source_image=character.hero_image_url,
-        outfit=OutfitType.NAKED,
-        nudityLevel=_NUDE_BASE_NUDITY,
-        outfitDenoise=_NUDE_BASE_OUTFIT_DENOISE,
-        outfitPromptMode=_NUDE_BASE_OUTFIT_PROMPT_MODE,
-        prompt=_NUDE_BASE_BACKGROUND_PROMPT,
-        backgroundDenoise=_NUDE_BASE_BACKGROUND_DENOISE,
-        soloSubject=True,
-    )
-    job = await submit_pipeline_edit_job(request, user_id)
-
-    nb = await nude_base_store.create(
-        character_id, job_id=job.job_id, source_image_url=character.hero_image_url
-    )
-    logger.info(
-        f"[NUDE-BASE] character {character_id} -> job {job.job_id} "
-        f"(outfit=naked, nudity=high, denoise={_NUDE_BASE_OUTFIT_DENOISE}, "
-        f"mode={_NUDE_BASE_OUTFIT_PROMPT_MODE}, background=plain solo "
-        f"denoise={_NUDE_BASE_BACKGROUND_DENOISE})"
-    )
+    # Two generation paths, selected by settings.NUDE_BASE_T2I:
+    #   * NEW (default): a text-to-image base render + ReActor face lock, run as ONE
+    #     `nude_base` job (workers/nude_base_worker.py). Pose-independent and mask-
+    #     free, so an unusual hero crop can no longer produce the old two-headed
+    #     edit-based composite that poisoned every downstream batch photo.
+    #   * LEGACY (flag False): the edit-based undressing on the hero (outfit step in
+    #     "nude_base" prompt mode + background step, via the pipeline engine) — UNCHANGED.
+    # Both record a `pending` base row against the created job; GET reconciles it on read.
+    if settings.NUDE_BASE_T2I:
+        nb = await _submit_t2i_nude_base(character, character_id, nude_base_store, user_id)
+    else:
+        nb = await _submit_legacy_nude_base(character, character_id, nude_base_store, user_id)
     return _status_response(nb)
 
 

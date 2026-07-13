@@ -111,6 +111,15 @@
       "title": "Load Image"
     }
   },
+  "210": {
+    "inputs": {
+      "image": "hero_face.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Face reference (hero) - ReActor source"
+    }
+  },
   "114": {
     "inputs": {
       "prompt": "Make the person in image 1 do the exact same pose of the person in image 2. Changing the style and background of the image of the person in image 1 is not permitted, so don't do it. The new pose should be pixel accurate to the pose we are trying to copy. The position of the arms and head and legs should be the same as the pose we are trying to copy. Change the field of view and angle to match exactly image 2. Head tilt and eye gaze pose should match the person in image 2. Keep the original apperance, body proportion, leg proportion, skin type and outfit, facial features, background scene from image 1.",
@@ -188,7 +197,7 @@
       "source_faces_index": "0",
       "console_log_level": 1,
       "source_image": [
-        "109",
+        "210",
         0
       ]
     },

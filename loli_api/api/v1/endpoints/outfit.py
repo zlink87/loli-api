@@ -20,7 +20,7 @@ from models.enums import OutfitType, AccessoryType, JobStatus, NudityLevel
 from models.requests import OutfitEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
-from services.character_anchors import populate_identity_anchors
+from services.character_anchors import populate_identity_anchors, never_wears_warnings
 from services import prompt_constants as pc
 from services import scene_vocab as sv
 from services.outfit_vocab import (
@@ -44,6 +44,10 @@ _outfit_workflow_template: Optional[dict] = None
 # Used only to auto-populate identityAnchors from OutfitEditRequest.characterId;
 # None (store not configured) degrades gracefully — see populate_identity_anchors.
 _character_store = None
+# Optional (Supabase-gated) trait-profile store, wired in router.configure_services.
+# Used only to surface the never-wears advisory (WS-T) in the edit response; None
+# (store not configured) degrades gracefully — see never_wears_warnings.
+_trait_profile_store = None
 
 
 
@@ -68,6 +72,12 @@ def set_character_store(store) -> None:
     """Set the (optional) character store used to resolve identityAnchors."""
     global _character_store
     _character_store = store
+
+
+def set_trait_profile_store(store) -> None:
+    """Set the (optional) trait-profile store used for the never-wears advisory (WS-T)."""
+    global _trait_profile_store
+    _trait_profile_store = store
 
 
 def set_outfit_workflow_path(workflow_path: str) -> None:
@@ -206,6 +216,31 @@ _DETAIL_DOMINANT_EXPOSURE: Dict[NudityLevel, str] = {
     NudityLevel.REVEALING: "worn barely closed, breasts nearly spilling free",
     NudityLevel.HIGH: "barely covering anything, breasts and intimate areas fully exposed",
 }
+
+
+# Outfit enums that render as a SINGLE one-piece garment (a dress/gown, or a one-piece
+# cultural garment). Derived from the enum VALUE: every *_dress / *_gown type, PLUS the
+# one-piece cultural garments (kimono/sari/cheongsam/hanbok) whose names don't carry
+# "dress"/"gown". Deliberately EXCLUDES separates that read as a top+bottom
+# (sequin_top_skirt, pencil_skirt_set, business/blazer suits) and the one-piece-but-not-
+# dress-shaped types (jumpsuit, lace_bodysuit, dirndl's bodice+skirt+apron). Gates
+# ONE_PIECE_GARMENT_CLAUSE in build_prompt so the edit model renders a continuous garment
+# instead of splitting a flowing/wrap dress into a top and skirt (the Floral Maxi Dress
+# separates bug). Enum-derived so a new dress/gown enum auto-joins with no edit here.
+_ONE_PIECE_CULTURAL_OUTFITS: set = {
+    OutfitType.KIMONO,
+    OutfitType.SARI,
+    OutfitType.CHEONGSAM,
+    OutfitType.HANBOK,
+}
+ONE_PIECE_GARMENT_OUTFITS: frozenset = frozenset(
+    o for o in OutfitType if "dress" in o.value or "gown" in o.value
+) | _ONE_PIECE_CULTURAL_OUTFITS
+
+# Enum-gated constant clause (no free text) appended on the dressed branch of build_prompt
+# for ONE_PIECE_GARMENT_OUTFITS. Counters the "top + skirt" split the edit model falls into
+# on flowing/wrap one-piece dresses.
+ONE_PIECE_GARMENT_CLAUSE = "the outfit is a single one-piece garment, not a top and skirt"
 
 
 def build_prompt(
@@ -377,6 +412,12 @@ def build_prompt(
         ]
         if anchors_clause:
             prompt_parts.append(anchors_clause)
+        # One-piece garment guard (enum-gated, constant clause): dress/gown/one-piece
+        # cultural garments must render as a single continuous garment, not a top +
+        # skirt. Independent of prompt_mode / detail_dominant — it constrains the
+        # garment's construction, not its description.
+        if outfit in ONE_PIECE_GARMENT_OUTFITS:
+            prompt_parts.append(ONE_PIECE_GARMENT_CLAUSE)
         prompt_parts.append("only change the clothing, nothing else")
 
     if accessories:
@@ -742,16 +783,23 @@ async def edit_outfit(
         # Queue-cap check + webhook mirror + enqueue (shared with internal callers).
         job = await submit_outfit_edit_job(request, user_id)
 
+        # WS-T advisory (NON-BLOCKING): surface a warning when the requested outfit is
+        # in this character's never-wears list. The edit is already enqueued above —
+        # the admin choice wins; this only informs the panel. Best-effort; never raises.
+        warnings = await never_wears_warnings(_trait_profile_store, request)
+
         logger.info(
             f"Created outfit edit job {job.job_id} for user {user_id} "
             f"(outfit: {request.outfit.value}, "
             f"accessories: {[a.value for a in request.accessories] if request.accessories else []})"
+            f"{' [never-wears advisory]' if warnings else ''}"
         )
 
         return JobCreateResponse(
             jobId=job.job_id,
             status=JobStatus.QUEUED,
-            reviewRequired=False
+            reviewRequired=False,
+            traitWarnings=warnings,
         )
 
     except HTTPException:

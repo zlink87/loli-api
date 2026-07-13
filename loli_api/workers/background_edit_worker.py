@@ -74,9 +74,14 @@ class BackgroundEditWorker(BaseEditWorker):
                 # Trait-aware edit: identityAnchors (skin tone/hair/build) is populated
                 # in the endpoint from characterId; keeps skin tone correct where the
                 # background edit relights the subject. None leaves the prompt unchanged.
+                # WS-T: interiorStyle/colorPalette (populated for a HOME-like location)
+                # recompose the scene as her styled room; None -> raw prompt (unchanged).
                 build_background_prompt(
                     request.prompt,
                     identity_anchors=getattr(request, "identityAnchors", None),
+                    location=getattr(request, "location", None),
+                    interior_style=getattr(request, "interiorStyle", None),
+                    color_palette=getattr(request, "colorPalette", None),
                 ),
                 PhotoStyleType.POLISHED,
             )

@@ -23,6 +23,15 @@ class JobCreateResponse(BaseModel):
         default=True,
         description="Whether review is required before saving"
     )
+    traitWarnings: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional non-blocking advisories about this edit vs the character's trait "
+            "profile (WS-T). Currently: an outfit edit whose requested outfit is in the "
+            "character's never-wears list returns one warning here. None/absent when there "
+            "is nothing to advise; the panel MAY surface it — the job is queued regardless."
+        ),
+    )
 
     class Config:
         json_schema_extra = {

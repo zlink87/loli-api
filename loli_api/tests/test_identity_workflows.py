@@ -262,8 +262,9 @@ def test_head_mask_service():
 def test_pose_template_face_swaps_before_save():
     wf = _load("edit_pose_action.json")
     assert wf["200"]["class_type"] == "ReActorFaceSwap"
-    # Hero face (node 109) swapped onto the reposed body (node 8 VAEDecode).
-    assert wf["200"]["inputs"]["source_image"] == ["109", 0]
+    # WS-S: hero face DONOR is now the dedicated node 210 (the sharp original hero),
+    # swapped onto the reposed body (node 8 VAEDecode); was node 109 (edited source).
+    assert wf["200"]["inputs"]["source_image"] == ["210", 0]
     assert wf["200"]["inputs"]["input_image"] == ["8", 0]
     # The SAVED image is the face-locked one, not the raw repose.
     assert wf["164"]["class_type"] == "SaveImage"

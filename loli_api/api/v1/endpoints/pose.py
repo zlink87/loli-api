@@ -5,7 +5,7 @@ POST /v1/edit/pose - Create async pose edit job using ComfyUI workflow.
 import copy
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -125,9 +125,14 @@ def build_pose_prompt(
             "… full of passersby") can't paint extra people into the solo frame;
             if that leaves nothing meaningful the clause is skipped. None = unchanged
             base prompt (interactive /v1/edit/pose never sets this).
-        expression: Optional facial expression/mood (e.g. SceneSpec.expression)
-            appended as ", {expression} expression". Expression/mood ONLY — never
-            facial features. Has no effect on non-posed items: the face there is
+        expression: Optional facial expression/mood or gaze state (e.g.
+            SceneSpec.expression) rendered as ", her expression: {expression}".
+            WS-S: the earlier ", {expression} expression" template appended the literal
+            word "expression", which read fine for a bare adjective ("serious") but
+            turned the multi-word candid pool states ("focused on what she's doing",
+            "soft smile at the camera") into junk ("… doing expression"); the
+            "her expression:" lead-in renders every state cleanly. Expression/mood
+            ONLY — never facial features. Has no effect on non-posed items: the face there is
             byte-locked by the composite-back in prepare_outfit_workflow, so
             there is nothing for a prompted expression to act on outside a pose
             step. None = unchanged base prompt.
@@ -136,8 +141,10 @@ def build_pose_prompt(
             values like "moody_dim"/"candlelit"/"neon"). Phrase-ified here via
             services.scene_vocab.lighting_phrase() — the SAME LIGHTING_PHRASES
             map scene_mapper.build_scene_background_text uses for the
-            background step, so tone matches — and appended as
-            ", in {lighting phrase}". This is the primary fix for batch photos
+            background step, so tone matches. WS-S de-bloat (5b): lighting and
+            time_of_day now merge into ONE trailing clause ("{time} in {lighting}",
+            e.g. "late at night in moody dim low-key lighting") instead of two
+            separate ", in {lighting}" / ", {time}" clauses. This is the primary fix for batch photos
             always rendering bright: the pose step is the only pipeline step
             that fully re-diffuses the frame (denoise=1.0), so it is the one
             place a lighting clause can actually re-light the person instead
@@ -147,10 +154,10 @@ def build_pose_prompt(
         time_of_day: Optional raw time-of-day enum-VALUE string (e.g.
             PipelineEditRequest.timeOfDay, sourced from SceneSpec.time_of_day —
             values like "evening"/"night"/"golden_hour"). Phrase-ified via
-            services.scene_vocab.time_of_day_phrase() and appended as
-            ", {time_of_day phrase}" (the phrase already carries its own
-            preposition, e.g. "at sunset" / "late at night"). Same
-            graceful-skip behavior as lighting.
+            services.scene_vocab.time_of_day_phrase() and merged with lighting
+            into the single trailing clause described above (the phrase already
+            carries its own preposition, e.g. "at sunset" / "late at night").
+            Same graceful-skip behavior as lighting.
         outfit_text: Optional garment/state-of-dress text the reposed frame must
             preserve — the outfit continuity fix. Produced by
             api.v1.endpoints.outfit.outfit_continuity_text() (the outfit_detail, or
@@ -189,11 +196,13 @@ def build_pose_prompt(
             pose_identity_clause() ("keep the original ... hair style, hair color,
             eye color ..."), which binds weakly on this distilled model — hair
             structure/color and body proportions drift photo-to-photo as a result.
-            When set, appended right after that clause as "She has {anchors}; keep
-            these and her body proportions and build exactly as in image 1,
-            completely unchanged." None/empty (interactive /v1/edit/pose and any
-            caller without a character profile) appends nothing — unchanged
-            behavior.
+            When set, rendered as "She has {anchors}; keep these and her body
+            proportions and build exactly as in image 1, completely unchanged."
+            WS-S de-bloat (5a): when anchors are present they REPLACE the generic
+            pose_identity_clause() sentence (the anchors carry the same content, but
+            concretely), rather than stacking on top of it. None/empty (interactive
+            /v1/edit/pose and any caller without a character profile) keeps the
+            generic clause — unchanged behavior.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
@@ -205,23 +214,28 @@ def build_pose_prompt(
     pose_detail_clean = sv.strip_companions(pose_detail)
     if pose_detail_clean and pose_detail_clean.strip():
         desc = pose_detail_clean.strip()
-    clause = pc.pose_identity_clause()
-    # Keep-the-background instruction REPLACES the former "Adapt the background and
-    # environment to suit the pose naturally." — that sentence was the licence the
+    # Keep-the-background instruction (below) REPLACES the former "Adapt the background
+    # and environment to suit the pose naturally." — that sentence was the licence the
     # full re-diffusion used to re-invent the location (bedroom -> road).
     prompt = (
         f"Make the person in image 1 do the exact same pose of the person in image 2. "
-        f"The target pose is: {desc}. {clause}. "
+        f"The target pose is: {desc}. "
     )
-    # D1: concrete per-character identity anchors, placed immediately adjacent to
-    # the generic pose_identity_clause() above — a real hair color / eye color /
-    # build binds far better on this distilled model than the clause's generic
-    # "keep the original ... hair style, hair color ..." instruction alone.
-    if identity_anchors and identity_anchors.strip():
+    # WS-S de-bloat (5a): concrete per-character anchors (skin/hair/eyes/build) bind
+    # far better than the generic pose_identity_clause() on this distilled model, and
+    # they carry the SAME content specifically — so when present they REPLACE that
+    # generic sentence instead of stacking on top of it (~155 chars saved). The face
+    # is locked separately by the ReActor pass; outfit continuity is carried by
+    # outfit_text below. No anchors (interactive /v1/edit/pose, or an un-profiled
+    # character) -> keep the generic clause so identity is still anchored.
+    anchors = (identity_anchors or "").strip()
+    if anchors:
         prompt += (
-            f"She has {identity_anchors.strip()}; keep these and her body "
-            f"proportions and build exactly as in image 1, completely unchanged. "
+            f"She has {anchors}; keep these and her body proportions and build "
+            f"exactly as in image 1, completely unchanged. "
         )
+    else:
+        prompt += f"{pc.pose_identity_clause()}. "
     prompt += (
         f"The new pose should match image 2 accurately. "
         f"Keep the same background, location and environment as image 1, adjusting "
@@ -245,25 +259,34 @@ def build_pose_prompt(
                 f" In image 1 she is wearing {garment}; keep her state of dress and "
                 f"every garment exactly as in image 1, fully intact."
             )
-    # Solo constraint — ALWAYS appended (even for bare interactive callers): the full
-    # re-diffusion otherwise duplicates the subject or paints companions in.
-    prompt += (
-        " She is completely alone in the frame — exactly one person, no other people."
-    )
+    # Solo constraint (ALWAYS present) + trailing scene descriptors, composed as ONE
+    # clean sentence. WS-S junk fix (4): the expression renders as "her expression:
+    # {state}" — the old ", {state} expression" tail turned multi-word candid states
+    # like "focused on what she's doing" into junk ("… doing expression"). WS-S
+    # de-bloat (5b): lighting + time-of-day merge into a single clause. Composing the
+    # tail as part of the solo sentence also drops the old "…no other people., while…"
+    # period-then-comma artifact. Every tail bit is non-empty (guarded), so no ", ,".
+    solo = "She is completely alone in the frame — exactly one person, no other people"
+    tail: List[str] = []
     # Defensive companion scrub before the activity clause folds in (a stray
-    # "… with a partner" would otherwise re-add the extra person the solo sentence
-    # just forbade). None/empty result -> skip the clause entirely.
+    # "… with a partner" would otherwise re-add the extra person the solo forbids).
     activity_clean = sv.strip_companions(activity)
     if activity_clean and activity_clean.strip():
-        prompt += f", while {activity_clean.strip()}"
+        tail.append(f"while {activity_clean.strip()}")
     if expression and expression.strip():
-        prompt += f", {expression.strip()} expression"
+        tail.append(f"her expression: {expression.strip()}")
     lighting_text = sv.lighting_phrase(lighting)
-    if lighting_text:
-        prompt += f", in {lighting_text}"
     time_of_day_text = sv.time_of_day_phrase(time_of_day)
-    if time_of_day_text:
-        prompt += f", {time_of_day_text}"
+    if lighting_text and time_of_day_text:
+        tail.append(f"{time_of_day_text} in {lighting_text}")
+    elif lighting_text:
+        tail.append(f"in {lighting_text}")
+    elif time_of_day_text:
+        tail.append(time_of_day_text)
+    if tail:
+        prompt += f" {solo}, " + ", ".join(tail) + "."
+    else:
+        prompt += f" {solo}."
     return prompt
 
 
@@ -328,6 +351,7 @@ def prepare_pose_workflow(
     reactor_codeformer_weight: float = -1.0,
     negative_prompt: Optional[str] = None,
     nudity_level: Optional[NudityLevel] = None,
+    face_ref_image: Optional[str] = None,
 ) -> dict:
     """
     Prepare the pose workflow with injected parameters.
@@ -335,11 +359,14 @@ def prepare_pose_workflow(
     Workflow nodes:
         109  LoadImage        -> inputs.image  (source character image = image1)
         170  LoadImage        -> inputs.image  (reference pose image = image2)
+        210  LoadImage        -> inputs.image  (WS-S ReActor face donor = the sharp
+                                  original hero; node 200.source_image reads it)
         114  CLIPTextEncode (or similar) -> inputs.prompt  (positive text prompt)
         115  TextEncodeQwenImageEditPlus -> inputs.prompt  (LIVE negative; 2511 tier ONLY)
         3    KSampler         -> inputs.seed
         8    VAEDecode        -> the PRE-ReActor frame (raw pose regen)
-        200  ReActorFaceSwap  -> inputs.face_restore_visibility / codeformer_weight
+        200  ReActorFaceSwap  -> inputs.face_restore_visibility / codeformer_weight;
+                                  source_image (face donor) rewired to node 210
         164  SaveImage        -> the POST-ReActor final output (images=["200",0])
         300  SaveImage        -> WS4.1 debug-only node, injected when
                                   debug_save_pre_reactor=True (images=["8",0])
@@ -378,6 +405,15 @@ def prepare_pose_workflow(
         nudity_level: D3, 2511-tier ONLY. NudityLevel (or None = 'low') selecting the
             nudity-suppression block inside ``pc.edit_negative(...)`` for node 115.
             Ignored on the v1 graph.
+        face_ref_image: WS-S. ComfyUI filename of the DEDICATED face donor for the
+            ReActor pass (node 200.source_image reads node 210). This is the sharp
+            ORIGINAL hero photo, threaded so the face is swapped from a clean source
+            instead of the already-multiply-edited pipeline intermediate (node 109),
+            which inswapper's 128px paste otherwise compounds into a blurred/repainted
+            face across every batch item. None (interactive /v1/edit/pose, or any
+            caller that doesn't supply one) -> node 210 falls back to ``source_image``,
+            i.e. byte-identical to the pre-WS-S behavior (ReActor donor == the source).
+            No-op when the template has no node 210.
 
     Returns:
         Prepared workflow dict
@@ -393,6 +429,17 @@ def prepare_pose_workflow(
     if "170" in wf:
         wf["170"]["inputs"]["image"] = reference_image
         logger.debug(f"Set node 170 reference image: {reference_image}")
+
+    # Node 210 (WS-S): dedicated ReActor face donor. node 200.source_image is rewired
+    # in the graph JSON to read node 210 instead of node 109, so the hero's face is
+    # swapped from a CLEAN source. Falls back to the step source image when no face ref
+    # is supplied (interactive callers), reproducing the pre-WS-S donor==source
+    # behavior exactly. Guarded on node presence so templates without 210 (test
+    # stand-ins) degrade to a no-op.
+    if "210" in wf:
+        donor = face_ref_image or source_image
+        wf["210"]["inputs"]["image"] = donor
+        logger.debug(f"Set node 210 ReActor face donor: {donor}")
 
     # Node 114: Text prompt
     if prompt is not None and "114" in wf:

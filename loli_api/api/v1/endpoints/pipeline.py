@@ -13,7 +13,7 @@ from models.enums import JobStatus
 from models.requests import PipelineEditRequest
 from models.responses import JobCreateResponse
 from services import pose_assets
-from services.character_anchors import populate_identity_anchors
+from services.character_anchors import populate_identity_anchors, populate_home_style
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,10 @@ _notification_service: Optional[NotificationService] = None
 # Used only to auto-populate identityAnchors from PipelineEditRequest.characterId;
 # None (store not configured) degrades gracefully — see populate_identity_anchors.
 _character_store = None
+# Optional (Supabase-gated) trait-profile store, wired in router.configure_services.
+# Used only to auto-populate interiorStyle/colorPalette from characterId (WS-T home
+# scenery); None (store not configured) degrades gracefully — see populate_home_style.
+_trait_profile_store = None
 
 
 def set_job_manager(job_manager) -> None:
@@ -45,6 +49,12 @@ def set_character_store(store) -> None:
     """Set the (optional) character store used to resolve identityAnchors."""
     global _character_store
     _character_store = store
+
+
+def set_trait_profile_store(store) -> None:
+    """Set the (optional) trait-profile store used to resolve home style (WS-T)."""
+    global _trait_profile_store
+    _trait_profile_store = store
 
 
 def get_job_manager():
@@ -96,6 +106,11 @@ async def submit_pipeline_edit_job(request: PipelineEditRequest, user_id: str):
     # Batch items already arrive with identityAnchors set by scene_mapper, so this
     # is a no-op for them. pipeline_worker consumes request.identityAnchors.
     await populate_identity_anchors(_character_store, request)
+    # WS-T: for a HOME-like location, fill interiorStyle/colorPalette from her trait
+    # profile so a standalone /v1/edit home edit renders her styled room (best-effort).
+    # Batch items go through job_manager.create_job directly (not this path) and carry
+    # no characterId, so this never touches them.
+    await populate_home_style(_trait_profile_store, request)
 
     notification_service = get_notification_service()
     if notification_service:

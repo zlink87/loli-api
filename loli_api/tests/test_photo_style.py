@@ -18,6 +18,7 @@ from models.enums import PoseType, OutfitType, PhotoStyleType
 from models.requests import PipelineEditRequest
 from services.prompt_constants import (
     EDIT_PHOTO_STYLE_SUFFIXES,
+    EDIT_PHOTO_STYLE_TAIL_ECHOES,
     PHOTO_STYLE_TEMPLATES,
     apply_edit_photo_style,
 )
@@ -49,26 +50,58 @@ def test_apply_candid_phone_is_legacy_noop():
     assert apply_edit_photo_style(prompt, "candid_phone") == prompt
 
 
-def test_apply_polished_appends_clause():
+def test_apply_polished_leads_with_clause():
+    # WS-S: the style clause now LEADS the positive (strongest binding), with a short
+    # tail echo — it used to trail (weakest binding) where it lost the fidelity fight.
     prompt = "Change the person's clothing to: red evening gown"
     out = apply_edit_photo_style(prompt, PhotoStyleType.POLISHED)
-    assert out.startswith(prompt)
-    assert EDIT_PHOTO_STYLE_SUFFIXES["polished"] in out
-    # sentence-terminated join
+    assert out.startswith(EDIT_PHOTO_STYLE_SUFFIXES["polished"])  # clause LEADS
+    assert prompt in out                                         # body preserved
+    # sentence-terminated body before the echo
     assert f"{prompt}. " in out
+    # short tail echo re-states the finish at the end
+    assert out.endswith(EDIT_PHOTO_STYLE_TAIL_ECHOES["polished"])
 
 
 def test_suffixes_never_touch_identity():
     # "face" is intentionally allowed ONLY inside the "skin tone even and
-    # consistent with the face" clause (natural/polished) — it anchors body-skin
-    # tone to the (separately identity-locked) face rather than altering it.
-    # Strip that one known-safe occurrence before the sweep so the guard still
+    # consistent with the face" clause (natural/polished/studio) — it anchors
+    # body-skin tone to the (separately identity-locked) face rather than altering
+    # it. Strip that one known-safe occurrence before the sweep so the guard still
     # catches any OTHER accidental identity language.
     safe_clause = "skin tone even and consistent with the face"
     for suffix in EDIT_PHOTO_STYLE_SUFFIXES.values():
         text = suffix.lower().replace(safe_clause, "")
         for banned in ("face", "hair", "eye", "identity", "features"):
             assert banned not in text, f"'{banned}' in style clause: {suffix}"
+
+
+def test_style_clauses_preserve_texture_and_ban_gloss_blur_vocab():
+    # WS-S skin-texture doctrine: every non-empty style clause in BOTH maps (edit
+    # suffixes + generation templates) explicitly preserves real skin texture and
+    # carries NONE of the gloss/blur/airbrush vocabulary. candid_phone's EDIT suffix
+    # is "" (the raw opt-out — no retouch clause, so it can't smooth skin), skipped.
+    banned = (
+        "flawless skin", "porcelain", "silky smooth", "airbrush",
+        "soft focus", "dreamy glow", "glamour skin",
+    )
+    for label, m in (("edit", EDIT_PHOTO_STYLE_SUFFIXES), ("generation", PHOTO_STYLE_TEMPLATES)):
+        for style, clause in m.items():
+            if not clause:
+                continue
+            low = clause.lower()
+            assert "texture" in low, f"{label}/{style} missing texture-preservation wording"
+            for b in banned:
+                assert b not in low, f"{label}/{style} contains banned gloss/blur vocab: {b!r}"
+
+
+def test_polished_studio_distinct_from_natural_via_light_identity():
+    # polished/studio express their finish via LIGHT identity words and must differ
+    # from the natural (as-shot) baseline.
+    assert "key light" in EDIT_PHOTO_STYLE_SUFFIXES["polished"].lower()
+    assert "softbox" in EDIT_PHOTO_STYLE_SUFFIXES["studio"].lower()
+    for style in ("polished", "studio"):
+        assert EDIT_PHOTO_STYLE_SUFFIXES[style] != EDIT_PHOTO_STYLE_SUFFIXES["natural"]
 
 
 # --- worker wiring ---------------------------------------------------------

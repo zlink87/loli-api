@@ -122,7 +122,12 @@ def test_pose_2511_reactor_tail_matches_v1_values():
     r = g["200"]["inputs"]
     # Copied verbatim from edit_pose_action.json's node 200.
     assert r["input_image"] == ["8", 0]        # ReActor consumes the raw pose regen
-    assert r["source_image"] == ["109", 0]     # hero face from the source
+    # WS-S: the face DONOR is now the DEDICATED node 210 (the sharp original hero),
+    # not the multiply-edited pipeline source (node 109) — inswapper's 128px paste
+    # off an already-edited face is what blurred/repainted faces across a batch.
+    assert r["source_image"] == ["210", 0]
+    assert g["210"]["class_type"] == "LoadImage"
+    # Graph baselines unchanged (the gentler natural/candid dial rides the request).
     assert r["face_restore_visibility"] == 0.8
     assert r["codeformer_weight"] == 0.25
     assert g["164"]["inputs"]["images"] == ["200", 0]  # save the face-locked frame

@@ -26,6 +26,16 @@ _NUDITY_LADDER = [
     NudityLevel.HIGH,
 ]
 
+# WS-S: gentler pose-step ReActor defaults for the "as-shot" styles (natural /
+# candid_phone) when the admin hasn't set an explicit value — less face repaint /
+# airbrush on top of the now-sharp, hero-sourced face swap (node 210). Lower
+# codeformer_weight = higher fidelity to the swapped face, less hallucinated repaint;
+# lower restore_visibility = less of the codeformer restoration blended over the raw
+# swap. Explicit controls always win; every other style keeps the settings default.
+_SOFT_PHOTO_STYLES = ("natural", "candid_phone")
+_SOFT_STYLE_CODEFORMER_WEIGHT = 0.2
+_SOFT_STYLE_RESTORE_VISIBILITY = 0.7
+
 
 def _val(v):
     return ap._val(v)
@@ -226,6 +236,15 @@ def scene_to_pipeline_request(
     activity_text = _clean_scene_part(scene.activity) if pose is None else None
     if activity_text and activity_text == setting_text:
         activity_text = None  # de-dup identical parts
+    # WS-S palette scope: the character's styled room + color palette only reach
+    # HOME-ish scenes (sv.is_home_like_location, derived from INTERIOR_ROOM_PHRASES).
+    # For a non-home location (cafe, street, gym, …) BOTH drop to None — the styled
+    # room replacement was already self-gating, but the palette clause was not, so a
+    # character's "bold dark palette" used to be stamped over a midday cafe. Gating at
+    # the caller is the single clean fix (build_scene_background_text is unchanged).
+    home_like = sv.is_home_like_location(scene.location)
+    interior_style = controls.interior_style if home_like else None
+    color_palette = controls.color_palette if home_like else None
     background_text = scene.background_text or sv.build_scene_background_text(
         location=scene.location,
         time_of_day=scene.time_of_day,
@@ -235,10 +254,10 @@ def scene_to_pipeline_request(
         free_text=activity_text,
         lead_text=setting_text,
         # WS-B home scenery: her styled room replaces the generic home phrase, and the
-        # palette clause joins the lighting section. Both come from the (merged) controls,
-        # so an un-profiled batch (both None) composes byte-identically to before.
-        interior_style=controls.interior_style,
-        color_palette=controls.color_palette,
+        # palette clause joins the lighting section — but only for home-ish scenes (see
+        # the WS-S gate above). An un-profiled batch (both None) composes byte-identically.
+        interior_style=interior_style,
+        color_palette=color_palette,
     )
 
     # Guarantee at least one active step (PipelineEditRequest requires >=1).
@@ -252,11 +271,23 @@ def scene_to_pipeline_request(
         )
         background_text = sv.build_scene_background_text(
             location=scene.location, free_text=persona_bits or "a tasteful natural setting",
-            interior_style=controls.interior_style, color_palette=controls.color_palette,
+            interior_style=interior_style, color_palette=color_palette,
         )
 
     if seed is None:
         seed = scene.seed if scene.seed is not None else resolve_seed(controls, scene.global_index)
+
+    # WS-S codeformer dial: on the "as-shot" styles (natural / candid_phone) default
+    # the pose-step ReActor to a gentler restoration so the face reads real instead of
+    # airbrushed — but ONLY when the admin left the knob unset (an explicit control
+    # always wins). Every other style keeps None -> the engine/settings default.
+    soft_style = _val(controls.photo_style) in _SOFT_PHOTO_STYLES
+    reactor_codeformer = controls.reactor_codeformer_weight
+    if reactor_codeformer is None and soft_style:
+        reactor_codeformer = _SOFT_STYLE_CODEFORMER_WEIGHT
+    reactor_visibility = controls.reactor_restore_visibility
+    if reactor_visibility is None and soft_style:
+        reactor_visibility = _SOFT_STYLE_RESTORE_VISIBILITY
 
     return PipelineEditRequest(
         # NOTE: the planner Character dataclass field is hero_photo_url (story_planner.py).
@@ -264,6 +295,11 @@ def scene_to_pipeline_request(
         # renders onto a clean body instead of fighting the hero's existing clothes; None
         # today (populated by a later agent) -> falls back to the hero photo unchanged.
         source_image=getattr(character, "nude_base_url", None) or character.hero_photo_url,
+        # WS-S: the ReActor face donor is ALWAYS the sharp original hero photo (never the
+        # nude-base/intermediate source_image above), so the pose step swaps the face
+        # from a clean image instead of a multiply-edited one. None-safe: getattr keeps
+        # test stand-ins without the field working (falls back to source-as-donor).
+        faceRefImage=getattr(character, "hero_photo_url", None),
         pose=pose,
         # C1a freeform pose text: identity-free and single-consumer (read only by the
         # pose step's build_pose_prompt, which simply doesn't run when the step is
@@ -314,9 +350,9 @@ def scene_to_pipeline_request(
         seed=seed,
         pipeline_order=controls.pipeline_order,
         photoStyle=controls.photo_style,
-        # D2: admin-tunable pose-step ReActor knobs (node 200). None = engine/
-        # settings default (see BatchControls.reactor_restore_visibility /
-        # reactor_codeformer_weight docstrings).
-        reactorRestoreVisibility=controls.reactor_restore_visibility,
-        reactorCodeformerWeight=controls.reactor_codeformer_weight,
+        # D2 + WS-S: admin-tunable pose-step ReActor knobs (node 200). An explicit
+        # control wins; otherwise natural/candid_phone get the gentler WS-S defaults
+        # (0.2 / 0.7) and every other style stays None -> engine/settings default.
+        reactorRestoreVisibility=reactor_visibility,
+        reactorCodeformerWeight=reactor_codeformer,
     )

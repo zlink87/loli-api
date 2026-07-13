@@ -55,8 +55,8 @@ OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
         NudityLevel.HIGH: "a whisper-thin, almost transparent white summer dress that turns completely see-through in light, no bra or panties so hard nipples and the dark triangle of pubic hair are clearly visible, hem fluttering just below the curve of the ass",
     },
     OutfitType.FLORAL_MAXI_DRESS: {
-        NudityLevel.LOW: "a flowing floral wrap maxi dress cinched with a tie at the waist, soft fabric moving gracefully with each step",
-        NudityLevel.SUGGESTIVE: "a flowing floral wrap maxi dress with the tie loosened at the waist, wrap gaping slightly at the chest to show a hint of cleavage, soft fabric moving gracefully with each step",
+        NudityLevel.LOW: "a flowing one-piece floral maxi dress that falls in a single continuous sweep from a fitted bodice to the ankle, soft fabric moving gracefully with each step",
+        NudityLevel.SUGGESTIVE: "a flowing one-piece floral maxi dress with a deep V-neckline that dips to show a hint of cleavage, soft fabric skimming the body and moving gracefully with each step",
         NudityLevel.MEDIUM: "a deep-wrap floral maxi dress with a loose tie showing generous cleavage and the curve of breasts, fabric flowing and hinting at the body underneath",
         NudityLevel.REVEALING: "a deep-wrap floral maxi dress with the tie barely holding, wrap falling open to bare one breast and a long stretch of thigh with every step",
         NudityLevel.HIGH: "a deep-wrap floral maxi dress tied so loosely it constantly slips open, fully exposing heavy breasts and the smooth mound between parted thighs whenever she moves",

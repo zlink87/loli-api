@@ -38,11 +38,21 @@ _persona_writer = None
 _chat_persona_store = None
 _trait_profile_writer = None
 _trait_profile_store = None
+# Optional async callable (character, user_id) -> nude-base row | None, wired in
+# router.configure_services to nude_base.submit_nude_base_for_new_character. Used only
+# to auto-submit a nude base on creation (Part 3); None (not wired) degrades to a no-op.
+_nude_base_submitter = None
 
 
 def set_character_store(store) -> None:
     global _character_store
     _character_store = store
+
+
+def set_nude_base_submitter(submitter) -> None:
+    """Set the (optional) nude-base auto-submitter used on character creation (Part 3)."""
+    global _nude_base_submitter
+    _nude_base_submitter = submitter
 
 
 def set_character_image_store(store) -> None:
@@ -172,13 +182,42 @@ async def _generate_traits_best_effort(character: CharacterRead) -> None:
         )
 
 
-async def _create_character_with_persona(body: CharacterCreate) -> CharacterRead:
+async def _submit_nude_base_best_effort(character: CharacterRead, user_id: str) -> None:
+    """
+    Auto-submit the character's identity-locked nude base on creation (Part 3), reusing
+    the SAME t2i submit path as POST /v1/characters/{id}/nude-base via the wired
+    submitter. Best-effort: a missing submitter (nude-base services not configured / the
+    T2I flag off) is a silent no-op, and ANY submission failure is logged and swallowed
+    so it NEVER fails character creation (covers /characters/bulk). Writes only to the
+    nude-base store/queue, so the character row is unaffected.
+    """
+    if _nude_base_submitter is None:
+        return
+    try:
+        nb = await _nude_base_submitter(character, user_id)
+        if nb is not None:
+            logger.info(
+                f"Nude base auto-submitted on creation for character {character.id}"
+            )
+    except Exception as e:  # noqa: BLE001 - nude base must never fail creation
+        logger.error(
+            f"Auto nude-base submission failed for character {character.id}; creation "
+            f"still succeeded: {e}"
+        )
+
+
+async def _create_character_with_persona(
+    body: CharacterCreate, user_id: str = "admin"
+) -> CharacterRead:
     """
     Create one character row and, best-effort, generate + persist its chat persona
-    (when body.generate_persona is set) and its trait profile (when body.generate_traits
-    is set — default on). Shared by POST /v1/characters (single) and POST
-    /v1/characters/bulk so both behave identically. Both generation blocks are
-    best-effort: a failure is logged and creation still succeeds (it never raises).
+    (when body.generate_persona is set), its trait profile (when body.generate_traits
+    is set — default on), and its nude base (when body.generate_nude_base is set —
+    default on, and only when the nude-base services are configured). Shared by POST
+    /v1/characters (single) and POST /v1/characters/bulk so both behave identically.
+    All generation blocks are best-effort: a failure is logged and creation still
+    succeeds (it never raises). ``user_id`` is the acting admin, recorded on the
+    nude-base job.
     """
     store = get_character_store()
     character = await store.create(body)
@@ -234,6 +273,12 @@ async def _create_character_with_persona(body: CharacterCreate) -> CharacterRead
     if body.generate_traits:
         await _generate_traits_best_effort(character)
 
+    # Nude base is opt-OUT (default on), best-effort, and independent of the blocks
+    # above. Only submits when the nude-base services are configured AND the T2I flag
+    # is on (both checked inside the wired submitter); a failure never fails creation.
+    if body.generate_nude_base:
+        await _submit_nude_base_best_effort(character, user_id)
+
     return character
 
 
@@ -242,7 +287,7 @@ async def create_character(
     body: CharacterCreate,
     user: Dict[str, Any] = Depends(require_admin),
 ):
-    return await _create_character_with_persona(body)
+    return await _create_character_with_persona(body, user.get("sub", "admin"))
 
 
 @router.post("/bulk", response_model=BulkCharacterResponse)
@@ -262,10 +307,11 @@ async def create_characters_bulk(
     # be saved anyway. Done before the loop so it isn't swallowed as a per-item failure.
     get_character_store()
 
+    user_id = user.get("sub", "admin")
     results = []
     for index, item in enumerate(body.items):
         try:
-            character = await _create_character_with_persona(item)
+            character = await _create_character_with_persona(item, user_id)
             results.append(
                 BulkCharacterItemResult(index=index, status="created", character=character)
             )

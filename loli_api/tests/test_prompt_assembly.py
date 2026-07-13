@@ -43,9 +43,10 @@ Covers:
   c24 outfit build_prompt: lighting phrase-ified and appended after
       outfit_detail (both branches: dressed and NAKED); same graceful
       None/unrecognized back-compat.
-  c32 build_pose_prompt: identity_anchors (D1) appended immediately after
-      pose_identity_clause() as "She has {anchors}; keep these and her body
-      proportions and build exactly as in image 1, completely unchanged.";
+  c32 build_pose_prompt: identity_anchors (D1) rendered as "She has {anchors};
+      keep these and her body proportions and build exactly as in image 1,
+      completely unchanged." — WS-S: when present these REPLACE the generic
+      pose_identity_clause() (which the base/no-anchors prompt still carries);
       absent (byte-identical base prompt) when None/empty.
   c33 outfit build_prompt: identity_anchors (D1) appended right after
       pc.identity_clause(...) on BOTH branches (NAKED and dressed) as "she has
@@ -320,6 +321,74 @@ def test_outfit_low_tier_has_no_exposure_language():
 
 
 # ---------------------------------------------------------------------------
+# WS-M — one-piece garment guard + floral-maxi separates fix.
+# ---------------------------------------------------------------------------
+def test_one_piece_clause_present_for_dress_class_and_absent_for_separates():
+    from api.v1.endpoints.outfit import ONE_PIECE_GARMENT_CLAUSE, ONE_PIECE_GARMENT_OUTFITS
+
+    dress_class = [
+        OutfitType.FLORAL_MAXI_DRESS, OutfitType.RED_EVENING_GOWN,
+        OutfitType.LITTLE_BLACK_DRESS, OutfitType.VELVET_DRESS,
+        OutfitType.SATIN_SLIP_DRESS, OutfitType.POLKA_DOT_DRESS_50S,
+        OutfitType.KIMONO, OutfitType.SARI, OutfitType.CHEONGSAM, OutfitType.HANBOK,
+    ]
+    for o in dress_class:
+        assert o in ONE_PIECE_GARMENT_OUTFITS, o.value
+        p = outfit_ep.build_prompt(o, None, NudityLevel.LOW)
+        assert ONE_PIECE_GARMENT_CLAUSE in p, f"{o.value} missing one-piece clause"
+
+    separates = [
+        OutfitType.SEQUIN_TOP_SKIRT, OutfitType.PENCIL_SKIRT_SET,
+        OutfitType.BUSINESS_SUIT, OutfitType.JUMPSUIT, OutfitType.BIKINI,
+        OutfitType.HOODIE_JOGGERS,
+    ]
+    for o in separates:
+        assert o not in ONE_PIECE_GARMENT_OUTFITS, o.value
+        p = outfit_ep.build_prompt(o, None, NudityLevel.LOW)
+        assert ONE_PIECE_GARMENT_CLAUSE not in p, f"{o.value} wrongly has one-piece clause"
+
+    # NAKED never carries the clause (it is not a garment).
+    assert ONE_PIECE_GARMENT_CLAUSE not in outfit_ep.build_prompt(
+        OutfitType.NAKED, None, NudityLevel.HIGH
+    )
+    print("WS-M OK: one-piece clause enum-gated to dress/gown/cultural, absent for separates/NAKED")
+
+
+def test_one_piece_clause_survives_dress_mode_and_detail_dominant():
+    """The guard constrains garment CONSTRUCTION, so it rides every dressed-branch mode
+    (standard/replace/dress) and detail-dominant captions alike."""
+    from api.v1.endpoints.outfit import ONE_PIECE_GARMENT_CLAUSE
+
+    for mode in ("standard", "replace", "dress"):
+        p = outfit_ep.build_prompt(
+            OutfitType.FLORAL_MAXI_DRESS, None, NudityLevel.MEDIUM, prompt_mode=mode,
+        )
+        assert ONE_PIECE_GARMENT_CLAUSE in p, mode
+    p_dd = outfit_ep.build_prompt(
+        OutfitType.FLORAL_MAXI_DRESS, None, NudityLevel.MEDIUM,
+        outfit_detail="a burgundy silk maxi", detail_dominant=True,
+    )
+    assert ONE_PIECE_GARMENT_CLAUSE in p_dd
+    print("WS-M OK: one-piece clause present across prompt_mode + detail_dominant")
+
+
+def test_floral_maxi_low_suggestive_are_one_piece_without_separates_phrasing():
+    """Floral Maxi Dress LOW/SUGGESTIVE must read as ONE piece — no 'tie'/'wrap gaping'/
+    'wrap ... dress' separates language — while keeping tier explicitness (LOW zero-
+    exposure, SUGGESTIVE a hint of cleavage)."""
+    levels = OUTFIT_DESCRIPTIONS[OutfitType.FLORAL_MAXI_DRESS]
+    for lvl in (NudityLevel.LOW, NudityLevel.SUGGESTIVE):
+        txt = levels[lvl].lower()
+        assert "one-piece" in txt, f"{lvl.value} lost one-piece wording: {txt}"
+        for bad in ("tie", "wrap gaping", "wrap maxi", "cinched with a tie", "wrap dress"):
+            assert bad not in txt, f"{lvl.value} still reads as separates ('{bad}'): {txt}"
+    # Explicitness preserved: SUGGESTIVE still teases cleavage; LOW stays fully clothed.
+    assert "cleavage" in levels[NudityLevel.SUGGESTIVE].lower()
+    assert "cleavage" not in levels[NudityLevel.LOW].lower()
+    print("WS-M OK: floral maxi LOW/SUGGESTIVE one-piece, no separates phrasing, explicitness kept")
+
+
+# ---------------------------------------------------------------------------
 # c16 — every selected generation option verifiably lands in the final prompt,
 # and the scene clause sits before persona flavor (not buried at the tail)
 # ---------------------------------------------------------------------------
@@ -461,21 +530,32 @@ def test_outfit_replace_mode_swaps_lead_in():
 # ---------------------------------------------------------------------------
 def test_pose_prompt_activity_and_expression_appended():
     base = pose_ep.build_pose_prompt(PoseType.SITTING)
+    # WS-S: the tail clauses now fold INTO the solo sentence (dropping the old
+    # "…no other people., while…" period-then-comma), and the expression renders as
+    # "her expression: {state}" — the old ", {state} expression" tail turned multi-word
+    # candid states into junk ("… doing expression").
+    assert base.endswith("no other people.")
+    solo_body = base[:-1]  # drop the trailing "." so the tail clauses join the solo sentence
+
     with_both = pose_ep.build_pose_prompt(
         PoseType.SITTING, activity="pouring coffee", expression="sleepy soft smile",
     )
-    assert with_both == base + ", while pouring coffee, sleepy soft smile expression"
+    assert with_both == solo_body + ", while pouring coffee, her expression: sleepy soft smile."
 
     only_activity = pose_ep.build_pose_prompt(PoseType.SITTING, activity="pouring coffee")
-    assert only_activity == base + ", while pouring coffee"
+    assert only_activity == solo_body + ", while pouring coffee."
 
     only_expression = pose_ep.build_pose_prompt(PoseType.SITTING, expression="sleepy soft smile")
-    assert only_expression == base + ", sleepy soft smile expression"
+    assert only_expression == solo_body + ", her expression: sleepy soft smile."
+
+    # A multi-word candid state never produces "{state} expression" junk.
+    candid = pose_ep.build_pose_prompt(PoseType.SITTING, expression="focused on what she's doing")
+    assert "doing expression" not in candid and "expression expression" not in candid
 
     # Base prompt is byte-identical when both are omitted, or explicitly None.
     explicit_none = pose_ep.build_pose_prompt(PoseType.SITTING, activity=None, expression=None)
     assert explicit_none == base
-    print("c21 OK: activity/expression appended when given; base unchanged when both None")
+    print("c21 OK: activity/expression fold into the solo sentence; base unchanged when both None")
 
 
 # ---------------------------------------------------------------------------
@@ -486,9 +566,11 @@ def test_pose_prompt_activity_and_expression_appended():
 # ---------------------------------------------------------------------------
 def test_pose_prompt_lighting_appended():
     base = pose_ep.build_pose_prompt(PoseType.SITTING)
+    assert base.endswith("no other people.")
+    solo_body = base[:-1]  # WS-S: tail clauses fold into the solo sentence
 
     lit = pose_ep.build_pose_prompt(PoseType.SITTING, lighting="moody_dim")
-    assert lit == base + ", in moody dim low-key lighting"
+    assert lit == solo_body + ", in moody dim low-key lighting."
 
     # Raw enum-value string is never injected verbatim — only the phrase-ified
     # text from services.scene_vocab.LIGHTING_PHRASES.
@@ -516,11 +598,13 @@ def test_pose_prompt_lighting_appended():
 # ---------------------------------------------------------------------------
 def test_pose_prompt_time_of_day_appended_and_combines_with_lighting():
     base = pose_ep.build_pose_prompt(PoseType.SITTING)
+    assert base.endswith("no other people.")
+    solo_body = base[:-1]  # WS-S: tail clauses fold into the solo sentence
 
     # "golden_hour" (underscored raw value) vs "during golden hour" (spaced
     # phrase) — a clean pair for the no-raw-leak assertion below.
     golden = pose_ep.build_pose_prompt(PoseType.SITTING, time_of_day="golden_hour")
-    assert golden == base + ", during golden hour"
+    assert golden == solo_body + ", during golden hour."
     assert "golden_hour" not in golden
 
     # None -> byte-identical (back-compat).
@@ -531,9 +615,10 @@ def test_pose_prompt_time_of_day_appended_and_combines_with_lighting():
     assert unknown == base
     assert "not_a_real_tod_value" not in unknown
 
-    # Full combination: activity, expression, lighting, time_of_day all append
-    # in that order (mirrors workers.pipeline_worker._build_step_workflow's
-    # pose branch, which passes all four through from PipelineEditRequest).
+    # Full combination: activity + expression + a SINGLE merged time-in-lighting
+    # clause (WS-S de-bloat 5b), folded into the solo sentence. Mirrors
+    # workers.pipeline_worker._build_step_workflow's pose branch, which passes all
+    # four through from PipelineEditRequest.
     combo = pose_ep.build_pose_prompt(
         PoseType.SITTING,
         activity="pouring coffee",
@@ -542,11 +627,10 @@ def test_pose_prompt_time_of_day_appended_and_combines_with_lighting():
         time_of_day="night",
     )
     assert combo == (
-        base
+        solo_body
         + ", while pouring coffee"
-        + ", sleepy soft smile expression"
-        + ", in moody dim low-key lighting"
-        + ", late at night"
+        + ", her expression: sleepy soft smile"
+        + ", late at night in moody dim low-key lighting."
     )
     print(
         "c23 OK: time_of_day phrase-ified + appended; None/unrecognized unchanged; "
@@ -988,17 +1072,19 @@ def test_pose_prompt_identity_anchors_appended():
         f"exactly as in image 1, completely unchanged."
     )
     assert expected_clause in anchored
-    # Placed immediately adjacent to the generic pose_identity_clause().
+    # WS-S de-bloat (5a): the concrete anchors REPLACE the generic pose_identity_clause()
+    # (they carry the same content, but specifically) — so the generic sentence is
+    # DROPPED when anchors are present, and only the base (no-anchors) prompt keeps it.
     clause = pc.pose_identity_clause()
-    assert anchored.index(clause) < anchored.index(expected_clause)
-    assert f"{clause}. {expected_clause}" in anchored
-    # And still ahead of "The new pose should match image 2 accurately."
+    assert clause in base
+    assert clause not in anchored
+    # The anchors clause takes the generic clause's slot, ahead of "The new pose…".
     assert anchored.index(expected_clause) < anchored.index("The new pose should match image 2 accurately.")
 
-    # None/empty -> byte-identical to the base prompt (back-compat).
+    # None/empty -> byte-identical to the base prompt (back-compat; generic clause kept).
     assert pose_ep.build_pose_prompt(PoseType.SITTING, identity_anchors=None) == base
     assert pose_ep.build_pose_prompt(PoseType.SITTING, identity_anchors="   ") == base
-    print("c32 OK: identity_anchors appended right after pose_identity_clause(); absent when None/empty")
+    print("c32 OK: identity_anchors REPLACE the generic clause when present; base keeps it")
 
 
 # ---------------------------------------------------------------------------
@@ -1387,6 +1473,9 @@ def _run_all():
         test_background_prompt_identity_anchors_appended,
         test_populate_identity_anchors_resolves_skin_tone_from_character_id,
         test_populate_identity_anchors_pose_and_background_requests,
+        test_one_piece_clause_present_for_dress_class_and_absent_for_separates,
+        test_one_piece_clause_survives_dress_mode_and_detail_dominant,
+        test_floral_maxi_low_suggestive_are_one_piece_without_separates_phrasing,
     ]
     failures = 0
     for fn in tests:

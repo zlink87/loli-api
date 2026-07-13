@@ -336,6 +336,35 @@ class Settings(BaseSettings):
         """Parsed admin user-id allowlist (JWT `sub` values)."""
         return [u.strip() for u in self.ADMIN_USER_IDS.split(",") if u.strip()]
 
+    # -----------------------------------------------------------------------
+    # WS-N — Nude base rebuild (text-to-image base + ReActor face lock).
+    # True (default, the NEW path): the nude base is GENERATED from scratch like
+    # char-gen (Z-Image Turbo, COMFYUI_WORKFLOW_PATH) using the character's locked
+    # identity + a forced NAKED clause + a neutral standing full-body pose + a plain
+    # studio backdrop + the NATURAL photo style, at a deterministic per-character
+    # seed, then ONE ReActor face pass swaps the ORIGINAL hero photo's face onto it.
+    # This is pose-independent and mask-free, so an unusual hero crop can no longer
+    # produce the old two-headed edit-based composite. False -> the LEGACY edit-based
+    # path (outfit step in "nude_base" prompt mode + background step on the hero,
+    # via the pipeline engine) runs UNCHANGED as a fallback. See
+    # api/v1/endpoints/nude_base.py and workers/nude_base_worker.py.
+    NUDE_BASE_T2I: bool = True
+
+    # -----------------------------------------------------------------------
+    # WS-M — outfit mask diagnostics (flag-gated, default OFF). When True, every
+    # outfit-step engine (interactive /v1/edit/outfit, the /v1/edit pipeline, and the
+    # batch engine) resolves to workflows/outfit_cropstitch_maskpreview_API.json instead
+    # of its normal render graph (see main.py). That graph shares the identical mask
+    # chain (SAM person / ClothesSegment -> head-subtract -> crop -> soften) but its
+    # SaveImage outputs the editable MASK (white = will be edited) rather than the edited
+    # photo, so an operator can eyeball what region the outfit step will repaint —
+    # confirming the hardened soft edge on a dressed source and, critically, that a nude
+    # source still masks the torso (not an empty ClothesSegment). No diffusion runs
+    # (the KSampler branch is dead for the mask output), so it is cheap. Mirrors
+    # POSE_DEBUG_SAVE_PRE_REACTOR: set it in .env, restart, submit one outfit edit, then
+    # turn it back off. Leave OFF in production.
+    OUTFIT_DEBUG_SAVE_MASK: bool = False
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

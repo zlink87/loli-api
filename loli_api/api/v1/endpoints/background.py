@@ -18,8 +18,9 @@ from models.enums import JobStatus, NudityLevel
 from models.requests import BackgroundEditRequest
 from models.responses import JobCreateResponse
 from services.notification_service import NotificationService
-from services.character_anchors import populate_identity_anchors
+from services.character_anchors import populate_identity_anchors, populate_home_style
 from services import prompt_constants as pc
+from services import scene_vocab as sv
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,10 @@ _background_workflow_template: Optional[dict] = None
 # Used only to auto-populate identityAnchors from BackgroundEditRequest.characterId;
 # None (store not configured) degrades gracefully — see populate_identity_anchors.
 _character_store = None
+# Optional (Supabase-gated) trait-profile store, wired in router.configure_services.
+# Used only to auto-populate interiorStyle/colorPalette from characterId (WS-T home
+# scenery); None (store not configured) degrades gracefully — see populate_home_style.
+_trait_profile_store = None
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +60,12 @@ def set_character_store(store) -> None:
     """Set the (optional) character store used to resolve identityAnchors."""
     global _character_store
     _character_store = store
+
+
+def set_trait_profile_store(store) -> None:
+    """Set the (optional) trait-profile store used to resolve home style (WS-T)."""
+    global _trait_profile_store
+    _trait_profile_store = store
 
 
 def set_background_workflow_path(workflow_path: str) -> None:
@@ -86,6 +97,9 @@ def get_notification_service() -> Optional[NotificationService]:
 def build_background_prompt(
     prompt: str,
     identity_anchors: Optional[str] = None,
+    location: Optional[str] = None,
+    interior_style=None,
+    color_palette=None,
 ) -> str:
     """
     Build the positive prompt for environment/scene editing.
@@ -104,12 +118,34 @@ def build_background_prompt(
             — the same clause shape outfit.build_prompt uses. None/empty
             (interactive /v1/edit/background and any caller without a character
             profile) appends nothing — unchanged behavior.
+        location: Optional LocationType enum-value string for the scene (WS-T). Only
+            consulted when interior_style/color_palette are present, to select her
+            styled room via scene_vocab.build_scene_background_text.
+        interior_style / color_palette: Optional home taste for THIS character
+            (from her trait profile, populated by populate_home_style for a HOME-like
+            location). When EITHER is set, the scene text is recomposed exactly the
+            way batches do — scene_vocab.build_scene_background_text replaces the
+            generic room with her styled INTERIOR_ROOM_PHRASES description and folds
+            the palette into the lighting clause, with the caller's `prompt` appended
+            as free text. When BOTH are None (interactive edits, non-home locations),
+            the raw `prompt` is used verbatim — byte-identical to prior behavior.
 
     Returns:
         Complete prompt string for the workflow
     """
+    # WS-T home scenery: when her home taste is present, compose the SAME personal
+    # room text a batch renders (styled room replaces the generic phrase; palette
+    # joins the lighting clause), with the caller's `prompt` carried as free text.
+    scene = prompt
+    if interior_style is not None or color_palette is not None:
+        scene = sv.build_scene_background_text(
+            location=location,
+            free_text=prompt,
+            interior_style=interior_style,
+            color_palette=color_palette,
+        )
     prompt_parts = [
-        f"Change the environment and background to: {prompt}",
+        f"Change the environment and background to: {scene}",
         pc.identity_clause("the background and surroundings"),
     ]
     if identity_anchors and identity_anchors.strip():
@@ -309,6 +345,9 @@ async def edit_background(
         # Trait-aware edit: resolve identityAnchors from characterId when the caller
         # supplied an id but not explicit anchors (best-effort; never raises).
         await populate_identity_anchors(_character_store, request)
+        # WS-T: for a HOME-like location, fill interiorStyle/colorPalette from her
+        # trait profile so a manual home edit renders her styled room (best-effort).
+        await populate_home_style(_trait_profile_store, request)
 
         # Log payload
         notification_service = get_notification_service()

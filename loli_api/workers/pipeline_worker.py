@@ -325,6 +325,7 @@ class PipelineBackgroundWorker:
         self, step_name: str, request, source_name: str, seed: int, job_id: str,
         pose_ref_name: Optional[str] = None,
         head_mask_name: Optional[str] = None,
+        face_ref_name: Optional[str] = None,
         is_final_step: bool = True,
     ) -> dict:
         """
@@ -453,6 +454,9 @@ class PipelineBackgroundWorker:
                 # keeps a test stand-in without these fields on the pre-D3 path.
                 negative_prompt=getattr(request, "negativePrompt", None),
                 nudity_level=getattr(request, "nudityLevel", None),
+                # WS-S: the dedicated ReActor face donor (sharp hero) staged in _run_step.
+                # None -> node 210 falls back to source_name (unchanged donor==source).
+                face_ref_image=face_ref_name,
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(
@@ -488,7 +492,20 @@ class PipelineBackgroundWorker:
                 denoise=getattr(request, "outfitDenoise", None),
             )
         if step_name == "background":
-            prompt = apply_edit_photo_style(build_background_prompt(request.prompt), photo_style)
+            # WS-T: interiorStyle/colorPalette (populated by populate_home_style for a
+            # HOME-like location on a standalone /v1/edit) recompose the scene as her
+            # styled room. Batch items leave both None (scene_mapper bakes the styled
+            # room straight into request.prompt), so this is a no-op for them — read
+            # defensively so a request object without the fields degrades cleanly.
+            prompt = apply_edit_photo_style(
+                build_background_prompt(
+                    request.prompt,
+                    location=getattr(request, "location", None),
+                    interior_style=getattr(request, "interiorStyle", None),
+                    color_palette=getattr(request, "colorPalette", None),
+                ),
+                photo_style,
+            )
             logger.info(f"[PIPELINE] {job_id} | background | Prompt: {prompt[:80]}...")
             return prepare_background_workflow(
                 self._background_template, source_name, prompt, seed=seed,
@@ -541,6 +558,29 @@ class PipelineBackgroundWorker:
             )
             images.append({"name": pose_ref_name, "image": pose_ref_uri})
 
+        # WS-S: the pose step also ships the DEDICATED ReActor face donor — the sharp
+        # ORIGINAL hero photo (request.faceRefImage, set by scene_mapper) — as another
+        # base64 input.images[] entry, so the graph's node 210 swaps the face from a
+        # clean source instead of the multiply-edited pipeline intermediate (node 109).
+        # Best-effort: a download failure leaves face_ref_name None -> node 210 falls
+        # back to the source image (unchanged donor==source), never fails the job.
+        face_ref_name: Optional[str] = None
+        if step_name == "pose":
+            face_ref_url = getattr(request, "faceRefImage", None)
+            if face_ref_url:
+                try:
+                    face_bytes = await asyncio.to_thread(_download_image, face_ref_url)
+                    face_ref_name = f"faceref_{uuid.uuid4().hex[:12]}.png"
+                    images.append({
+                        "name": face_ref_name,
+                        "image": "data:image/png;base64,"
+                                 + base64.b64encode(face_bytes).decode("ascii"),
+                    })
+                    logger.info(f"[PIPELINE] {job_id} | pose | Face ref (hero) staged")
+                except Exception as e:  # noqa: BLE001 — protective, not critical
+                    logger.warning(f"[PIPELINE] {job_id} | Face ref download failed: {e}")
+                    face_ref_name = None
+
         # Outfit steps ship the server-computed head-protect mask (YuNet —
         # reliable on stylized hero renders where on-worker face detection is
         # not). Subtracted from the person mask so the head is never editable.
@@ -566,6 +606,7 @@ class PipelineBackgroundWorker:
         workflow = self._build_step_workflow(
             step_name, request, source_name, seed, job_id,
             pose_ref_name=pose_ref_name, head_mask_name=head_mask_name,
+            face_ref_name=face_ref_name,
             is_final_step=is_final_step,
         )
         # Phase 5 observability: capture the EXACT composed prompt strings right

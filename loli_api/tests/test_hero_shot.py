@@ -347,7 +347,11 @@ def test_color_grade_never_touches_edit_suffixes(monkeypatch):
     prompt = "Change the person's clothing to: red evening gown"
     out = pc.apply_edit_photo_style(prompt, "polished")
     assert marker not in out
-    assert out == f"{prompt}. {pc.EDIT_PHOTO_STYLE_SUFFIXES['polished']}"
+    # WS-S: the style clause LEADS the body, with a short tail echo re-stating it.
+    assert out == (
+        f"{pc.EDIT_PHOTO_STYLE_SUFFIXES['polished']} {prompt}. "
+        f"{pc.EDIT_PHOTO_STYLE_TAIL_ECHOES['polished']}"
+    )
     # Disabling the generation knob must not affect the edit suffix either.
     monkeypatch.setattr(pc.settings, "GENERATION_COLOR_GRADE", "")
     assert pc.apply_edit_photo_style(prompt, "polished") == out

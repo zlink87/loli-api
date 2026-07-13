@@ -227,6 +227,25 @@ def palette_phrase(color_palette) -> str:
     return PALETTE_PHRASES.get(pal, "") if pal is not None else ""
 
 
+# The home-ish locations that carry a character's styled room + color palette,
+# DERIVED from INTERIOR_ROOM_PHRASES (single source of truth: exactly the rooms every
+# interior style defines) so a home room added there is covered here automatically.
+# The styled-room replacement is already self-gating (styled_room_phrase returns None
+# off-home), but the PALETTE clause is not — build_scene_background_text appends it
+# unconditionally — so scene_mapper gates BOTH on this set to stop a character's
+# "bold dark palette" being stamped over a midday cafe/street (WS-S palette scope).
+HOME_LIKE_LOCATIONS = frozenset().union(
+    *(set(rooms) for rooms in INTERIOR_ROOM_PHRASES.values())
+) if INTERIOR_ROOM_PHRASES else frozenset()
+
+
+def is_home_like_location(location) -> bool:
+    """True if `location` (enum or raw value) is a home-ish room that carries a
+    character's styled-room + color-palette text; False for every other location so
+    callers keep the generic phrase AND drop the palette clause."""
+    return getattr(location, "value", location) in HOME_LIKE_LOCATIONS
+
+
 def location_phrase(location) -> str:
     """Descriptive phrase for a LocationType (or its value)."""
     return phrase(LOCATION_PHRASES, location)

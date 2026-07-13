@@ -130,6 +130,23 @@ def test_softlora_variant_is_still_driven_by_the_shared_2511_preparer():
     assert wf["305"]["inputs"]["strength_model"] == 0.65  # variant's lighter NSFW LoRA
 
 
+def test_ws_m_mask_chain_hardened_on_2511_graph():
+    """WS-M: the Tier-A 2511 outfit graph carries the hardened mask-chain params, in sync
+    with the Rapid V2 + softlora graphs. Guards against a future loader-only re-clone
+    silently reverting the hardening (jaggy masks / forearm seam)."""
+    g = _template()
+    assert g["230"]["inputs"]["process_res"] == 1024
+    assert g["230"]["inputs"]["mask_blur"] == 4
+    assert g["230"]["inputs"]["mask_offset"] == 2
+    assert g["213"]["inputs"]["expand"] == 8 and g["213"]["inputs"]["blur_radius"] == 6
+    assert g["236"]["inputs"]["expand"] == 8 and g["236"]["inputs"]["blur_radius"] == 6
+    assert g["235"]["inputs"]["context_from_mask_extend_factor"] == 1.3
+    assert g["235"]["inputs"]["mask_blend_pixels"] == 12
+    # The softlora variant must have moved in lockstep (still differs only in node 305).
+    soft = _softlora_template()
+    assert [nid for nid in g if g[nid] != soft[nid]] == ["305"]
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
