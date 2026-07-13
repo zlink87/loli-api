@@ -102,6 +102,8 @@ def build_pose_prompt(
     location: Optional[str] = None,
     pose_detail: Optional[str] = None,
     identity_anchors: Optional[str] = None,
+    scene_text: Optional[str] = None,
+    dress_mode: bool = False,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
@@ -203,6 +205,24 @@ def build_pose_prompt(
             concretely), rather than stacking on top of it. None/empty (interactive
             /v1/edit/pose and any caller without a character profile) keeps the
             generic clause — unchanged behavior.
+        scene_text: Optional composed scene/background text (the single-pass batch
+            path passes PipelineEditRequest.prompt here). When set, it REPLACES the
+            "Keep the same background, location and environment as image 1…" sentence
+            AND the "The scene is {location}." anchor with "Place her in: {scene_text}."
+            — because in single-pass mode there is no prior background step to "keep",
+            the pose step composes the scene from scratch. None (multi-step / interactive
+            callers, where the background step already rendered the scene) leaves the
+            keep-background + location-anchor wording byte-identical to before.
+        dress_mode: Single-pass additive dressing. Default False keeps the
+            state-of-dress CONTINUITY phrasing for ``outfit_text`` ("In image 1 she is
+            wearing {garment}; keep her state of dress…") used when an outfit step
+            already dressed the body. True (single-pass, source = nude base) flips the
+            garment branch to an ADDITIVE lead ("Dress her in: {garment}; render the
+            clothing fully and realistically on her body.", mirroring
+            outfit._outfit_dress_lead) since there is no garment on the nude base to
+            keep. The NAKED/undress-prose branch is unaffected: "In image 1 she is
+            {prose}; keep her state of dress exactly as in image 1." is literally true
+            against a nude-base source, so it stays verbatim in both modes.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
@@ -236,23 +256,37 @@ def build_pose_prompt(
         )
     else:
         prompt += f"{pc.pose_identity_clause()}. "
-    prompt += (
-        f"The new pose should match image 2 accurately. "
-        f"Keep the same background, location and environment as image 1, adjusting "
-        f"only perspective to fit the new pose."
-    )
-    # Scene-location anchor, right after the keep-background sentence.
-    location_text = sv.location_phrase(location)
-    if location_text:
-        prompt += f" The scene is {location_text}."
-    # State-of-dress continuity. NAKED-tier prose already begins with a state word,
-    # so phrase it as "she is {text}" (not "she is wearing completely naked …").
+    prompt += f"The new pose should match image 2 accurately. "
+    # Scene: single-pass composes the scene from scratch ("Place her in: …") because no
+    # background step ran; otherwise keep image 1's background and anchor the location.
+    # (scene_text subsumes the location, so the "The scene is …" anchor is skipped there.)
+    if scene_text and scene_text.strip():
+        prompt += f"Place her in: {scene_text.strip()}."
+    else:
+        prompt += (
+            f"Keep the same background, location and environment as image 1, adjusting "
+            f"only perspective to fit the new pose."
+        )
+        # Scene-location anchor, right after the keep-background sentence.
+        location_text = sv.location_phrase(location)
+        if location_text:
+            prompt += f" The scene is {location_text}."
+    # State-of-dress. NAKED-tier prose already begins with a state word, so phrase it as
+    # "she is {text}" (not "she is wearing completely naked …") — literally true against a
+    # nude-base source, so it stays verbatim in dress_mode too. For a real garment,
+    # dress_mode (single-pass on a nude base) dresses ADDITIVELY since there is no garment
+    # to keep; the default keeps state-of-dress continuity (an outfit step already dressed).
     if outfit_text and outfit_text.strip():
         garment = outfit_text.strip()
         if garment.lower().startswith(("completely naked", "topless", "wearing", "nude")):
             prompt += (
                 f" In image 1 she is {garment}; keep her state of dress exactly as "
                 f"in image 1."
+            )
+        elif dress_mode:
+            prompt += (
+                f" Dress her in: {garment}; render the clothing fully and "
+                f"realistically on her body."
             )
         else:
             prompt += (
@@ -352,6 +386,8 @@ def prepare_pose_workflow(
     negative_prompt: Optional[str] = None,
     nudity_level: Optional[NudityLevel] = None,
     face_ref_image: Optional[str] = None,
+    output_megapixels: Optional[float] = None,
+    face_restore_model: Optional[str] = None,
 ) -> dict:
     """
     Prepare the pose workflow with injected parameters.
@@ -361,6 +397,8 @@ def prepare_pose_workflow(
         170  LoadImage        -> inputs.image  (reference pose image = image2)
         210  LoadImage        -> inputs.image  (WS-S ReActor face donor = the sharp
                                   original hero; node 200.source_image reads it)
+        93   ImageScaleToTotalPixels -> inputs.megapixels  (output canvas size;
+                                  optional override via ``output_megapixels``)
         114  CLIPTextEncode (or similar) -> inputs.prompt  (positive text prompt)
         115  TextEncodeQwenImageEditPlus -> inputs.prompt  (LIVE negative; 2511 tier ONLY)
         3    KSampler         -> inputs.seed
@@ -393,10 +431,15 @@ def prepare_pose_workflow(
             this param existed.
         reactor_restore_visibility: WS4.2 tuning knob (default -1.0 = no
             override). When >= 0, overrides node 200's
-            ``face_restore_visibility`` (template default 0.8).
+            ``face_restore_visibility`` (template default ~0.65) — how strongly
+            the CodeFormer-restored face is blended over the raw swap, so a
+            LOWER value keeps more of the raw swap's real skin texture.
         reactor_codeformer_weight: WS4.2 tuning knob (default -1.0 = no
             override). When >= 0, overrides node 200's ``codeformer_weight``
-            (template default 0.25).
+            (template default ~0.7). CodeFormer weight is easy to get backwards:
+            a HIGHER value stays faithful to the swapped input face (less
+            hallucinated repaint), a LOWER value smooths/hallucinates more (the
+            plastic look).
         negative_prompt: D3, 2511-tier ONLY. Optional extra negative terms folded
             into ``pc.edit_negative(...)`` and written to node 115's prompt. On the
             v1 graph this is ignored entirely (no node 115; cfg 1 makes negatives
@@ -414,6 +457,21 @@ def prepare_pose_workflow(
             caller that doesn't supply one) -> node 210 falls back to ``source_image``,
             i.e. byte-identical to the pre-WS-S behavior (ReActor donor == the source).
             No-op when the template has no node 210.
+        output_megapixels: Optional output-canvas size for node 93
+            (ImageScaleToTotalPixels). When set > 0, overrides node 93's
+            ``megapixels`` (both pose graphs bake 1.0) so the full re-diffusion
+            renders at a higher resolution — used by the single-pass batch path
+            (prod sets ~1.74). None or <= 0 (default) leaves node 93 untouched,
+            keeping the template's baked size. No-op when the template has no
+            node 93.
+        face_restore_model: Dark asset (07-14, ships OFF). Optional override for
+            node 200's ``face_restore_model`` (the CodeFormer/GPEN model ReActor
+            runs after the raw swap). Falsy/None (default, interactive callers and
+            every caller until ops flips ``settings.POSE_REACTOR_FACE_RESTORE_MODEL``)
+            leaves the template's baked model (``codeformer-v0.1.0.pth``) untouched.
+            A truthy value (e.g. "GPEN-BFR-512.onnx") overrides it — REQUIRES that
+            file to exist in facerestore_models/ on the RunPod volume first. No-op
+            when the template has no node 200.
 
     Returns:
         Prepared workflow dict
@@ -440,6 +498,14 @@ def prepare_pose_workflow(
         donor = face_ref_image or source_image
         wf["210"]["inputs"]["image"] = donor
         logger.debug(f"Set node 210 ReActor face donor: {donor}")
+
+    # Node 93 (ImageScaleToTotalPixels): optional output-canvas override. Both pose
+    # graphs bake megapixels=1.0; a value > 0 scales the pose-reference-derived latent
+    # up so the full re-diffusion renders larger (single-pass batch path). None / <= 0
+    # leaves it untouched. Guarded on node presence so a template without 93 no-ops.
+    if output_megapixels is not None and output_megapixels > 0 and "93" in wf:
+        wf["93"]["inputs"]["megapixels"] = float(output_megapixels)
+        logger.debug(f"Set node 93 megapixels: {float(output_megapixels)}")
 
     # Node 114: Text prompt
     if prompt is not None and "114" in wf:
@@ -498,10 +564,12 @@ def prepare_pose_workflow(
         logger.debug("Injected debug SaveImage node 300 (pre-ReActor frame, prefix=pose_preface)")
 
     # WS4.2: optional ReActor tuning knobs (node 200). >= 0 overrides the
-    # template's baked face_restore_visibility (0.8) / codeformer_weight
-    # (0.25); the default -1.0 sentinel leaves them untouched (0.0 is itself
-    # a valid override, so it can't double as "no override" here). Guarded on
-    # "200" being present for the same reason as the debug node above.
+    # template's baked face_restore_visibility (0.65) / codeformer_weight
+    # (0.7); the default -1.0 sentinel leaves them untouched (0.0 is itself
+    # a valid override, so it can't double as "no override" here). CodeFormer
+    # weight is inverse to intuition: HIGH = faithful to the swap, LOW = plastic;
+    # visibility is the restored-over-raw blend (lower = more raw texture).
+    # Guarded on "200" being present for the same reason as the debug node above.
     if "200" in wf:
         if reactor_restore_visibility >= 0:
             wf["200"]["inputs"]["face_restore_visibility"] = reactor_restore_visibility
@@ -513,6 +581,12 @@ def prepare_pose_workflow(
             logger.debug(
                 f"Overrode node 200 codeformer_weight: {reactor_codeformer_weight}"
             )
+        # Dark asset (07-14, ships OFF): sharper face-restore model override (GPEN-BFR
+        # vs. the template's baked CodeFormer). Falsy/None -> untouched, byte-identical
+        # to before this param existed.
+        if face_restore_model:
+            wf["200"]["inputs"]["face_restore_model"] = face_restore_model
+            logger.debug(f"Overrode node 200 face_restore_model: {face_restore_model}")
 
     return wf
 

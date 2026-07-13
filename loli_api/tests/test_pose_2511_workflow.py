@@ -127,9 +127,12 @@ def test_pose_2511_reactor_tail_matches_v1_values():
     # off an already-edited face is what blurred/repainted faces across a batch.
     assert r["source_image"] == ["210", 0]
     assert g["210"]["class_type"] == "LoadImage"
-    # Graph baselines unchanged (the gentler natural/candid dial rides the request).
-    assert r["face_restore_visibility"] == 0.8
-    assert r["codeformer_weight"] == 0.25
+    # FACE-DIAL fix: fidelity-favoring restore, not the old plastic-zone combo. HIGH
+    # codeformer_weight stays faithful to the swapped face's real texture; the
+    # moderate visibility keeps raw-swap detail in the blend (see nude_base_worker.py's
+    # REACTOR_* constants for the full CodeFormer-semantics rationale).
+    assert r["face_restore_visibility"] == 0.65
+    assert r["codeformer_weight"] == 0.7
     assert g["164"]["inputs"]["images"] == ["200", 0]  # save the face-locked frame
     assert g["164"]["inputs"]["filename_prefix"] == "pose_edit"
 

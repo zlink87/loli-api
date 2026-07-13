@@ -242,3 +242,7 @@ API. **Per-image proof:** the pose step records its tier in `character_images.me
 otherwise — so batch A/Bs are identifiable in Supabase. **Cost:** 20 full-model steps
 vs. 4 distilled is a large jump per posed item; budget as with the outfit tier (§4).
 Roll back by unsetting the var and restarting.
+
+> **Dark quality assets (skin LoRA + sharper face-restore, 07-14):** see
+> `docs/RUNPOD_SETUP.md` §5c for the skin-LoRA/GPEN-BFR variant graphs and their
+> activation levers — ships OFF, layered on top of everything in this doc.

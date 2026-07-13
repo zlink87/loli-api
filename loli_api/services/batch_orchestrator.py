@@ -43,7 +43,30 @@ class CharacterNotFound(Exception):
     pass
 
 
-def _active_steps_for_scene(scene: SceneSpec, controls: BatchControls) -> int:
+def _single_pass_eligible_scene(
+    scene: SceneSpec, controls: BatchControls, *, single_pass: bool, has_nude_base: bool
+) -> bool:
+    """Estimate-side mirror of scene_mapper's single-pass eligibility: an item collapses
+    to ONE pose-graph job when single-pass is on, the character has a nude base (the swap
+    source), and the scene sets both a (non-blocked) pose and an outfit (NAKED counts)."""
+    if not (single_pass and has_nude_base):
+        return False
+    pose_active = scene.pose is not None and scene.pose not in (controls.blocked_poses or [])
+    outfit_active = scene.outfit is not None
+    return pose_active and outfit_active
+
+
+def _active_steps_for_scene(
+    scene: SceneSpec, controls: BatchControls, *,
+    single_pass: bool = False, has_nude_base: bool = False,
+) -> int:
+    # Single-pass collapses an eligible item to ONE pose-graph job (outfit + scene + pose
+    # rendered in one full-frame re-diffusion from the nude base). Defaults (both False)
+    # reproduce the legacy per-step count exactly.
+    if _single_pass_eligible_scene(
+        scene, controls, single_pass=single_pass, has_nude_base=has_nude_base
+    ):
+        return 1
     steps = 1  # background is effectively always present (location is required)
     if scene.pose is not None and scene.pose not in (controls.blocked_poses or []):
         steps += 1
@@ -52,8 +75,20 @@ def _active_steps_for_scene(scene: SceneSpec, controls: BatchControls) -> int:
     return steps
 
 
-def compute_estimate(scenes: List[SceneSpec], controls: BatchControls, settings) -> BatchEstimate:
-    total_jobs = sum(_active_steps_for_scene(s, controls) for s in scenes)
+def compute_estimate(
+    scenes: List[SceneSpec], controls: BatchControls, settings, *, has_nude_base: bool = False
+) -> BatchEstimate:
+    # Read the single-pass flag off settings so the estimate matches what the reconciler
+    # actually enqueues; getattr keeps test settings stubs (which may omit it) on the
+    # legacy count. Eligibility also needs a nude base (the single-pass swap source) —
+    # ``has_nude_base`` is resolved by the caller (launch_batch) so this stays sync/pure.
+    single_pass = bool(getattr(settings, "BATCH_SINGLE_PASS_EDIT", False))
+    total_jobs = sum(
+        _active_steps_for_scene(
+            s, controls, single_pass=single_pass, has_nude_base=has_nude_base
+        )
+        for s in scenes
+    )
     avg = max(1, int(settings.RUNPOD_AVG_STEP_SECONDS))
     pool = max(1, int(settings.BATCH_WORKER_POOL_SIZE))
     base_seconds = total_jobs * avg / pool
@@ -76,6 +111,7 @@ class BatchOrchestrator:
         settings,
         character_image_store: Optional[CharacterImageStore] = None,
         trait_profile_store=None,
+        nude_base_store=None,
     ):
         self.job_manager = job_manager
         self.character_store = character_store
@@ -88,6 +124,11 @@ class BatchOrchestrator:
         # character's saved TraitProfile into the batch controls/likes/dislikes as a soft
         # bias (best-effort, never blocks). None -> feature inert (batches unchanged).
         self.trait_profile_store = trait_profile_store
+        # Optional per-character nude-base lookup (same store the reconciler uses). Only
+        # read by launch_batch's cost/time ESTIMATE, so it knows whether single-pass
+        # collapse applies (single-pass needs the nude base as the swap source). None ->
+        # the estimate assumes no nude base (legacy multi-step counts).
+        self.nude_base_store = nude_base_store
 
     async def launch_batch(
         self, character_id: str, body: BatchCreate
@@ -155,7 +196,13 @@ class BatchOrchestrator:
             )
         await self.batch_store.insert_items(batch.id, rows)
 
-        estimate = compute_estimate(scenes, controls, self.settings)
+        # Single-pass estimate exactness: whether a nude base exists (the single-pass swap
+        # source) is per-character, so resolve it here (best-effort, async) and feed the
+        # otherwise-pure estimator — this matches what the reconciler will actually enqueue.
+        has_nude_base = bool(await self._resolve_nude_base_url(character_id))
+        estimate = compute_estimate(
+            scenes, controls, self.settings, has_nude_base=has_nude_base
+        )
 
         if body.dry_run:
             await self.batch_store.set_batch_status(batch.id, "planned")
@@ -198,6 +245,21 @@ class BatchOrchestrator:
                 f"[BATCH] trait-profile merge skipped for character {character_id}: {e}"
             )
             return controls, likes, dislikes
+
+    async def _resolve_nude_base_url(self, character_id: str) -> Optional[str]:
+        """The character's nude-base URL (single-pass swap source), or None.
+
+        Best-effort and used ONLY by the estimate: None when the store is unwired, no
+        base exists, or the lookup fails — every such case falls back to a legacy
+        multi-step estimate (and the reconciler independently re-resolves the base at
+        enqueue time, so a stale/missing estimate never changes what actually runs)."""
+        if self.nude_base_store is None:
+            return None
+        try:
+            return await self.nude_base_store.get_active_url(character_id)
+        except Exception as e:  # noqa: BLE001 — an estimate lookup must never block a launch
+            logger.warning(f"nude base lookup failed for character {character_id}: {e}")
+            return None
 
     async def confirm_batch(self, batch_id: str) -> Optional[BatchRead]:
         """
@@ -436,7 +498,14 @@ class BatchReconciler:
     async def _enqueue_item(self, batch: BatchRead, character: Character, item) -> None:
         try:
             scene = SceneSpec(**item.scene_spec)
-            request = scene_to_pipeline_request(character, scene, batch.controls, seed=item.seed)
+            # single_pass is the settings flag (scene_mapper stays settings-free); it only
+            # takes effect when the item is eligible (nude-base source + pose + outfit).
+            # reruns/retries flow through here too, so they inherit it automatically.
+            # getattr keeps test settings stubs (which may omit the field) on the legacy path.
+            request = scene_to_pipeline_request(
+                character, scene, batch.controls, seed=item.seed,
+                single_pass=getattr(self.settings, "BATCH_SINGLE_PASS_EDIT", False),
+            )
             job = await self.job_manager.create_job(request, BATCH_JOB_OWNER, job_type=BATCH_JOB_TYPE)
             await self.batch_store.update_item_result(
                 item.id,

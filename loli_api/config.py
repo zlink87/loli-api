@@ -85,13 +85,34 @@ class Settings(BaseSettings):
     # (inswapper low-res paste / codeformer over-restoration / blend-seam /
     # head-angle mismatch). WS4.2 exposes the ReActor restore-visibility /
     # codeformer-weight knobs (node 200) without a code change, once 4.1's
-    # data suggests they're the lever to pull. -1.0 sentinel on the float
-    # knobs means "leave the template's baked 0.8 / 0.25 alone" (0.0 is
+    # data suggests they're the lever to pull. CodeFormer semantics are easy to
+    # get backwards: a HIGH codeformer_weight stays FAITHFUL to the swapped input
+    # face (less hallucinated repaint), while a LOW weight lets CodeFormer
+    # smooth/hallucinate more (the plastic look); restore_visibility is how
+    # strongly the CodeFormer-restored face is blended over the raw swap, so a
+    # LOWER visibility keeps more of the raw swap's real skin texture. The pose
+    # graphs now bake 0.65 restore-visibility / 0.7 codeformer-weight. The -1.0
+    # sentinel on the float knobs means "leave those baked values alone" (0.0 is
     # itself a valid override, so unlike the request-model fields elsewhere,
     # None can't double as the "no override" marker on a typed float setting).
     POSE_DEBUG_SAVE_PRE_REACTOR: bool = False
     POSE_REACTOR_RESTORE_VISIBILITY: float = -1.0
     POSE_REACTOR_CODEFORMER_WEIGHT: float = -1.0
+    # Dark asset (07-14, ships OFF): sharper face-restore model for the pose ReActor
+    # pass (node 200's face_restore_model). GPEN-BFR is sharper/less waxy than the
+    # template's baked CodeFormer. Empty (default) leaves node 200 untouched -> the
+    # template's baked model (codeformer-v0.1.0.pth) keeps loading, byte-identical
+    # behavior. Set to e.g. "GPEN-BFR-512.onnx" ONLY AFTER that file exists in
+    # facerestore_models/ on the RunPod volume (download2.sh §8e/§10f; see
+    # docs/RUNPOD_SETUP.md "Dark quality assets") — otherwise the worker fails to
+    # load the model.
+    POSE_REACTOR_FACE_RESTORE_MODEL: str = ""
+    # Pose output resolution (node 93, ImageScaleToTotalPixels.megapixels). 0.0
+    # (default) keeps the pose template's baked 1.0 MP canvas; a value > 0 scales
+    # the pose-reference-derived latent to that many megapixels before the full
+    # re-diffusion, so the single-pass batch path can render at a higher output
+    # resolution (prod sets 1.74 ~ 1080x1620). No-op when the graph lacks node 93.
+    POSE_OUTPUT_MEGAPIXELS: float = 0.0
 
     # GPU execution backend: "runpod" (serverless) or "local" (legacy WebSocket)
     GPU_BACKEND: str = "runpod"
@@ -220,9 +241,23 @@ class Settings(BaseSettings):
     # those are a separate, positive-prompt-only mechanism for a different model.
     GENERATION_COLOR_GRADE: str = (
         "rich true-to-life colors with gentle film-like saturation, subtle "
-        "warm color grading, polished final finish, balanced contrast, no "
-        "washed-out or faded tones"
+        "warm color grading, balanced contrast, no washed-out or faded tones"
     )
+
+    # Output finishing: subtle film-grain + local-contrast pass applied to
+    # final, user-facing edit outputs at upload time (services.image_finish,
+    # hooked into SupabaseStorageService.upload_image). Mitigates the
+    # "plastic" look of AI-generated skin by reintroducing photographic
+    # high-frequency texture. Scoped to services.image_finish.FINISH_FOLDERS
+    # (edit outputs only) -- NOT character_creation (the generation look users
+    # already love) and NOT nude_bases (an edit SOURCE; grain there would
+    # compound through re-diffusion). Master switch -- OUTPUT_FILM_GRAIN_STRENGTH
+    # below still gates the pass even when this is True (0 disables it).
+    OUTPUT_FILM_GRAIN: bool = True
+    # Grain amplitude as a fraction of the 0-255 luma range (e.g. 0.03 -> ~3%
+    # of full-scale noise in shadows/mids, tapering in bright highlights).
+    # 0 disables the finishing pass even when OUTPUT_FILM_GRAIN is True.
+    OUTPUT_FILM_GRAIN_STRENGTH: float = 0.03
 
     # Anthropic Claude (story planner — SFW-only fallback provider).
     # Claude refuses explicit adult content, so it is never routed NSFW batches;
@@ -251,6 +286,15 @@ class Settings(BaseSettings):
     BATCH_MAX_INFLIGHT: int = 3
     # Per-item retry attempts before an item is marked failed.
     BATCH_ITEM_MAX_ATTEMPTS: int = 2
+    # Single-pass batch pipeline. True (default): an eligible batch item (nude-base
+    # source + a pose + an outfit) renders outfit + scene + pose in ONE pose-graph
+    # job — the pose step re-diffuses the whole frame anyway, so it dresses and
+    # re-scenes straight from the nude base, and the separate outfit/background
+    # steps (which only built a throwaway reference for it) collapse away. False ->
+    # the legacy 3-step chain (outfit -> background -> pose) runs unchanged. Only
+    # the batch scene mapper sets the per-request flag; interactive /v1/edit is
+    # never single-pass.
+    BATCH_SINGLE_PASS_EDIT: bool = True
     # WS3.2: fail fast at batch-worker startup if the batch engine's RESOLVED outfit
     # template is NOT a crop-and-stitch graph (workflow_meta tier "v1") — guards
     # against a mis-deployed environment (e.g. a CI-built image missing the

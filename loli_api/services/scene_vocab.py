@@ -278,20 +278,25 @@ def lighting_phrase(lighting) -> str:
 
 def scene_mood_phrase(kinks=None, personality=None) -> str:
     """
-    Tasteful mood-only phrases from per-scene kink/personality overrides.
-    Reuses KINK_PHRASES + PERSONALITY_PHRASES (mood/expression only — never identity).
+    A SINGLE tasteful mood-only phrase from per-scene kink/personality overrides.
+
+    Returns the personality phrase when present, else the FIRST kink that maps to a
+    phrase, else "". Capped to ONE phrase total: previously it stacked 1 personality +
+    up to 3 kink phrases (``[:3]``), which over-garnished — and polluted background-step
+    prompts — with clauses like "a sultry, seductive expression, tense restrained mood,
+    ...". Personality wins over kinks. Reuses PERSONALITY_PHRASES + KINK_PHRASES
+    (mood/expression only — never identity).
     """
-    parts: List[str] = []
     if personality:
         p = phrase(PERSONALITY_PHRASES, personality)
         if p:
-            parts.append(p)
+            return p
     if kinks:
-        for k in list(kinks)[:3]:
+        for k in kinks:
             kp = phrase(KINK_PHRASES, k)
             if kp:
-                parts.append(kp)
-    return ", ".join(parts)
+                return kp
+    return ""
 
 
 def build_scene_background_text(

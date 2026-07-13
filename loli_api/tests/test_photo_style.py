@@ -84,6 +84,7 @@ def test_style_clauses_preserve_texture_and_ban_gloss_blur_vocab():
     banned = (
         "flawless skin", "porcelain", "silky smooth", "airbrush",
         "soft focus", "dreamy glow", "glamour skin",
+        "lightly retouched skin", "retouched photograph",
     )
     for label, m in (("edit", EDIT_PHOTO_STYLE_SUFFIXES), ("generation", PHOTO_STYLE_TEMPLATES)):
         for style, clause in m.items():
@@ -93,6 +94,19 @@ def test_style_clauses_preserve_texture_and_ban_gloss_blur_vocab():
             assert "texture" in low, f"{label}/{style} missing texture-preservation wording"
             for b in banned:
                 assert b not in low, f"{label}/{style} contains banned gloss/blur vocab: {b!r}"
+
+
+def test_polished_studio_carry_explicit_no_skin_smoothing_sentence():
+    # PROMPT DE-GLOSS doctrine: photography styles may only retouch light/exposure/
+    # contrast/color + background depth of field -- NEVER smooth, blur, or gloss
+    # skin/features. polished/studio (the two "retouched" finishes, in both the
+    # edit-pipeline suffixes and the generation-side templates) must say so
+    # explicitly rather than relying on the now-removed "lightly retouched skin"
+    # framing to imply it.
+    doctrine = "do not smooth, blur, or retouch the skin itself"
+    for label, m in (("edit", EDIT_PHOTO_STYLE_SUFFIXES), ("generation", PHOTO_STYLE_TEMPLATES)):
+        for style in ("polished", "studio"):
+            assert doctrine in m[style].lower(), f"{label}/{style} missing the no-skin-smoothing sentence"
 
 
 def test_polished_studio_distinct_from_natural_via_light_identity():

@@ -390,6 +390,9 @@ if supabase_db.is_configured():
         # Folds the character's saved trait profile into batch controls at launch
         # (soft bias; body.use_trait_profile gates it, explicit admin values win).
         trait_profile_store=trait_profile_store,
+        # Lets launch_batch's estimate know whether a nude base exists, so a
+        # single-pass-eligible batch is costed as one job/item instead of three.
+        nude_base_store=nude_base_store,
     )
     batch_reconciler = BatchReconciler(
         job_manager, character_store, batch_store, settings,

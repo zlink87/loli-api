@@ -138,6 +138,25 @@ def test_unknown_ethnicity_degrades_safely():
     assert skin_tone_phrase("klingon") is None
 
 
+# --- PROMPT DE-GLOSS: no shine/gloss vocabulary in skin phrases --------------
+# Doctrine: skin phrases describe tone + structure only, never a glossy/shiny
+# finish (that's a rendering-time artifact, not a heritage attribute) — the
+# japanese/nordic/korean/brazilian fixes replaced "porcelain"/"luminous"/
+# "sun-kissed" wording that fought the natural-matte-skin doctrine (and, for
+# japanese, directly fought the "porcelain doll skin" EDIT_SKIN_NEGATIVE term).
+_GLOSS_WORDS = (
+    "porcelain", "luminous", "glowing", "radiant", "dewy", "shimmer", "glossy", "gleaming",
+)
+
+
+def test_no_gloss_vocab_in_ethnicity_or_skin_tone_phrases():
+    for name, mapping in (("ETHNICITY_PHRASES", ETHNICITY_PHRASES), ("SKIN_TONE_PHRASES", SKIN_TONE_PHRASES)):
+        for value, text in mapping.items():
+            low = text.lower()
+            hits = [w for w in _GLOSS_WORDS if w in low]
+            assert not hits, f"{name}['{value}'] contains gloss vocab {hits}: {text!r}"
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

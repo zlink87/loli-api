@@ -142,6 +142,14 @@ download_file "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/mod
 download_file "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth" "facexlib"
 download_file "https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth" "facexlib"
 
+# 8f. DARK ASSET (07-14, ships OFF) — GPEN-BFR-512, a sharper/less-waxy face-restore
+# model than CodeFormer for the pose ReActor pass (node 200 / node 215 ReActorFaceBoost).
+# Same dataset repo + folder as codeformer above (8e) so it needs no new symlink.
+# Inert until POSE_REACTOR_FACE_RESTORE_MODEL=GPEN-BFR-512.onnx is set AND/OR
+# COMFYUI_POSE_WORKFLOW_PATH_2511 points at workflows/pose_2511_faceboost_API.json —
+# see docs/RUNPOD_SETUP.md "Dark quality assets".
+download_file "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GPEN-BFR-512.onnx" "facerestore_models"
+
 # 9. STAGE-2 MASK UPGRADE — ComfyUI-RMBG (garment-class masks + SAM3). Staged
 # for a future workflow variant; no live workflow references these yet (see
 # Dockerfile.worker). Folder names MUST match the Dockerfile.worker symlinks
@@ -178,5 +186,13 @@ download_file "https://huggingface.co/prithivMLmods/Qwen-Image-Edit-2511-Ultra-R
 download_file "https://huggingface.co/aiunivers/qwen-image-edit-plus-nsfw-lora/resolve/main/qwen-image-edit-plus-nsfw-lora.safetensors" "loras"
 # A/B alternatives (mostly Civitai, need an API token): Meta4, Snofs, "Sex-tacular",
 # qwen_MCNL. Swap node 305's lora_name + strength (0.8-1.0) to try them.
+
+# 10f. DARK ASSET (07-14, ships OFF) — skin realism LoRA (node 306 on the *_skinlora
+# variant graphs only: pose_2511_skinlora_API.json / outfit_cropstitch_2511full_skinlora_API.json).
+# Stacks on top of the realism (304) + NSFW (305, dialed to 0.65 on these variants) LoRAs
+# to fight the plastic-skin look. Inert until COMFYUI_POSE_WORKFLOW_PATH_2511 /
+# COMFYUI_OUTFIT_WORKFLOW_PATH_2511 (or COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH) point at one
+# of those files — see docs/RUNPOD_SETUP.md "Dark quality assets".
+download_file "https://huggingface.co/tlennon-ie/qwen-edit-skin/resolve/main/qwen-edit-skin.safetensors" "loras"
 
 echo -e "${GREEN}All downloads finished!${NC}"

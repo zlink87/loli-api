@@ -305,13 +305,12 @@ def test_color_grade_empty_env_is_byte_identical_to_legacy(monkeypatch):
 
 def test_color_grade_candid_phone_is_milder_than_standard():
     """candid_phone's clause deliberately drops the 'more produced' language
-    (polished final finish / balanced contrast) so the raw/candid look isn't
-    pushed toward a graded, finished aesthetic -- while still addressing the
-    washed-out/faded complaint that motivated this feature."""
+    (balanced contrast) so the raw/candid look isn't pushed toward a graded,
+    finished aesthetic -- while still addressing the washed-out/faded complaint
+    that motivated this feature. (The old 'polished final finish' gloss vocab was
+    removed from the standard default entirely, so it no longer differentiates.)"""
     standard = pc.settings.GENERATION_COLOR_GRADE
     mild = pc._CANDID_COLOR_GRADE_MILD
-    assert "polished final finish" in standard
-    assert "polished final finish" not in mild
     assert "balanced contrast" in standard
     assert "balanced contrast" not in mild
     assert "no washed-out or faded tones" in standard

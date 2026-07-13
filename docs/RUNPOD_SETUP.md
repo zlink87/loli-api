@@ -269,6 +269,59 @@ with every other job type.
 
 ---
 
+## 5c. Dark quality assets (07-14)
+
+Two more model files upgrade skin realism and face-restore sharpness on the 2511
+tier. Both ship **dark**: the code that reads them is already merged (workflow
+graphs + env-var plumbing), but nothing changes at runtime until the files exist
+on the volume AND one of the env vars below is set.
+
+**Files to stage** (`download2.sh` §8f / §10f have the `wget` commands):
+
+| File | Target folder | Purpose |
+|---|---|---|
+| `qwen-edit-skin.safetensors` | `loras/` | Skin realism LoRA (node `306` on the new `*_skinlora` graphs) — fights the plastic/waxy skin look, stacked after the realism LoRA (node 304) + softened NSFW LoRA (node 305 @ 0.65) |
+| `GPEN-BFR-512.onnx` | `facerestore_models/` | Sharper, less-waxy face-restore model than the baked CodeFormer, for the pose ReActor pass (node 200, or node `215` `ReActorFaceBoost`) |
+
+**Activation levers** — flip **ONE at a time**, verify a batch, and keep rollback
+simple: revert the env var and restart (no worker-image change needed, same as
+every other tier switch in this doc).
+
+```bash
+# (A) Skin-LoRA variant graphs — interactive pose step + interactive/pipeline/batch
+# outfit step. Requires the same 5 Tier-A 2511 volume files as the existing
+# 2511full graph (docs/OPS_OUTFIT_TIER_2511.md §4) PLUS qwen-edit-skin.safetensors.
+COMFYUI_POSE_WORKFLOW_PATH_2511=workflows/pose_2511_skinlora_API.json
+COMFYUI_OUTFIT_WORKFLOW_PATH_2511=workflows/outfit_cropstitch_2511full_skinlora_API.json
+# or batch-only (leaves interactive edits on the current outfit graph):
+COMFYUI_BATCH_OUTFIT_WORKFLOW_PATH=workflows/outfit_cropstitch_2511full_skinlora_API.json
+
+# (B) Sharper face-restore model for the EXISTING ReActor node 200 — works on ANY
+# pose graph already loaded (v1 or 2511, skinlora or not); no workflow-path change.
+POSE_REACTOR_FACE_RESTORE_MODEL=GPEN-BFR-512.onnx
+
+# (C) ReActorFaceBoost — GPEN-BFR run as a dedicated boost stage ahead of the main
+# swap (node 215 feeds node 200's optional face_boost input). This is an ALTERNATE
+# pose graph, mutually exclusive with (A)'s pose graph — both set the same env var.
+COMFYUI_POSE_WORKFLOW_PATH_2511=workflows/pose_2511_faceboost_API.json
+```
+
+Notes:
+- (A) and (C) both set `COMFYUI_POSE_WORKFLOW_PATH_2511` — pick ONE pose graph at a
+  time; there is no combined skinlora+faceboost graph yet. (B) is independent and
+  layers on top of whichever pose graph is loaded, since it only overrides node
+  200's `face_restore_model` field.
+- **Assumption flagged for verification**: `ReActorFaceBoost`'s node/input names
+  (`boost_model`, `interpolation`, `visibility`, `codeformer_weight`,
+  `restore_with_main_after`, and the main `ReActorFaceSwap` node's optional
+  `face_boost` input) were confirmed against the upstream
+  `Gourieff/ComfyUI-ReActor` `nodes.py` source on GitHub — the ReActor pack is
+  **not** installed in this repo's local `ComfyUI/custom_nodes/`, so re-check
+  against the version actually running on the worker image before trusting (C)
+  in production.
+
+---
+
 ## 6. Quality / identity follow-ups (need ComfyUI to validate)
 
 These improve identity preservation and reduce deformities but change the ComfyUI workflow

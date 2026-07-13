@@ -99,11 +99,12 @@ class BatchControls(BaseModel):
         default=None, description="Override pipeline step order forwarded to each item"
     )
     photo_style: PhotoStyleType = Field(
-        default=PhotoStyleType.POLISHED,
+        default=PhotoStyleType.NATURAL,
         description=(
             "Photographic finish applied once (final edit step) to every item: "
-            "polished (retouched, default — matches the generated hero), natural "
-            "(realistic/unstaged), studio, or candid_phone (legacy raw look)"
+            "natural (realistic/unstaged, default), polished (retouched — light/"
+            "color only, matches the generated hero), studio, or candid_phone "
+            "(legacy raw look)"
         ),
     )
     story_mode: bool = Field(
@@ -123,8 +124,9 @@ class BatchControls(BaseModel):
         le=1.0,
         description=(
             "Pose-step ReActor face-restore knob (node 200 face_restore_visibility, "
-            "0.0-1.0). None = template default (~0.8). Pose-step ReActor face-restore "
-            "knobs — lower codeformer weight = less 'beautification' drift between items."
+            "0.0-1.0): how strongly the CodeFormer-restored face is blended over the "
+            "raw swap. None = template default (baked 0.65). Lower keeps more of the "
+            "raw swap's real skin texture; higher blends in more of the restored face."
         ),
     )
     reactor_codeformer_weight: Optional[float] = Field(
@@ -133,8 +135,10 @@ class BatchControls(BaseModel):
         le=1.0,
         description=(
             "Pose-step ReActor face-restore knob (node 200 codeformer_weight, "
-            "0.0-1.0). None = template default (~0.25). Pose-step ReActor face-restore "
-            "knobs — lower codeformer weight = less 'beautification' drift between items."
+            "0.0-1.0). None = template default (baked 0.7). Easy to get backwards: a "
+            "LOW weight lets CodeFormer smooth/hallucinate more of the restoration "
+            "(the plastic look); a HIGH weight stays truer to the swapped face's real "
+            "texture."
         ),
     )
 
@@ -238,7 +242,7 @@ class BatchCreate(BaseModel):
                     "period_days": 1,
                     "seed_strategy": "per_item",
                     "base_seed": 42,
-                    "photo_style": "polished",
+                    "photo_style": "natural",
                 },
                 "likes": ["coffee", "rainy days", "silk"],
                 "dislikes": ["gyms", "neon clubs"],

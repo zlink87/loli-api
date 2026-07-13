@@ -121,9 +121,10 @@ PHOTO_STYLE_TEMPLATES = {
         "YOUR CONTEXT:\n"
         "Your photographs are professionally retouched portraits.\n"
         "Your photographs have a soft flattering key light, a natural true-to-life "
-        "color grade, clean lightly retouched skin that keeps real texture, and a "
-        "clean composition focused on the subject, with the setting rendered exactly "
-        "as described.\n"
+        "color grade, a softly blurred background with shallow depth of field, and "
+        "a clean composition focused on the subject, with the setting rendered "
+        "exactly as described. Do not smooth, blur, or retouch the skin itself — "
+        "keep every pore and fine skin texture exactly real.\n"
         "---\n"
         "YOUR PHOTO:\n"
         "{$@}"
@@ -131,8 +132,10 @@ PHOTO_STYLE_TEMPLATES = {
     "studio": (
         "YOUR CONTEXT:\n"
         "Your photographs are high-end portraits with controlled softbox lighting, "
-        "crisp focus, refined neutral color grading, and clean lightly retouched skin "
-        "that keeps real texture, with the setting rendered exactly as described.\n"
+        "crisp focus, refined neutral color grading, and a softly blurred "
+        "background with shallow depth of field, with the setting rendered exactly "
+        "as described. Do not smooth, blur, or retouch the skin itself — keep "
+        "every pore and fine skin texture exactly real.\n"
         "---\n"
         "YOUR PHOTO:\n"
         "{$@}"
@@ -167,42 +170,50 @@ PHOTO_STYLE_TEMPLATES = {
 # Times absent from this map (morning/daytime/...) keep the default sentence.
 _POLISHED_DAY_LINE = (
     "Your photographs have a soft flattering key light, a natural true-to-life "
-    "color grade, clean lightly retouched skin that keeps real texture, and a "
-    "clean composition focused on the subject, with the setting rendered exactly "
-    "as described.\n"
+    "color grade, a softly blurred background with shallow depth of field, and "
+    "a clean composition focused on the subject, with the setting rendered "
+    "exactly as described. Do not smooth, blur, or retouch the skin itself — "
+    "keep every pore and fine skin texture exactly real.\n"
 )
 _POLISHED_TIME_LINES = {
     "night": (
         "Your photographs are taken at night: a dark low-key nighttime environment "
         "lit by the scene's own practical light sources, a natural nighttime color "
-        "grade, clean lightly retouched skin that keeps real texture, and a clean "
-        "composition focused on the subject, with the setting rendered exactly as "
-        "described.\n"
+        "grade, a softly blurred background with shallow depth of field, and a "
+        "clean composition focused on the subject, with the setting rendered "
+        "exactly as described. Do not smooth, blur, or retouch the skin itself — "
+        "keep every pore and fine skin texture exactly real.\n"
     ),
     "evening": (
         "Your photographs are taken in the evening after dark: soft ambient dusk "
         "light with the scene's own artificial accents, a natural evening color "
-        "grade, clean lightly retouched skin that keeps real texture, and a clean "
-        "composition focused on the subject, with the setting rendered exactly as "
-        "described.\n"
+        "grade, a softly blurred background with shallow depth of field, and a "
+        "clean composition focused on the subject, with the setting rendered "
+        "exactly as described. Do not smooth, blur, or retouch the skin itself — "
+        "keep every pore and fine skin texture exactly real.\n"
     ),
     "sunset": (
         "Your photographs are taken at sunset: warm golden backlight true to the "
-        "hour, a natural sunset color grade, clean lightly retouched skin that "
-        "keeps real texture, and a clean composition focused on the subject, with "
-        "the setting rendered exactly as described.\n"
+        "hour, a natural sunset color grade, a softly blurred background with "
+        "shallow depth of field, and a clean composition focused on the subject, "
+        "with the setting rendered exactly as described. Do not smooth, blur, or "
+        "retouch the skin itself — keep every pore and fine skin texture exactly "
+        "real.\n"
     ),
     "golden_hour": (
         "Your photographs are taken during golden hour: low-angle golden light true "
-        "to the hour, a natural color grade, clean lightly retouched skin that "
-        "keeps real texture, and a clean composition focused on the subject, with "
-        "the setting rendered exactly as described.\n"
+        "to the hour, a natural color grade, a softly blurred background with "
+        "shallow depth of field, and a clean composition focused on the subject, "
+        "with the setting rendered exactly as described. Do not smooth, blur, or "
+        "retouch the skin itself — keep every pore and fine skin texture exactly "
+        "real.\n"
     ),
     "early_morning": (
         "Your photographs are taken in the dim early morning: soft cool dawn light, "
-        "a gentle muted color grade, clean lightly retouched skin that keeps real "
-        "texture, and a clean composition focused on the subject, with the setting "
-        "rendered exactly as described.\n"
+        "a gentle muted color grade, a softly blurred background with shallow "
+        "depth of field, and a clean composition focused on the subject, with the "
+        "setting rendered exactly as described. Do not smooth, blur, or retouch "
+        "the skin itself — keep every pore and fine skin texture exactly real.\n"
     ),
 }
 
@@ -286,16 +297,19 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
         "and consistent with the face."
     ),
     "polished": (
-        "Render this as an ultra-realistic retouched photograph: 85mm lens, crisp "
-        "sharp focus, a soft flattering key light, true-to-life neutral color with "
-        "accurate exposure, and natural skin with clearly visible fine texture and "
-        "pores, skin tone even and consistent with the face; keep every fine detail "
-        "of the clothing crisp and intact."
+        "Give this a professional photographic retouch of light only: balanced "
+        "exposure, gentle contrast, accurate true-to-life color, a soft flattering "
+        "key light, and a softly blurred background with shallow depth of field. Do "
+        "not smooth, blur, or retouch the skin itself — keep every pore and fine "
+        "skin texture exactly real, skin tone even and consistent with the face; "
+        "keep every fine detail of the clothing crisp and intact."
     ),
     "studio": (
-        "Give this a high-end studio portrait finish: controlled softbox lighting, "
-        "crisp focus, refined neutral color grading, and clean lightly retouched skin "
-        "that keeps its real fine texture, skin tone even and consistent with the face."
+        "Give this a professional studio photographic retouch of light only: "
+        "controlled softbox lighting, balanced exposure, refined neutral color "
+        "grading, and a softly blurred background with shallow depth of field. Do "
+        "not smooth, blur, or retouch the skin itself — keep every pore and fine "
+        "skin texture exactly real, skin tone even and consistent with the face."
     ),
     "candid_phone": "",
 }
@@ -306,8 +320,8 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
 # texture-preserving, never smoothing.
 EDIT_PHOTO_STYLE_TAIL_ECHOES = {
     "natural": "Keep it a real photo with natural skin texture.",
-    "polished": "Keep the retouched skin naturally textured with real pores.",
-    "studio": "Keep real skin texture under the studio light.",
+    "polished": "Only light and color are retouched; skin texture stays real.",
+    "studio": "Only studio light is retouched; skin texture stays real.",
     "candid_phone": "",
 }
 

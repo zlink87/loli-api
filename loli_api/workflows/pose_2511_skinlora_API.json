@@ -77,11 +77,25 @@
         0
       ],
       "lora_name": "qwen-image-edit-plus-nsfw-lora.safetensors",
-      "strength_model": 0.9
+      "strength_model": 0.65
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
       "title": "NSFW LoRA (edit)"
+    }
+  },
+  "306": {
+    "inputs": {
+      "model": [
+        "305",
+        0
+      ],
+      "lora_name": "qwen-edit-skin.safetensors",
+      "strength_model": 1.0
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Skin Realism LoRA (dark asset, anti-plastic skin texture)"
     }
   },
   "114": {
@@ -200,7 +214,7 @@
       "scheduler": "simple",
       "denoise": 1.0,
       "model": [
-        "305",
+        "306",
         0
       ],
       "positive": [

@@ -26,15 +26,20 @@ _NUDITY_LADDER = [
     NudityLevel.HIGH,
 ]
 
-# WS-S: gentler pose-step ReActor defaults for the "as-shot" styles (natural /
-# candid_phone) when the admin hasn't set an explicit value — less face repaint /
-# airbrush on top of the now-sharp, hero-sourced face swap (node 210). Lower
-# codeformer_weight = higher fidelity to the swapped face, less hallucinated repaint;
-# lower restore_visibility = less of the codeformer restoration blended over the raw
-# swap. Explicit controls always win; every other style keeps the settings default.
+# WS-S: more faithful, less airbrushed pose-step ReActor defaults for the "as-shot"
+# styles (natural / candid_phone) when the admin hasn't set an explicit value — so
+# the face reads real instead of plastic on top of the now-sharp, hero-sourced face
+# swap (node 210). CodeFormer semantics are the OPPOSITE of the intuitive reading: a
+# HIGH codeformer_weight stays FAITHFUL to the swapped input face (less hallucinated
+# repaint), while a LOW weight lets CodeFormer smooth/hallucinate more (the plastic
+# look); restore_visibility is how strongly the CodeFormer-restored face is blended
+# over the raw swap, so a LOWER visibility leaves more of the raw swap's real skin
+# texture. So the "as-shot" styles RAISE codeformer_weight (0.75, truer to the swap)
+# and LOWER restore_visibility (0.55, more raw-swap texture). Explicit controls always
+# win; every other style keeps the settings default.
 _SOFT_PHOTO_STYLES = ("natural", "candid_phone")
-_SOFT_STYLE_CODEFORMER_WEIGHT = 0.2
-_SOFT_STYLE_RESTORE_VISIBILITY = 0.7
+_SOFT_STYLE_CODEFORMER_WEIGHT = 0.75
+_SOFT_STYLE_RESTORE_VISIBILITY = 0.55
 
 
 def _val(v):
@@ -188,8 +193,18 @@ def scene_to_pipeline_request(
     scene: SceneSpec,
     controls: BatchControls,
     seed: Optional[int] = None,
+    single_pass: Optional[bool] = None,
 ) -> PipelineEditRequest:
-    """Build the PipelineEditRequest that renders `scene` by editing the hero photo."""
+    """Build the PipelineEditRequest that renders `scene` by editing the hero photo.
+
+    ``single_pass`` (the batch settings flag, passed by the caller so this module stays
+    settings-free): when truthy AND the item is eligible — the swap SOURCE is the
+    character's nude base, a pose is set, and an outfit is set (NAKED counts; its tier
+    prose describes the state of dress) — the request is flagged ``singlePassEdit`` so
+    the pipeline collapses to ONE pose-graph job that dresses + re-scenes from the nude
+    base in a single full-frame re-diffusion. Not eligible / None -> the legacy
+    multi-step request, byte-identical to before this param existed.
+    """
     pose = scene.pose if scene.pose not in (controls.blocked_poses or []) else None
     outfit = _effective_outfit(scene, controls)
     nudity = _clamp_nudity(scene.nudityLevel, controls)
@@ -224,10 +239,21 @@ def scene_to_pipeline_request(
     else:
         outfit_prompt_mode = controls.outfit_prompt_mode
 
+    # Single-pass eligibility: the pose step re-diffuses the WHOLE frame anyway, so when
+    # the source is the nude base AND we have both a pose and an outfit, the outfit +
+    # background steps only build a throwaway reference — collapse to one pose-graph job
+    # that dresses and re-scenes from the nude base. Requires all four: the caller's flag,
+    # a nude-base source, a pose, and an outfit (NAKED counts — its tier prose IS the
+    # state-of-dress, literally true against a nude base). Not eligible -> legacy request.
+    single_pass_edit = bool(
+        single_pass and nude_source and pose is not None and outfit is not None
+    )
+
     # C3 setting-led scenery: the director's ``setting`` sentence LEADS the composed
     # background text (lead_text), with the location enum phrase following as an anchor,
-    # then time/lighting/mood — so the authored place description drives the render
-    # instead of trailing ~30 canned location phrases. ``activity`` is dual-routed: it
+    # then time/lighting (scenery only — moods no longer ride the background text) — so
+    # the authored place description drives the render instead of trailing ~30 canned
+    # location phrases. ``activity`` is dual-routed: it
     # rides the pose step's own prompt when a pose step is active (see
     # api.v1.endpoints.pose.build_pose_prompt) — folding it into the background too
     # would say the same thing on two separate render channels — and only falls back to
@@ -245,12 +271,16 @@ def scene_to_pipeline_request(
     home_like = sv.is_home_like_location(scene.location)
     interior_style = controls.interior_style if home_like else None
     color_palette = controls.color_palette if home_like else None
+    # Scenery ONLY: moods are deliberately NOT passed (mood_kinks/mood_personality) — the
+    # background must describe the place, not persona flavor (the mood function is capped
+    # separately). For a single-pass item, ALSO drop time-of-day/lighting here: they flow
+    # to the pose tail via the request's lighting/timeOfDay fields (set below), and this
+    # scene text becomes the pose prompt's "Place her in:" clause, so composing time/light
+    # here too would duplicate that language inside the one pose prompt.
     background_text = scene.background_text or sv.build_scene_background_text(
         location=scene.location,
-        time_of_day=scene.time_of_day,
-        lighting=scene.lighting,
-        mood_kinks=scene.mood_kinks,
-        mood_personality=scene.mood_personality,
+        time_of_day=(None if single_pass_edit else scene.time_of_day),
+        lighting=(None if single_pass_edit else scene.lighting),
         free_text=activity_text,
         lead_text=setting_text,
         # WS-B home scenery: her styled room replaces the generic home phrase, and the
@@ -278,9 +308,11 @@ def scene_to_pipeline_request(
         seed = scene.seed if scene.seed is not None else resolve_seed(controls, scene.global_index)
 
     # WS-S codeformer dial: on the "as-shot" styles (natural / candid_phone) default
-    # the pose-step ReActor to a gentler restoration so the face reads real instead of
-    # airbrushed — but ONLY when the admin left the knob unset (an explicit control
-    # always wins). Every other style keeps None -> the engine/settings default.
+    # the pose-step ReActor to a more faithful, less airbrushed restoration so the face
+    # reads real instead of plastic — RAISE codeformer_weight (0.75, truer to the swapped
+    # face) and LOWER restore_visibility (0.55, more of the raw swap's skin texture). See
+    # the semantics note by the constants above. ONLY when the admin left the knob unset
+    # (an explicit control always wins); every other style keeps None -> engine default.
     soft_style = _val(controls.photo_style) in _SOFT_PHOTO_STYLES
     reactor_codeformer = controls.reactor_codeformer_weight
     if reactor_codeformer is None and soft_style:
@@ -351,8 +383,13 @@ def scene_to_pipeline_request(
         pipeline_order=controls.pipeline_order,
         photoStyle=controls.photo_style,
         # D2 + WS-S: admin-tunable pose-step ReActor knobs (node 200). An explicit
-        # control wins; otherwise natural/candid_phone get the gentler WS-S defaults
-        # (0.2 / 0.7) and every other style stays None -> engine/settings default.
+        # control wins; otherwise natural/candid_phone get the more-faithful WS-S
+        # defaults (0.75 weight / 0.55 visibility) and every other style stays None ->
+        # engine/settings default.
         reactorRestoreVisibility=reactor_visibility,
         reactorCodeformerWeight=reactor_codeformer,
+        # Single-pass batch collapse: True only for an eligible nude-base+pose+outfit
+        # item (see single_pass_edit above); the pipeline worker then runs ONE pose
+        # step that dresses + re-scenes from the source. False -> legacy multi-step.
+        singlePassEdit=single_pass_edit,
     )

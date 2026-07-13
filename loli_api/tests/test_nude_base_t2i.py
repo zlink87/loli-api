@@ -42,6 +42,7 @@ from workers.nude_base_worker import (
     PLAIN_BACKDROP_TEXT,
     ANTI_GLOSS_POSITIVE,
     NEUTRAL_BASE_OUTFIT_CLAUSE,
+    BODY_AESTHETIC_CLAUSES,
     REACTOR_CODEFORMER_WEIGHT,
     REACTOR_FACE_RESTORE_VISIBILITY,
 )
@@ -105,9 +106,31 @@ def test_base_prompt_carries_identity_naked_pose_backdrop_natural_no_glamour():
     assert ANTI_GLOSS_POSITIVE in positive
     assert "matte natural skin" in low and "visible pores" in low and "sharp focus" in low
 
+    # Body-aesthetic clause (nude base v2): _persona() is bodyType="curvy", so her
+    # own graceful/model-like framing clause reaches the base, inserted between the
+    # quality tail and the anti-gloss clause.
+    assert BODY_AESTHETIC_CLAUSES["curvy"] in positive
+
     # NO glamour/gloss tokens anywhere in the assembled POSITIVE.
     for banned in _GLAMOUR_BANNED:
         assert banned not in low, f"banned glamour/gloss token in base prompt: {banned!r}"
+
+    # Extend the banned-vocab check to EVERY BODY_AESTHETIC_CLAUSES entry (not just
+    # the one this persona happens to draw) so a future edit to any of the 5 clauses
+    # can't quietly reintroduce a glamour/gloss token. curvy/bbw additionally must
+    # never carry slimming vocabulary — that would fight the admin's explicit
+    # body-type choice instead of gracefully framing it.
+    for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
+        clause_low = clause.lower()
+        for banned in _GLAMOUR_BANNED:
+            assert banned not in clause_low, (
+                f"banned glamour/gloss token in {body_type!r} body clause: {banned!r}"
+            )
+        if body_type in ("curvy", "bbw"):
+            for slim_word in ("slim", "slender", "petite", "skinny"):
+                assert slim_word not in clause_low, (
+                    f"slimming vocab leaked into {body_type!r} body clause: {slim_word!r}"
+                )
 
     # The gloss-suppression wording lives in the NEGATIVE instead (never the positive).
     neg_low = negative.lower()
@@ -118,6 +141,52 @@ def test_base_prompt_is_deterministic():
     a = build_nude_base_prompt(_persona())
     b = build_nude_base_prompt(_persona())
     assert a == b  # no variety seed, no pool draw -> byte-identical every call
+
+
+# ---------------------------------------------------------------------------
+# Body-aesthetic clause (nude base v2) — keyed by BodyType enum value, appended
+# right before ANTI_GLOSS_POSITIVE. Covers a slim and a curvy persona explicitly
+# (opposite ends of the pool) plus the clean-skip path for an unrecognized value.
+# ---------------------------------------------------------------------------
+def _persona_with_body(body_type) -> PersonaOptions:
+    """A persona whose bodyType is forced post-construction — Pydantic only
+    validates BodyType membership at construction time (validate_assignment is
+    not enabled on PersonaOptions), so this is the standard way to exercise an
+    unrecognized value without fighting the enum field."""
+    persona = _persona()
+    persona.bodyType = body_type
+    return persona
+
+
+def test_base_prompt_carries_body_clause_for_skinny_persona():
+    positive, _negative, _locked = build_nude_base_prompt(_persona_with_body("skinny"))
+    assert BODY_AESTHETIC_CLAUSES["skinny"] in positive
+    # Sits between the quality tail and the anti-gloss clause, as assembled.
+    assert positive.index(BODY_AESTHETIC_CLAUSES["skinny"]) < positive.index(ANTI_GLOSS_POSITIVE)
+    # No other body type's clause leaks in.
+    for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
+        if body_type != "skinny":
+            assert clause not in positive, f"unexpected {body_type!r} clause in skinny prompt"
+
+
+def test_base_prompt_carries_body_clause_for_curvy_persona():
+    positive, _negative, _locked = build_nude_base_prompt(_persona_with_body("curvy"))
+    assert BODY_AESTHETIC_CLAUSES["curvy"] in positive
+    assert positive.index(BODY_AESTHETIC_CLAUSES["curvy"]) < positive.index(ANTI_GLOSS_POSITIVE)
+    for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
+        if body_type != "curvy":
+            assert clause not in positive, f"unexpected {body_type!r} clause in curvy prompt"
+
+
+def test_base_prompt_skips_body_clause_cleanly_for_unknown_body_type():
+    persona = _persona_with_body("not_a_real_body_type")
+    positive, _negative, _locked = build_nude_base_prompt(persona)
+    # None of the known clauses appear ...
+    for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
+        assert clause not in positive, f"unexpected {body_type!r} clause for an unknown body type"
+    # ... and the skip left no dangling separator artifact.
+    assert ", ," not in positive
+    assert ANTI_GLOSS_POSITIVE in positive  # the rest of the assembly is unaffected
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +242,11 @@ def test_faceswap_sources_hero_onto_generated_base():
     assert wf[hero_node]["inputs"]["image"] == "HERO_original.png"
     assert base_node != hero_node
 
-    # Gentle restore params mirror the pose graphs' node 200 exactly.
-    assert r["codeformer_weight"] == REACTOR_CODEFORMER_WEIGHT == 0.25
-    assert r["face_restore_visibility"] == REACTOR_FACE_RESTORE_VISIBILITY == 0.8
+    # Fidelity-favoring restore params mirror the pose graphs' node 200 exactly
+    # (FACE-DIAL fix: HIGH codeformer_weight keeps the swapped face's real texture,
+    # moderate visibility keeps raw-swap detail in the blend).
+    assert r["codeformer_weight"] == REACTOR_CODEFORMER_WEIGHT == 0.7
+    assert r["face_restore_visibility"] == REACTOR_FACE_RESTORE_VISIBILITY == 0.65
     assert r["swap_model"] == "inswapper_128.onnx"
     assert r["facedetection"] == "retinaface_resnet50"
     assert r["face_restore_model"] == "codeformer-v0.1.0.pth"

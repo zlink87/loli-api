@@ -36,7 +36,7 @@ import uuid
 import zlib
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import requests as http_requests
 
@@ -45,6 +45,7 @@ from services.job_manager import JobManager, Job
 from services.comfyui_client import ComfyUIClient
 from services.runpod_client import RunPodServerlessClient
 from services import runpod_runner
+from services import attribute_phrases as ap
 from services.prompt_generator import assemble_generation_prompt
 from services.outfit_vocab import generation_outfit_clause
 from services.storage_service import StorageService
@@ -97,17 +98,44 @@ ANTI_GLOSS_NEGATIVE = (
 NEUTRAL_BASE_OUTFIT_CLAUSE = (
     "completely nude, bare natural relaxed body, neutral reference posture, no arousal"
 )
+# Body-aesthetic clause (nude base v2), keyed by BodyType enum VALUES
+# (models/enums.py). A graceful, model-like framing of the persona's OWN body
+# type — never a slimming rewrite of it: curvy/bbw deliberately carry NO
+# slimming vocabulary (that would fight the admin's explicit body-type choice),
+# and none of the five carry gloss vocabulary (matte doctrine — see
+# ANTI_GLOSS_POSITIVE/NEGATIVE above). build_nude_base_prompt looks a persona's
+# body type up here and appends whatever comes back (empty string for an
+# unknown/missing body type is a clean skip, never a stray comma).
+BODY_AESTHETIC_CLAUSES: Dict[str, str] = {
+    "skinny": "gracefully slim with elegant model-like proportions and poised posture",
+    "athletic": "gracefully toned, athletic model-like physique with poised posture",
+    "average": "naturally balanced proportions with a graceful model-like posture",
+    "curvy": "gracefully curvy hourglass proportions carried with model-like poise",
+    "bbw": "confidently full-figured with soft, graceful proportions and poised posture",
+}
 
 # ---------------------------------------------------------------------------
 # ReActor face-swap parameters — mirrored EXACTLY from the pose graphs' node 200
-# (edit_pose_action.json / pose_2511_API.json). Gentle restore so the face is
-# locked WITHOUT smoothing away skin detail (the compounding-blur complaint).
+# (edit_pose_action.json / pose_2511_API.json).
+#
+# CodeFormer semantics (verified against the node's actual behavior — the
+# intuitive-sounding reading is INVERTED): ``codeformer_weight`` LOW = MORE
+# hallucinated/smoothed restoration (the plastic, doll-skin look); HIGH = MORE
+# faithful to the swapped input, i.e. it keeps the real skin texture inswapper
+# produced. ``face_restore_visibility`` blends that restored face back over the
+# raw swap (LOWER = more of the raw swap's own texture shows through the
+# blend). The old baked values (0.25 weight / 0.8 visibility) were deep in the
+# plastic zone: a LOW weight (heavy hallucinated smoothing) blended at HIGH
+# visibility (mostly the smoothed result) — this is what was flushing every
+# face to plastic. The current values raise the weight to stay faithful to the
+# swapped face's texture and pull visibility down so more raw-swap detail
+# survives the blend.
 # ---------------------------------------------------------------------------
 REACTOR_SWAP_MODEL = "inswapper_128.onnx"
 REACTOR_FACE_DETECTION = "retinaface_resnet50"
 REACTOR_FACE_RESTORE_MODEL = "codeformer-v0.1.0.pth"
-REACTOR_FACE_RESTORE_VISIBILITY = 0.8
-REACTOR_CODEFORMER_WEIGHT = 0.25
+REACTOR_FACE_RESTORE_VISIBILITY = 0.65
+REACTOR_CODEFORMER_WEIGHT = 0.7
 
 
 def stable_nude_base_seed(character_id: str) -> int:
@@ -140,7 +168,10 @@ def build_nude_base_prompt(persona) -> tuple:
     NAKED/HIGH outfit clause the assembler injects is swapped for the CALM
     ``NEUTRAL_BASE_OUTFIT_CLAUSE`` (the base is a neutral reference, not a scene) —
     everything else (identity block, pose, backdrop, quality tail) is untouched.
-    Returns ``(positive, negative, locked_block)``.
+    Right after that swap, the persona's own ``BODY_AESTHETIC_CLAUSES`` phrase
+    (nude base v2) is appended — a graceful, model-like framing of whatever body
+    type she already has, never a slimming rewrite of it — and skipped cleanly
+    for an unknown/missing body type. Returns ``(positive, negative, locked_block)``.
     """
     # Full-body NATURAL shot: an explicit shot suppresses the seeded shot rotation
     # (deterministic) and pins natural finish + full-body framing. photoStyle here
@@ -166,6 +197,14 @@ def build_nude_base_prompt(persona) -> tuple:
     # (count=1) — the clause is a unique comma-joined part of the positive.
     naked_clause = generation_outfit_clause(OutfitType.NAKED, NudityLevel.HIGH)
     positive = positive.replace(naked_clause, NEUTRAL_BASE_OUTFIT_CLAUSE, 1)
+    # Body-aesthetic clause (nude base v2): same enum-or-str value extraction the
+    # rest of the codebase uses for persona fields (ap.phrase() -> ap._val()), so
+    # a raw string ("curvy") or a BodyType member both resolve. Unknown/missing
+    # body type -> "" -> ap.phrase's own default, so the comma-join below skips
+    # cleanly with no dangling ", ".
+    body_clause = ap.phrase(BODY_AESTHETIC_CLAUSES, getattr(persona, "bodyType", None))
+    if body_clause:
+        positive = f"{positive}, {body_clause}"
     positive = f"{positive}, {ANTI_GLOSS_POSITIVE}"
     negative = f"{negative}, {ANTI_GLOSS_NEGATIVE}"
     return positive, negative, locked
@@ -207,7 +246,8 @@ def build_faceswap_workflow(base_image_name: str, hero_image_name: str) -> dict:
     ``base_image_name`` is the generated t2i base (the body the face is stamped
     ONTO). ``hero_image_name`` is the ORIGINAL hero photo (the face DONOR / identity
     source) — never a generated or intermediate image. Node params mirror the pose
-    graphs' node 200 exactly (gentle restore). Both images are shipped alongside as
+    graphs' node 200 exactly (fidelity-favoring restore — see the REACTOR_* constants
+    above). Both images are shipped alongside as
     base64 ``input.images[]`` entries under these flat names.
     """
     return {

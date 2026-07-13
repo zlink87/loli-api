@@ -14,7 +14,7 @@ _mr.validate_source_image = lambda u: u  # type: ignore
 
 from models.enums import (
     PoseType, OutfitType, NudityLevel, LocationType, TimeOfDayType, LightingType,
-    PhotoStyleType,
+    PhotoStyleType, KinkType, PersonalityType,
 )
 from models.requests import PersonaOptions
 from models.batch import BatchControls, SeedStrategy
@@ -63,7 +63,7 @@ def test_source_prefers_nude_base_when_present():
 def test_photo_style_threaded_from_controls():
     char = _character()
     req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
-    assert req.photoStyle == PhotoStyleType.POLISHED  # batch default now matches the generated hero's retouched finish
+    assert req.photoStyle == PhotoStyleType.NATURAL  # PROMPT DE-GLOSS: batch default reverted to natural
     controls = BatchControls(photo_style=PhotoStyleType.CANDID_PHONE)
     req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), controls)
     assert req.photoStyle == PhotoStyleType.CANDID_PHONE
@@ -555,11 +555,135 @@ def test_reactor_knobs_threaded_from_controls():
 def test_reactor_knobs_default_to_none():
     # BatchControls.reactor_restore_visibility/reactor_codeformer_weight default to
     # None -> the request carries None -> pipeline_worker falls back to the
-    # settings-level default (see test_pose_refs.py's D2 coverage).
+    # settings-level default (see test_pose_refs.py's D2 coverage). Pinned to an
+    # explicit non-soft style (POLISHED) so this stays independent of the WS-S
+    # codeformer dial (scene_mapper._SOFT_PHOTO_STYLES), which auto-populates these
+    # knobs for natural/candid_phone — and natural is BatchControls' own default
+    # since the PROMPT DE-GLOSS revert (models/batch.py).
     char = _character()
-    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), BatchControls())
+    controls = BatchControls(photo_style=PhotoStyleType.POLISHED)
+    req = scene_to_pipeline_request(char, _scene(pose=PoseType.SITTING), controls)
     assert req.reactorRestoreVisibility is None
     assert req.reactorCodeformerWeight is None
+
+
+# ---------------------------------------------------------------------------
+# CORE FLOW: single-pass eligibility matrix + mood-free background + dial values
+# ---------------------------------------------------------------------------
+def _single_pass_req(*, nude, pose, outfit, flag, controls=None):
+    char = _character()
+    if nude:
+        char.nude_base_url = "https://x.supabase.co/nude.png"
+    kw = {}
+    if pose:
+        kw["pose"] = PoseType.SITTING
+    if outfit:
+        kw["outfit"] = OutfitType.BUSINESS_SUIT
+    return scene_to_pipeline_request(
+        char, _scene(**kw), controls or BatchControls(), single_pass=flag
+    )
+
+
+def test_single_pass_eligible_when_all_conditions_met():
+    req = _single_pass_req(nude=True, pose=True, outfit=True, flag=True)
+    assert req.singlePassEdit is True
+
+
+def test_single_pass_not_eligible_when_any_condition_missing():
+    # flag off
+    assert _single_pass_req(nude=True, pose=True, outfit=True, flag=False).singlePassEdit is False
+    # no nude-base source (source is the clothed hero)
+    assert _single_pass_req(nude=False, pose=True, outfit=True, flag=True).singlePassEdit is False
+    # no pose
+    assert _single_pass_req(nude=True, pose=False, outfit=True, flag=True).singlePassEdit is False
+    # no outfit
+    assert _single_pass_req(nude=True, pose=True, outfit=False, flag=True).singlePassEdit is False
+
+
+def test_single_pass_default_param_is_not_eligible():
+    # single_pass defaults to None (caller passes the settings flag); an omitted flag must
+    # never collapse an otherwise-eligible item.
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT), BatchControls()
+    )
+    assert req.singlePassEdit is False
+
+
+def test_single_pass_naked_counts_as_outfit_set():
+    # NAKED IS an outfit for eligibility (its tier prose describes the state of dress).
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    controls = BatchControls(blocked_outfits=[])  # let NAKED survive the effective-outfit filter
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.NAKED), controls, single_pass=True
+    )
+    assert req.singlePassEdit is True
+
+
+def test_single_pass_fallback_keeps_three_step_fields_intact():
+    # Not eligible (no nude base) -> the legacy multi-step request is byte-identical: source
+    # is the clothed hero, and outfit + background(prompt) + pose all remain set.
+    char = _character()  # no nude base
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT),
+        BatchControls(), single_pass=True,
+    )
+    assert req.singlePassEdit is False
+    assert req.source_image == char.hero_photo_url
+    assert req.outfit == OutfitType.BUSINESS_SUIT
+    assert req.pose == PoseType.SITTING
+    assert req.prompt and req.prompt.strip()  # background step still present
+
+
+def test_background_text_is_mood_free_in_both_modes():
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    mk = [list(KinkType)[0]]
+    mp = list(PersonalityType)[0]
+    mood = sv.scene_mood_phrase(mk, mp)
+    assert mood  # guard: the mood function must produce something for the test to be meaningful
+    scene = _scene(
+        pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT,
+        mood_kinks=mk, mood_personality=mp,
+    )
+    legacy = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=False)
+    single = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=True)
+    assert mood not in (legacy.prompt or "")   # moods no longer ride the background text
+    assert mood not in (single.prompt or "")
+
+
+def test_single_pass_scene_text_drops_time_and_lighting_duplication():
+    # In single-pass the scene text becomes the pose prompt's "Place her in:" clause, and
+    # lighting/timeOfDay ride the pose tail via the request fields — so they must NOT also
+    # be composed into the scene text (else the one pose prompt says them twice).
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    scene = _scene(
+        pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT,
+        time_of_day=TimeOfDayType.NIGHT, lighting=LightingType.CANDLELIT,
+    )
+    single = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=True)
+    legacy = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=False)
+    assert sv.time_of_day_phrase("night") not in (single.prompt or "")
+    assert sv.lighting_phrase("candlelit") not in (single.prompt or "")
+    # Legacy composes them into the background text as before.
+    assert sv.time_of_day_phrase("night") in (legacy.prompt or "")
+    # …and both still carry the raw values so the pose tail can re-light/re-time.
+    assert single.lighting == "candlelit" and single.timeOfDay == "night"
+
+
+def test_soft_style_reactor_dial_uses_faithful_values():
+    # WS-S dial after the semantics correction: natural/candid_phone RAISE codeformer_weight
+    # (0.75, truer to the swap) and LOWER restore_visibility (0.55, more raw-swap texture).
+    char = _character()
+    for style in (PhotoStyleType.NATURAL, PhotoStyleType.CANDID_PHONE):
+        req = scene_to_pipeline_request(
+            char, _scene(pose=PoseType.SITTING), BatchControls(photo_style=style)
+        )
+        assert req.reactorCodeformerWeight == 0.75, style
+        assert req.reactorRestoreVisibility == 0.55, style
 
 
 if __name__ == "__main__":

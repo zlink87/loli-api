@@ -882,9 +882,11 @@ class PipelineEditRequest(BaseModel):
         le=1.0,
         description=(
             "Optional override for the pose step's ReActor face_restore_visibility "
-            "knob (node 200, 0.0-1.0). None = server default "
+            "knob (node 200, 0.0-1.0) — how strongly the CodeFormer-restored face is "
+            "blended over the raw face swap, so a LOWER value keeps more of the raw "
+            "swap's real skin texture. None = server default "
             "(settings.POSE_REACTOR_RESTORE_VISIBILITY, itself a -1.0 sentinel meaning "
-            "'leave the template's baked ~0.8 alone' unless the deployment configures "
+            "'leave the template's baked ~0.65 alone' unless the deployment configures "
             "it). D2."
         ),
     )
@@ -894,10 +896,13 @@ class PipelineEditRequest(BaseModel):
         le=1.0,
         description=(
             "Optional override for the pose step's ReActor codeformer_weight knob "
-            "(node 200, 0.0-1.0). None = server default "
+            "(node 200, 0.0-1.0). CodeFormer weight is easy to get backwards: a HIGHER "
+            "value stays faithful to the swapped input face (less hallucinated repaint), "
+            "while a LOWER value lets CodeFormer smooth/hallucinate more (the plastic, "
+            "'beautified' look). None = server default "
             "(settings.POSE_REACTOR_CODEFORMER_WEIGHT, itself a -1.0 sentinel meaning "
-            "'leave the template's baked ~0.25 alone' unless the deployment configures "
-            "it). Lower = less 'beautification' drift between batch items. D2."
+            "'leave the template's baked ~0.7 alone' unless the deployment configures "
+            "it). D2."
         ),
     )
     outfit: Optional[OutfitType] = Field(
@@ -1092,6 +1097,18 @@ class PipelineEditRequest(BaseModel):
             "types — keeps fine detail and avoids re-diffusing the body. Leave false for a "
             "nude source. Note: in a pose->outfit pipeline the person is still clothed when "
             "the outfit step runs, so this reflects the ORIGINAL source's dressed state."
+        )
+    )
+    singlePassEdit: bool = Field(
+        default=False,
+        description=(
+            "INTERNAL — set by the batch scene mapper only, never an admin/interactive UI. "
+            "Collapses the pipeline to a SINGLE pose step that dresses and re-scenes from "
+            "the source (the character's nude base) in one full-frame re-diffusion, instead "
+            "of the outfit -> background -> pose chain (the pose step re-renders everything "
+            "anyway, so the outfit/background steps only built a throwaway reference). The "
+            "'at least one step' validator still passes because pose is set. False = the "
+            "legacy multi-step pipeline (unchanged)."
         )
     )
 

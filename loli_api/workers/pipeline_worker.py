@@ -310,6 +310,14 @@ class PipelineBackgroundWorker:
         Determine which pipeline steps are active based on request params.
         Returns a list of step names in the configured order.
         """
+        # Single-pass batch collapse (scene_mapper-set flag): the pose step re-diffuses
+        # the whole frame and now also dresses + re-scenes from the nude base, so the
+        # separate outfit/background steps are dropped — one pose-graph job renders it
+        # all. Gated on a pose (the pose graph is what runs). getattr keeps interactive /
+        # test requests (no singlePassEdit field) on the legacy path.
+        if getattr(request, "singlePassEdit", False) and request.pose is not None:
+            return ["pose"]
+
         order = request.pipeline_order if request.pipeline_order else DEFAULT_PIPELINE_ORDER
 
         # Map step names to their enabling condition
@@ -395,6 +403,13 @@ class PipelineBackgroundWorker:
 
         if step_name == "pose":
             logger.info(f"[PIPELINE] {job_id} | pose | Reference: {pose_ref_name}")
+            # Single-pass batch collapse: this one pose step dresses + re-scenes from the
+            # nude base. dress_mode flips the outfit-continuity phrasing to an ADDITIVE
+            # "Dress her in:" (there is no garment on the nude base to "keep"), and
+            # scene_text replaces the "keep the same background" clause with the composed
+            # scene ("Place her in:"). Both default off for the legacy multi-step path
+            # (outfit/background already rendered), keeping that prompt byte-identical.
+            single_pass_edit = getattr(request, "singlePassEdit", False)
             prompt = apply_edit_photo_style(
                 build_pose_prompt(
                     request.pose,
@@ -432,6 +447,11 @@ class PipelineBackgroundWorker:
                     # None (interactive callers / no character profile) appends
                     # nothing, same as every other getattr-defensive field above.
                     identity_anchors=getattr(request, "identityAnchors", None),
+                    # Single-pass: dress additively from the nude base, and place her in
+                    # the composed scene text (request.prompt) instead of "keep image 1's
+                    # background". Both no-ops (default) on the legacy multi-step path.
+                    dress_mode=single_pass_edit,
+                    scene_text=(request.prompt if single_pass_edit else None),
                 ),
                 photo_style,
             )
@@ -457,6 +477,18 @@ class PipelineBackgroundWorker:
                 # WS-S: the dedicated ReActor face donor (sharp hero) staged in _run_step.
                 # None -> node 210 falls back to source_name (unchanged donor==source).
                 face_ref_image=face_ref_name,
+                # Pose output resolution (node 93). >0 scales the canvas up (prod raises
+                # the single-pass output to ~1.74 MP); 0.0 (default) keeps the template's
+                # baked 1.0 MP, so this passes None and the graph is untouched.
+                output_megapixels=(
+                    settings.POSE_OUTPUT_MEGAPIXELS
+                    if settings.POSE_OUTPUT_MEGAPIXELS > 0
+                    else None
+                ),
+                # Dark asset (07-14, ships OFF): sharper face-restore model override
+                # for node 200. Empty setting (default, until ops stages the file on
+                # the volume and flips it) -> None -> prepare_pose_workflow no-ops.
+                face_restore_model=settings.POSE_REACTOR_FACE_RESTORE_MODEL or None,
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(

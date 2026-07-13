@@ -237,6 +237,20 @@
       "title": "VAE Decode"
     }
   },
+  "215": {
+    "inputs": {
+      "enabled": true,
+      "boost_model": "GPEN-BFR-512.onnx",
+      "interpolation": "Bicubic",
+      "visibility": 1.0,
+      "codeformer_weight": 0.5,
+      "restore_with_main_after": false
+    },
+    "class_type": "ReActorFaceBoost",
+    "_meta": {
+      "title": "ReActor Face Boost (GPEN-BFR sharpen, dark asset)"
+    }
+  },
   "200": {
     "inputs": {
       "enabled": true,
@@ -256,6 +270,10 @@
       "console_log_level": 1,
       "source_image": [
         "210",
+        0
+      ],
+      "face_boost": [
+        "215",
         0
       ]
     },

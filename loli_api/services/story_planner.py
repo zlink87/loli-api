@@ -903,10 +903,16 @@ def _assign_batch_moods(character: "Character", scenes: List[SceneSpec], control
     target = min(len(eligible), max(1, round(n / 3)))
     rng = random.Random((controls.base_seed or 0) + 2300003)
     chosen = set(rng.sample(eligible, target))
+    # Cap the per-item mood payload to at most ONE kink (the first). The mood phrase
+    # renders a single clause anyway (scene_vocab.scene_mood_phrase now returns one
+    # phrase), and carrying the full kink list bloated the background-step prompt. WHICH
+    # items are moody stays the seeded ~1/3 selection above (rng.sample) — only the
+    # payload shrinks, so the same seed still yields byte-identical which-items gating.
     kinks = character.persona.kinks or None
+    one_kink = [kinks[0]] if kinks else None
     personality = character.persona.personality
     for i in chosen:
-        scenes[i].mood_kinks = kinks
+        scenes[i].mood_kinks = one_kink
         scenes[i].mood_personality = personality
 
 
@@ -2748,6 +2754,135 @@ def _enforce_expression_adjacency(scenes: List[SceneSpec], controls: BatchContro
     return scenes
 
 
+# ---------------------------------------------------------------------------
+# Caption coherence (PLANNER COHERENCE): repair captions the repairs falsified.
+# ---------------------------------------------------------------------------
+# Lowercase caption tokens that IMPLY a given LocationType. A beat_description is written
+# at PLAN time from the arc beat, but the downstream repair passes (nudity ceiling,
+# exposure caps, pose/location guards, usage caps, favored-location weighting) can MOVE an
+# item's location — leaving a caption like "a relaxed moment at a cafe" on an item whose
+# FINAL location is photo_studio, or "posing under studio lights" at home_living_room.
+# _reconcile_captions (the final repair pass) rewrites ONLY those lying captions.
+#
+# Matching is word-boundary-safe (\b...\b on the lowercased caption) so a token never
+# fires on a substring of an innocent word ("bar" vs "barefoot", "car" vs "care", "lab"
+# vs "label", "park" vs "parking", "sand" vs "sandal"). Genuinely-shared concepts
+# intentionally SHARE a token so a legit caption is never rewritten and only cross-family
+# moves are caught: the two offices share "office", the two kitchens share "kitchen", the
+# two studios share "studio" (an intra-pair swap is visually harmless, and the rule in
+# _reconcile_captions suppresses a rewrite whenever the caption already names the FINAL
+# location). Derived from LocationType (models/enums.py); EVERY value has an entry
+# (coverage-tested).
+_LOCATION_CAPTION_TOKENS: Dict[str, tuple] = {
+    # --- home ---
+    "home_bedroom": ("bedroom",),
+    "home_living_room": ("living room", "sofa", "couch"),
+    "home_kitchen": ("kitchen",),
+    "home_bathroom": ("bathroom", "bathtub", "shower"),
+    "home_balcony": ("balcony",),
+    "home_office": ("home office", "office"),
+    # --- workplace (profession-linked) ---
+    "office": ("office", "corporate office", "cubicle"),
+    "hospital_ward": ("hospital ward", "hospital", "ward"),
+    "classroom": ("classroom",),
+    "photo_studio": ("photo studio", "photoshoot", "photo shoot", "studio"),
+    "gym": ("gym", "workout"),
+    "yoga_studio": ("yoga studio", "yoga", "studio"),
+    "restaurant_kitchen": ("restaurant kitchen", "kitchen"),
+    "library": ("library", "bookshelves"),
+    "salon": ("salon", "hair salon"),
+    "stage": ("stage", "spotlight"),
+    "lab": ("laboratory", "lab"),
+    # --- outdoors ---
+    "beach": ("beach", "seaside", "shore", "sand"),
+    "park": ("park", "lawn"),
+    "city_street": ("street", "sidewalk", "downtown"),
+    "forest_trail": ("forest", "trail", "woods"),
+    "rooftop": ("rooftop",),
+    "poolside": ("poolside", "pool"),
+    "garden": ("garden",),
+    # --- social venues ---
+    "cafe": ("cafe", "coffee shop", "coffee"),
+    "restaurant": ("restaurant",),
+    "bar": ("cocktail bar", "bar"),
+    "nightclub": ("nightclub", "club", "dance floor"),
+    "hotel_room": ("hotel",),
+    "luxury_lounge": ("luxury lounge", "lounge"),
+    "car_interior": ("car interior", "parked car", "car"),
+}
+
+
+def _caption_names_location(caption_low: str, tokens: tuple) -> bool:
+    """True iff the (already-lowercased) caption contains any token as a whole word."""
+    for tok in tokens:
+        if re.search(r"\b" + re.escape(tok) + r"\b", caption_low):
+            return True
+    return False
+
+
+def _caption_foreign_location(caption_low: str, final_val: Optional[str]) -> bool:
+    """True iff the caption names a location whose enum value is NOT ``final_val``."""
+    for loc_val, tokens in _LOCATION_CAPTION_TOKENS.items():
+        if loc_val == final_val:
+            continue
+        if _caption_names_location(caption_low, tokens):
+            return True
+    return False
+
+
+def _rewrite_caption(scene: SceneSpec) -> str:
+    """
+    Deterministically rebuild a beat_description from the scene's FINAL fields — a pure
+    function of the scene (no RNG), so reproducibility is preserved. Lead = the
+    identity-free ``activity`` if present, else a short pose-derived phrase (the first
+    clause of the pose's POSE_DESCRIPTIONS text via _POSE_PHRASE_MAP), else the "a moment"
+    fallback — skipping any candidate that itself names a FOREIGN location so the rewrite
+    can't re-lie. The final location is rendered through the shared
+    scene_vocab.location_phrase helper (never a new table). Identity-scrubbed
+    (_scrub_identity, as elsewhere in validate_and_repair) and clamped to the
+    SceneSpec.beat_description limit (280).
+    """
+    final_val = _val(scene.location)
+    candidates: List[str] = []
+    if scene.activity:
+        candidates.append(scene.activity.strip())
+    if scene.pose is not None:
+        desc = _POSE_PHRASE_MAP.get(_val(scene.pose))
+        if desc:
+            candidates.append(desc.split(",")[0].strip())
+    lead = "a moment"
+    for cand in candidates:
+        if cand and not _caption_foreign_location(cand.lower(), final_val):
+            lead = cand
+            break
+    loc = sv.location_phrase(scene.location)
+    caption = f"{lead} at {loc}" if loc else lead
+    caption = _scrub_identity(caption)
+    if caption:
+        caption = caption[0].upper() + caption[1:]
+    return caption[:280]
+
+
+def _reconcile_captions(scenes: List[SceneSpec]) -> None:
+    """
+    FINAL caption-coherence pass (mutates in place): rewrite any beat_description that
+    names a location the item no longer occupies. Runs LAST in validate_and_repair —
+    after every location/outfit/pose repair has settled, the only point where the fields
+    are authoritative. A caption that already names its FINAL location (or names no
+    location at all) is left BYTE-IDENTICAL; only a caption that names some OTHER location
+    and NOT the final one is rewritten (from _rewrite_caption).
+    """
+    for s in scenes:
+        low = (s.beat_description or "").lower()
+        final_val = _val(s.location)
+        # Already names the final place -> trust it (even if it also names another).
+        if _caption_names_location(low, _LOCATION_CAPTION_TOKENS.get(final_val, ())):
+            continue
+        # Names a DIFFERENT place -> the caption lies; rebuild from the final fields.
+        if _caption_foreign_location(low, final_val):
+            s.beat_description = _rewrite_caption(s)
+
+
 def validate_and_repair(
     scenes: List[SceneSpec],
     character: Character,
@@ -2989,15 +3124,19 @@ def validate_and_repair(
     #                                         7+8 so any adjacency a pose move makes is cleaned up
     #   7. _enforce_pose_adjacency          — no identical pose in consecutive items
     #   8. _enforce_expression_adjacency    — no identical expression in consecutive items
+    #   9. _reconcile_captions              — rewrite captions the moves above falsified
     # 6 touches ONLY pose/pose_detail (multiset-preserving swaps + cap-aware re-picks), so the
     # nudity ramp, location ceilings, exposure caps, mood strip and — critically — the A2
     # expression pool / demeanor bias and its adjacency invariant are all left intact (8 still
-    # runs last on an untouched expression multiset).
+    # runs last on an untouched expression multiset). 9 runs LAST, once location/outfit/pose are
+    # final, and only rewrites a beat_description that names a location the item no longer
+    # occupies (a coherent caption stays byte-identical).
     if enforce_variety:
         _strip_ineligible_moods(repaired)
         repaired = _enforce_pose_compat(repaired, slots, controls)
         repaired = _enforce_pose_adjacency(repaired, controls)
         repaired = _enforce_expression_adjacency(repaired, controls)
+        _reconcile_captions(repaired)
 
     # Re-index global order so downstream ordering is contiguous.
     for i, s in enumerate(repaired):

@@ -60,14 +60,15 @@ def test_vocab_has_no_ageon_language():
 
 
 # --- batch defaults (dressed-by-default) ---
-def test_batch_controls_defaults_to_low_nudity_and_polished_style():
+def test_batch_controls_defaults_to_low_nudity_and_natural_style():
     from models.enums import PhotoStyleType
 
     controls = BatchControls()
     assert controls.max_nudity == NudityLevel.LOW
-    # Batch now defaults to POLISHED so edited items match the generated hero's
-    # retouched finish (was NATURAL, which rendered flatter).
-    assert controls.photo_style == PhotoStyleType.POLISHED
+    # PROMPT DE-GLOSS: batch default reverted to NATURAL (POLISHED's "lightly
+    # retouched skin" framing was part of the plastic/glossy look the doctrine
+    # removed; polished remains available as an explicit opt-in).
+    assert controls.photo_style == PhotoStyleType.NATURAL
 
 
 def test_story_mode_defaults_off_variety_only():
@@ -1630,6 +1631,136 @@ def test_all_compatible_batch_is_byte_identical_without_ws_p():
     # (and it really is all-compatible: WS-P found nothing to fix)
     for s in after:
         assert sp._pose_ok_at(s.pose, s.location) and sp._pose_outfit_ok(s.pose, s.outfit)
+
+
+# ---------------------------------------------------------------------------
+# PLANNER COHERENCE: caption reconciliation + mood-payload cap
+# ---------------------------------------------------------------------------
+from services.story_planner import (  # noqa: E402
+    _reconcile_captions, _LOCATION_CAPTION_TOKENS, _caption_names_location,
+    _caption_foreign_location,
+)
+
+
+def _scene(beat_description, location, pose=None, activity=None, nudity=NudityLevel.LOW):
+    return SceneSpec(
+        arc_id="a", arc_title="A", beat_index=0, global_index=0,
+        beat_description=beat_description, pose=pose, activity=activity,
+        location=location, nudityLevel=nudity,
+    )
+
+
+def _character_with_kinks(kinks):
+    persona = PersonaOptions(
+        ethnicity="caucasian", age=28, hairStyle="straight", hairColor="blonde",
+        eyeColor="green", bodyType="curvy", breastSize="medium", name="Estella",
+        occupation="nurse", personality="temptress", relationship="girlfriend", kinks=kinks,
+    )
+    return Character(persona=persona, likes=[], dislikes=[])
+
+
+def test_location_caption_tokens_cover_every_location():
+    # Every LocationType value must have a non-empty tuple of caption tokens.
+    for loc in LocationType:
+        toks = _LOCATION_CAPTION_TOKENS.get(loc.value)
+        assert toks, f"no caption tokens for location {loc.value}"
+        assert all(isinstance(t, str) and t for t in toks), f"bad token in {loc.value}: {toks}"
+
+
+def test_reconcile_rewrites_caption_when_location_moved():
+    # The live bug: caption "at a cafe" on an item whose FINAL location is photo_studio.
+    s = _scene("A relaxed moment at a cafe", LocationType.PHOTO_STUDIO,
+               pose=PoseType.STANDING_LEANING)
+    original = s.beat_description
+    _reconcile_captions([s])
+    low = s.beat_description.lower()
+    assert s.beat_description != original, "contradicting caption should have been rewritten"
+    assert not any(t in low for t in _LOCATION_CAPTION_TOKENS["cafe"]), \
+        f"cafe token survived: {s.beat_description!r}"
+    assert "studio" in low, f"studio phrase missing from rewrite: {s.beat_description!r}"
+    assert len(s.beat_description) <= 280
+
+
+def test_reconcile_rewrites_studio_caption_at_home():
+    # The other live case: "posing under studio lights" on a home_living_room item.
+    s = _scene("Posing under studio lights", LocationType.HOME_LIVING_ROOM, pose=PoseType.SOFA)
+    _reconcile_captions([s])
+    low = s.beat_description.lower()
+    assert "studio" not in low, f"studio survived at living room: {s.beat_description!r}"
+    assert _caption_names_location(low, _LOCATION_CAPTION_TOKENS["home_living_room"]), \
+        f"rewrite does not name the final location: {s.beat_description!r}"
+
+
+def test_reconcile_uses_activity_as_lead_when_present():
+    # activity (identity-free action) is preferred over the pose-derived fallback.
+    s = _scene("Sipping espresso at a cozy cafe", LocationType.GARDEN,
+               pose=PoseType.SITTING, activity="reading a paperback")
+    _reconcile_captions([s])
+    low = s.beat_description.lower()
+    assert "reading a paperback" in low, f"activity not used as lead: {s.beat_description!r}"
+    assert "garden" in low and "cafe" not in low, s.beat_description
+
+
+def test_reconcile_leaves_coherent_caption_byte_identical():
+    # A caption already naming its final location is untouched; so is one that names NO
+    # location at all. Byte-identical is the contract for non-contradicting captions.
+    coherent = _scene("A quiet morning in the bedroom", LocationType.HOME_BEDROOM,
+                      pose=PoseType.SITTING)
+    before = coherent.beat_description
+    tokenfree = _scene("Waking up slow, wrapped in a robe", LocationType.PHOTO_STUDIO,
+                       pose=PoseType.LYING_STOMACH)
+    before_tf = tokenfree.beat_description
+    _reconcile_captions([coherent, tokenfree])
+    assert coherent.beat_description == before
+    assert tokenfree.beat_description == before_tf
+
+
+def test_validate_and_repair_captions_are_location_coherent():
+    # End-to-end through validate_and_repair (the real batch path): after every repair
+    # settles, no caption may name a location the item does not finally occupy.
+    char = _character(occupation="model")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=5)
+    out = _planned(char, 24, controls)
+    for s in out:
+        low = (s.beat_description or "").lower()
+        fv = s.location.value
+        if _caption_names_location(low, _LOCATION_CAPTION_TOKENS.get(fv, ())):
+            continue
+        assert not _caption_foreign_location(low, fv), \
+            f"caption names a foreign location: loc={fv} cap={s.beat_description!r}"
+
+
+def test_reconcile_is_reproducible_through_validate_and_repair():
+    # Same seed -> identical captions (the rewrite is a pure function of final fields).
+    char = _character(occupation="model")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=5)
+    a = _planned(char, 24, controls)
+    b = _planned(char, 24, controls)
+    assert [s.beat_description for s in a] == [s.beat_description for s in b]
+
+
+def test_mood_items_carry_at_most_one_kink():
+    # Mood payload capped to one kink; the seeded ~1/3 which-items gating is unchanged.
+    char = _character_with_kinks(["bondage", "spanking", "edging"])
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    out = _planned(char, 24, controls)
+    moody = [s for s in out if s.mood_kinks]
+    assert moody, "expected some moody items on a HIGH batch with kinks"
+    for s in moody:
+        assert len(s.mood_kinks) <= 1, f"item carries multiple kinks: {s.mood_kinks}"
+
+
+def test_mood_cap_is_seeded_reproducible():
+    char = _character_with_kinks(["bondage", "spanking", "edging"])
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    a = _planned(char, 24, controls)
+    b = _planned(char, 24, controls)
+    assert [(s.mood_kinks, s.mood_personality) for s in a] == \
+        [(s.mood_kinks, s.mood_personality) for s in b]
 
 
 if __name__ == "__main__":

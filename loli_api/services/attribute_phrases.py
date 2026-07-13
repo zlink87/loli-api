@@ -40,14 +40,14 @@ ETHNICITY_PHRASES = {
     "latina": "a Latina woman with warm tan skin",
     "arab": "a Middle Eastern woman with olive skin",
     # --- European ---
-    "nordic": "a Nordic woman with fair luminous skin and softly angular features",
+    "nordic": "a Nordic woman with fair soft-matte skin and softly angular features",
     "slavic": "a Slavic woman with fair skin, high cheekbones and gently rounded features",
     "baltic": "a Baltic woman with very fair cool-toned skin and refined angular features",
     "western_european": "a Western European woman with fair neutral-toned skin and classic refined features",
     "mediterranean": "a Mediterranean woman with warm olive skin and expressive sculpted features",
     # --- Asian ---
-    "japanese": "a Japanese woman with light porcelain skin and delicate refined features",
-    "korean": "a Korean woman with light luminous skin and soft elegant features",
+    "japanese": "a Japanese woman with light matte ivory skin and delicate refined features",
+    "korean": "a Korean woman with light even-toned matte skin and soft elegant features",
     "chinese": "a Chinese woman with light warm-toned skin and graceful refined features",
     "southeast_asian": "a Southeast Asian woman with warm golden-tan skin and soft rounded features",
     "south_asian": "a South Asian woman with warm brown skin and striking defined features",
@@ -62,7 +62,7 @@ ETHNICITY_PHRASES = {
     "horn_of_africa": "a woman of Horn of Africa heritage with rich copper-brown skin and finely sculpted features",
     "afro_caribbean": "an Afro-Caribbean woman with warm deep-brown skin and vibrant full features",
     # --- Americas ---
-    "brazilian": "a Brazilian woman with sun-kissed bronze skin and softly sculpted features",
+    "brazilian": "a Brazilian woman with warm bronze skin and softly sculpted features",
     # --- Mixed ---
     "mixed_heritage": "a woman of mixed heritage with warm golden-tan skin and harmoniously blended features",
 }
@@ -84,14 +84,14 @@ SKIN_TONE_PHRASES = {
     "latina": "warm tan skin",
     "arab": "olive skin",
     # --- European ---
-    "nordic": "fair luminous skin",
+    "nordic": "fair soft-matte skin",
     "slavic": "fair skin",
     "baltic": "very fair cool-toned skin",
     "western_european": "fair neutral-toned skin",
     "mediterranean": "warm olive skin",
     # --- Asian ---
-    "japanese": "light porcelain skin",
-    "korean": "light luminous skin",
+    "japanese": "light matte ivory skin",
+    "korean": "light even-toned matte skin",
     "chinese": "light warm-toned skin",
     "southeast_asian": "warm golden-tan skin",
     "south_asian": "warm brown skin",
@@ -106,7 +106,7 @@ SKIN_TONE_PHRASES = {
     "horn_of_africa": "rich copper-brown skin",
     "afro_caribbean": "warm deep-brown skin",
     # --- Americas ---
-    "brazilian": "sun-kissed bronze skin",
+    "brazilian": "warm bronze skin",
     # --- Mixed ---
     "mixed_heritage": "warm golden-tan skin",
 }

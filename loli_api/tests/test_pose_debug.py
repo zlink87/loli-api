@@ -20,7 +20,7 @@ tuning knobs) plumbing:
   g4  Back-compat guard: calling prepare_pose_workflow with the new WS4
       params left at their defaults (or omitted entirely) is byte-identical
       to the pre-WS4 behavior — no node 300, node 200 untouched vs. the
-      template's baked 0.8 / 0.25.
+      template's baked 0.65 restore-visibility / 0.7 codeformer-weight.
 
 Loads the REAL edit_pose_action.json from loli_api/workflows/ for the
 injection tests (mirrors tests/test_identity_workflows.py and
@@ -124,8 +124,9 @@ def test_reactor_overrides_negative_sentinel_leaves_template_untouched():
         template, "src.png", "ref.png",
         reactor_restore_visibility=-1.0, reactor_codeformer_weight=-1.0,
     )
-    assert wf["200"]["inputs"]["face_restore_visibility"] == 0.8
-    assert wf["200"]["inputs"]["codeformer_weight"] == 0.25
+    # Baked values (the graph now bakes 0.65 / 0.7 after the ReActor-dial semantics fix).
+    assert wf["200"]["inputs"]["face_restore_visibility"] == 0.65
+    assert wf["200"]["inputs"]["codeformer_weight"] == 0.7
 
 
 def test_reactor_overrides_are_independent_of_each_other():
@@ -135,12 +136,12 @@ def test_reactor_overrides_are_independent_of_each_other():
         template, "src.png", "ref.png", reactor_restore_visibility=1.0,
     )
     assert visibility_only["200"]["inputs"]["face_restore_visibility"] == 1.0
-    assert visibility_only["200"]["inputs"]["codeformer_weight"] == 0.25  # untouched
+    assert visibility_only["200"]["inputs"]["codeformer_weight"] == 0.7  # untouched (baked)
 
     weight_only = prepare_pose_workflow(
         template, "src.png", "ref.png", reactor_codeformer_weight=0.5,
     )
-    assert weight_only["200"]["inputs"]["face_restore_visibility"] == 0.8  # untouched
+    assert weight_only["200"]["inputs"]["face_restore_visibility"] == 0.65  # untouched (baked)
     assert weight_only["200"]["inputs"]["codeformer_weight"] == 0.5
 
 
@@ -225,9 +226,10 @@ def test_defaults_are_byte_identical_to_pre_ws4_behavior():
     # No debug node, no new keys at all vs. the template.
     assert "300" not in wf
     assert set(wf.keys()) == set(template.keys())
-    # Node 200 (ReActor) completely untouched vs. the template's baked values.
-    assert wf["200"]["inputs"]["face_restore_visibility"] == 0.8
-    assert wf["200"]["inputs"]["codeformer_weight"] == 0.25
+    # Node 200 (ReActor) completely untouched vs. the template's baked values (the graph
+    # now bakes 0.65 / 0.7 after the ReActor-dial semantics fix).
+    assert wf["200"]["inputs"]["face_restore_visibility"] == 0.65
+    assert wf["200"]["inputs"]["codeformer_weight"] == 0.7
     assert wf["200"] == template["200"]
 
     # Explicitly passing the new params AT their defaults must produce the

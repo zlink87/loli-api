@@ -117,6 +117,39 @@ def test_none_style_and_palette_are_byte_identical_to_legacy():
     assert legacy.startswith(sv.LOCATION_PHRASES["home_bedroom"])
 
 
+# ---------------------------------------------------------------------------
+# scene_mood_phrase — mood garnish capped to ONE phrase (PLANNER COHERENCE)
+# ---------------------------------------------------------------------------
+def test_scene_mood_phrase_returns_at_most_one_phrase():
+    # Was: 1 personality + up to 3 kink phrases joined ("...expression, tense restrained
+    # mood, playful power-play mood") — too much garnish, polluted the background step.
+    # Now: exactly ONE phrase from the maps (or "").
+    all_phrases = set(sv.PERSONALITY_PHRASES.values()) | set(sv.KINK_PHRASES.values())
+    out = sv.scene_mood_phrase(kinks=["bondage", "spanking", "edging"], personality="nympho")
+    assert out in all_phrases, f"expected a single mood phrase, got {out!r}"
+    # No kink phrase may have been appended after the personality phrase.
+    assert sv.KINK_PHRASES["bondage"] not in out
+    assert sv.KINK_PHRASES["spanking"] not in out
+
+
+def test_scene_mood_phrase_personality_wins_over_kinks():
+    out = sv.scene_mood_phrase(kinks=["bondage", "spanking"], personality="nympho")
+    assert out == sv.PERSONALITY_PHRASES["nympho"]
+
+
+def test_scene_mood_phrase_first_kink_when_no_personality():
+    # personality None -> the FIRST kink that maps to a phrase (order-sensitive).
+    assert sv.scene_mood_phrase(kinks=["bondage", "spanking"], personality=None) \
+        == sv.KINK_PHRASES["bondage"]
+    assert sv.scene_mood_phrase(kinks=["spanking", "bondage"], personality=None) \
+        == sv.KINK_PHRASES["spanking"]
+
+
+def test_scene_mood_phrase_empty_when_nothing():
+    assert sv.scene_mood_phrase(None, None) == ""
+    assert sv.scene_mood_phrase([], None) == ""
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

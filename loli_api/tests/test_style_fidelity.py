@@ -4,8 +4,9 @@ WS-S — Style fidelity regression suite.
 Covers the style-fidelity work end to end:
   * palette scope: a character's color palette + styled room reach ONLY home-ish
     scenes (scene_mapper gate), never a cafe/street/gym;
-  * codeformer dial: natural/candid_phone default the pose-step ReActor gentler
-    (0.2 / 0.7) unless the admin set an explicit value;
+  * codeformer dial: natural/candid_phone default the pose-step ReActor to more
+    faithful, less airbrushed values (0.75 weight / 0.55 visibility) unless the admin
+    set an explicit value;
   * face-ref rewire: scene_mapper threads the sharp hero as faceRefImage, both pose
     graphs swap the face from the dedicated node 210 (falling back to the source),
     and the pipeline worker threads a staged face-ref name onto node 210;
@@ -107,8 +108,8 @@ def test_codeformer_dial_for_soft_styles_when_unset():
         req = scene_to_pipeline_request(
             char, _scene(LocationType.CAFE), BatchControls(photo_style=style)
         )
-        assert req.reactorCodeformerWeight == 0.2, style
-        assert req.reactorRestoreVisibility == 0.7, style
+        assert req.reactorCodeformerWeight == 0.75, style
+        assert req.reactorRestoreVisibility == 0.55, style
 
 
 def test_codeformer_dial_off_for_polished_and_explicit_wins():

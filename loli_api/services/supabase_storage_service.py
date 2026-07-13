@@ -18,6 +18,9 @@ from PIL import Image
 import numpy as np
 from supabase import create_client, Client
 
+from config import settings
+from services.image_finish import FINISH_FOLDERS, apply_film_grain
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +87,25 @@ class SupabaseStorageService:
         pil_image.save(buffer, format="PNG")
         buffer.seek(0)
         image_bytes = buffer.getvalue()
+
+        # Output finishing: subtle film-grain + local-contrast pass on the
+        # final PNG bytes, for user-facing edit outputs only (see
+        # services.image_finish for what/why and FINISH_FOLDERS for the exact
+        # folder allowlist). Runs on the re-encoded bytes above -- no second
+        # decode -- so the hash below reflects exactly what gets uploaded.
+        # Purely cosmetic: any failure here must never fail the upload, so it
+        # falls back to the unfinished bytes.
+        if (
+            settings.OUTPUT_FILM_GRAIN
+            and settings.OUTPUT_FILM_GRAIN_STRENGTH > 0
+            and folder in FINISH_FOLDERS
+        ):
+            try:
+                image_bytes = apply_film_grain(
+                    image_bytes, settings.OUTPUT_FILM_GRAIN_STRENGTH
+                )
+            except Exception as e:  # noqa: BLE001 - cosmetic pass, never block upload
+                logger.error(f"Output finishing failed, uploading unfinished image: {e}")
 
         # Calculate SHA256 hash
         sha256_hash = hashlib.sha256(image_bytes).hexdigest()
