@@ -20,9 +20,11 @@ from typing import Dict, List, Optional, Tuple
 from models.enums import JobStatus
 from models.batch import BatchCreate, BatchRead, BatchEstimate, BatchControls
 from models.scene import SceneSpec
+from models.trait_profile import TraitProfile
 from services import story_planner
 from services.story_planner import Character
 from services.scene_mapper import scene_to_pipeline_request, resolve_seed
+from services.trait_profile_merge import apply_trait_profile
 from services.batch_store import BatchStore, TERMINAL_ITEM_STATUSES
 from services.character_store import CharacterStore
 from services.character_image_store import CharacterImageStore, action_label
@@ -73,6 +75,7 @@ class BatchOrchestrator:
         batch_store: BatchStore,
         settings,
         character_image_store: Optional[CharacterImageStore] = None,
+        trait_profile_store=None,
     ):
         self.job_manager = job_manager
         self.character_store = character_store
@@ -81,6 +84,10 @@ class BatchOrchestrator:
         # Optional — used by rerun_item to supersede a previously published gallery
         # image so a rerun REPLACES it instead of orphaning/duplicating a row.
         self.character_image_store = character_image_store
+        # Optional — when wired AND body.use_trait_profile, launch_batch folds the
+        # character's saved TraitProfile into the batch controls/likes/dislikes as a soft
+        # bias (best-effort, never blocks). None -> feature inert (batches unchanged).
+        self.trait_profile_store = trait_profile_store
 
     async def launch_batch(
         self, character_id: str, body: BatchCreate
@@ -89,17 +96,28 @@ class BatchOrchestrator:
         if character is None:
             raise CharacterNotFound(character_id)
 
-        batch = await self.batch_store.create_batch(
-            character_id, body.count, body.controls,
-            likes=body.likes, dislikes=body.dislikes,
-        )
-
         # Variety-only batches: story mode is retired from the admin flow. Force it OFF
         # before planning so a stale admin payload (story_mode=True) can never re-enable the
         # old story-director path — batches always run the coherent variety planner now.
         controls = body.controls
         if getattr(controls, "story_mode", False):
             controls = controls.model_copy(update={"story_mode": False})
+        likes = body.likes
+        dislikes = body.dislikes
+
+        # Trait-profile bias (WS-B): fold the character's saved profile into the effective
+        # controls/likes/dislikes BEFORE persisting the batch, so the stored row carries the
+        # effective values and the reconciler re-derives the same Character with no changes.
+        # Best-effort: a load/merge failure NEVER blocks a launch (falls back to the raw body).
+        if body.use_trait_profile and self.trait_profile_store is not None:
+            controls, likes, dislikes = await self._apply_trait_profile(
+                character_id, character, controls, likes, dislikes
+            )
+
+        batch = await self.batch_store.create_batch(
+            character_id, body.count, controls,
+            likes=likes, dislikes=dislikes,
+        )
 
         # Ensure a base seed so PER_ITEM/FIXED strategies are reproducible.
         if controls.base_seed is None and story_planner._val(controls.seed_strategy) != "random":
@@ -107,8 +125,8 @@ class BatchOrchestrator:
 
         planner_character = Character(
             persona=character.persona,
-            likes=body.likes,
-            dislikes=body.dislikes,
+            likes=likes,
+            dislikes=dislikes,
             hero_photo_url=character.hero_image_url,
             bio=character.bio,  # story-mode narrative coherence
         )
@@ -145,6 +163,31 @@ class BatchOrchestrator:
         await self.batch_store.set_batch_status(batch.id, "running")
         batch = await self.batch_store.get_batch(batch.id) or batch
         return batch, estimate
+
+    async def _apply_trait_profile(
+        self, character_id: str, character, controls: BatchControls,
+        likes: List[str], dislikes: List[str],
+    ) -> Tuple[BatchControls, List[str], List[str]]:
+        """
+        Best-effort: load the character's saved TraitProfile and fold it into the batch
+        controls/likes/dislikes (services.trait_profile_merge.apply_trait_profile). NEVER
+        raises — a missing profile row, an un-migrated table, or any store error logs a
+        warning and returns the inputs unchanged, so a trait-profile problem can never
+        block a batch launch. The occupation (for the work-location protection rule) comes
+        from the character's persona.
+        """
+        try:
+            row = await self.trait_profile_store.get(character_id)
+            if not row:
+                return controls, likes, dislikes
+            profile = TraitProfile.coerce(row.get("profile"))
+            occupation = getattr(getattr(character, "persona", None), "occupation", None)
+            return apply_trait_profile(controls, likes, dislikes, profile, occupation)
+        except Exception as e:  # noqa: BLE001 — trait profile is a soft bias, never a gate
+            logger.warning(
+                f"[BATCH] trait-profile merge skipped for character {character_id}: {e}"
+            )
+            return controls, likes, dislikes
 
     async def confirm_batch(self, batch_id: str) -> Optional[BatchRead]:
         """

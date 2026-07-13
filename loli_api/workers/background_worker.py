@@ -253,6 +253,10 @@ class BackgroundWorker:
                         accessories=getattr(job.request, "accessories", None),
                         variety_seed=variety_seed,
                         pose_text=getattr(job.request, "poseText", None),
+                        # WS-B / B3 trait bias (usually derived from characterId at the
+                        # endpoint; None = byte-identical legacy prompt).
+                        wardrobe_styles=getattr(job.request, "wardrobeStyles", None),
+                        demeanor=getattr(job.request, "demeanor", None),
                     )
                 )
             except Exception as e:

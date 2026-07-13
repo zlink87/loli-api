@@ -83,6 +83,8 @@ def assemble_generation_prompt(
     accessories: Optional[List[AccessoryType]] = None,
     variety_seed: Optional[int] = None,
     pose_text: Optional[str] = None,
+    wardrobe_styles=None,
+    demeanor=None,
 ) -> Tuple[str, str, str]:
     """
     Deterministically assemble a character-generation prompt.
@@ -101,6 +103,13 @@ def assemble_generation_prompt(
         seeds) differ while each seed stays reproducible.
     ``pose_text``, when given, is used verbatim as the body-position phrase in
     place of any pool pick (and suppresses the seeded shot rotation).
+
+    ``wardrobe_styles``/``demeanor`` (WS-B / B3, a character's trait profile) are
+    soft pass-throughs: wardrobe_styles narrows the seeded default-clothing pool to
+    her styles (only on the no-explicit-outfit variety path), and demeanor swaps the
+    seeded expression pool toward her personality (only on the synthesized-shot
+    path). Both default None and are then byte-identical to the pre-WS-B behavior —
+    they never change the rng draw order/count, so seeded tests are unaffected.
 
     The scene clause (the admin's raw text, used verbatim) sits after the
     clothing/body-position clauses and BEFORE persona flavor deliberately: the
@@ -125,7 +134,7 @@ def assemble_generation_prompt(
     # override, synthesize a seeded varied shot; otherwise the plain hero default.
     if shot is None:
         if rng is not None and not pose_override:
-            shot = ShotOptions(**cv.varied_shot_fields(rng))
+            shot = ShotOptions(**cv.varied_shot_fields(rng, demeanor=demeanor))
         else:
             shot = ShotOptions()
 
@@ -133,7 +142,8 @@ def assemble_generation_prompt(
     shot_block = cv.compose_shot_block(shot, personality=persona.personality)
     locked = identity_block(persona)
     clothing = ov.generation_outfit_clause(
-        outfit, nudity_level, accessories, variety_seed=variety_seed
+        outfit, nudity_level, accessories, variety_seed=variety_seed,
+        wardrobe_styles=wardrobe_styles,
     )
     flavor = _persona_flavor(
         persona,
@@ -197,6 +207,8 @@ class PromptGenerator:
         accessories: Optional[List[AccessoryType]] = None,
         variety_seed: Optional[int] = None,
         pose_text: Optional[str] = None,
+        wardrobe_styles=None,
+        demeanor=None,
     ) -> Tuple[str, str, str]:
         """
         Full character-generation prompt builder.
@@ -206,10 +218,13 @@ class PromptGenerator:
         `shot` (may be None) is threaded straight through so assembly owns the
         fallback — never defaulted here, or the seeded shot rotation could never
         engage. `variety_seed`/`pose_text` drive WS3 variety (see
-        assemble_generation_prompt). Returns (positive, negative, locked_block).
+        assemble_generation_prompt). `wardrobe_styles`/`demeanor` (WS-B / B3) soft-
+        bias the seeded clothing pool / expression pool; both default None =
+        byte-identical. Returns (positive, negative, locked_block).
         """
         return assemble_generation_prompt(
             persona, context, shot=shot,
             outfit=outfit, nudity_level=nudity_level, accessories=accessories,
             variety_seed=variety_seed, pose_text=pose_text,
+            wardrobe_styles=wardrobe_styles, demeanor=demeanor,
         )

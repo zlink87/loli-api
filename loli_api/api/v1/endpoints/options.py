@@ -38,6 +38,11 @@ from models.enums import (
     CameraAngleType,
     ExpressionType,
     MotionType,
+    WardrobeStyleType,
+    DemeanorType,
+    ZodiacType,
+    InteriorStyleType,
+    PaletteType,
 )
 from models.requests import VIDEO_ALLOWED_LENGTHS, VIDEO_ALLOWED_RESOLUTIONS
 from services.output_presets import ASPECT_RATIO_DIMS, ALLOWED_RESOLUTIONS
@@ -101,5 +106,12 @@ async def get_options(user: Dict[str, Any] = Depends(require_admin)):
             # Both are sets in models/requests.py; sorted() gives stable JSON output.
             "lengths": sorted(VIDEO_ALLOWED_LENGTHS),
             "resolutions": sorted(VIDEO_ALLOWED_RESOLUTIONS),
+        },
+        "trait_profile": {
+            "wardrobe_style": _opts(WardrobeStyleType),
+            "demeanor": _opts(DemeanorType),
+            "zodiac": _opts(ZodiacType),
+            "interior_style": _opts(InteriorStyleType),
+            "color_palette": _opts(PaletteType),
         },
     }

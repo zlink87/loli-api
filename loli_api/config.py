@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     # they need much longer caps than image jobs.
     RUNPOD_VIDEO_EXECUTION_TIMEOUT_MS: int = 1_800_000   # 30 min per-job cap
     RUNPOD_VIDEO_TTL_MS: int = 5_400_000                 # 90 min total lifespan
+    # Dedicated serverless endpoint for video (reel) jobs. EMPTY (default) -> reels
+    # share RUNPOD_ENDPOINT_ID like every other job type. The main endpoint's fleet
+    # is all NVIDIA A40s; WAN 2.2 14B two-stage (20+20 steps, 81 frames) can't finish
+    # there inside RUNPOD_VIDEO_EXECUTION_TIMEOUT_MS, so every reel dies with
+    # "executionTimeout exceeded". Set this to a second endpoint id in the SAME
+    # datacenter as the models network volume (so it can attach the volume), backed
+    # by an fp8-capable fast GPU (L40S / RTX 6000 Ada / H100), so reels stop landing
+    # on A40-class workers.
+    RUNPOD_VIDEO_ENDPOINT_ID: str = ""
 
     # Keep-warm pinger (OPTIONAL, OFF by default). When enabled, the API submits a
     # lightweight warm-up job to the RunPod endpoint every WARMUP_INTERVAL_SECONDS
@@ -137,6 +146,14 @@ class Settings(BaseSettings):
     PERSONA_WRITER_TEMPERATURE: float = 0.8
     PERSONA_WRITER_MAX_TOKENS: int = 1200
     PERSONA_WRITER_MODEL: str = ""
+
+    # Trait-profile writer (WS-B: the durable per-character "RPG character sheet").
+    # Uses Venice above. Empty TRAIT_WRITER_MODEL -> VENICE_MODEL. Works keyless
+    # (deterministic fallback tables). Lower temperature than persona: the output is a
+    # coherent structured taste sheet, not flavorful prose.
+    TRAIT_WRITER_TEMPERATURE: float = 0.7
+    TRAIT_WRITER_MAX_TOKENS: int = 900
+    TRAIT_WRITER_MODEL: str = ""
 
     # Motion writer (Reels: interpret a custom motionPrompt into a WAN-friendly
     # description + button label). Uses Venice above. Empty MOTION_WRITER_MODEL ->
@@ -172,6 +189,23 @@ class Settings(BaseSettings):
     # -> variety_seed=None everywhere, i.e. byte-identical legacy prompts. Age
     # accuracy and nudity flavor-gating are NOT gated by this (they always apply).
     GENERATION_VARIETY_ENABLED: bool = True
+
+    # Subtle color-grade clause appended to the GENERATION (character-gen,
+    # text-to-image) photo-style wrapper only -- node 125 of the Z-Image Turbo
+    # workflow (services.prompt_constants.photo_style_template). Feedback: hero
+    # photos render realistic (the "android phone cam-quality" style wording is
+    # deliberate and stays) but flat/desaturated. This clause boosts color
+    # richness/finish WITHOUT reaching for "vibrant/HDR/oversaturated" language
+    # that would flip the look into an Instagram-filter aesthetic. Tunable via
+    # env so wording can be adjusted without a redeploy. Empty string disables
+    # it entirely -> byte-identical legacy prompts on every generation style.
+    # Does NOT touch the qwen EDIT-pipeline suffixes (EDIT_PHOTO_STYLE_SUFFIXES) --
+    # those are a separate, positive-prompt-only mechanism for a different model.
+    GENERATION_COLOR_GRADE: str = (
+        "rich true-to-life colors with gentle film-like saturation, subtle "
+        "warm color grading, polished final finish, balanced contrast, no "
+        "washed-out or faded tones"
+    )
 
     # Anthropic Claude (story planner — SFW-only fallback provider).
     # Claude refuses explicit adult content, so it is never routed NSFW batches;

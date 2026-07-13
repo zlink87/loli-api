@@ -417,3 +417,77 @@ class PhotoStyleType(str, Enum):
     POLISHED = "polished"          # generation default: retouched editorial finish
     STUDIO = "studio"
     CANDID_PHONE = "candid_phone"  # legacy raw/candid phone-cam look
+
+
+# ---------------------------------------------------------------------------
+# Character trait profiles (WS-B)
+# The "RPG character sheet": persistent per-character taste that biases the
+# EXISTING enum/pool machinery (wardrobe, demeanor-driven expression, home
+# scenery) so every character lives a distinct visual life. These are DISPLAY +
+# BIAS vocab only — no free text ever enters a render prompt. Each value maps to
+# a curated phrase/tag elsewhere (services/outfit_vocab.py, camera_vocab.py,
+# scene_vocab.py); coverage is enforced by tests.
+# ---------------------------------------------------------------------------
+class WardrobeStyleType(str, Enum):
+    """A character's wardrobe style tags (strong bias, not a hard filter)."""
+    ELEGANT = "elegant"
+    GLAMOROUS = "glamorous"
+    PROFESSIONAL = "professional"
+    CASUAL_MINIMAL = "casual_minimal"
+    SPORTY = "sporty"
+    GIRLY = "girly"
+    EDGY = "edgy"
+    STREETWEAR = "streetwear"
+    BOHEMIAN = "bohemian"
+    COZY_LOUNGE = "cozy_lounge"
+    TRADITIONAL = "traditional"
+
+
+class DemeanorType(str, Enum):
+    """A character's default demeanor — drives expression/pose flavor in batches."""
+    SHY = "shy"
+    CONFIDENT = "confident"
+    PLAYFUL = "playful"
+    SULTRY = "sultry"
+    ELEGANT = "elegant"
+    ENERGETIC = "energetic"
+    COZY = "cozy"
+    MYSTERIOUS = "mysterious"
+
+
+class ZodiacType(str, Enum):
+    """Zodiac sign — display + deterministic seed flavor only."""
+    ARIES = "aries"
+    TAURUS = "taurus"
+    GEMINI = "gemini"
+    CANCER = "cancer"
+    LEO = "leo"
+    VIRGO = "virgo"
+    LIBRA = "libra"
+    SCORPIO = "scorpio"
+    SAGITTARIUS = "sagittarius"
+    CAPRICORN = "capricorn"
+    AQUARIUS = "aquarius"
+    PISCES = "pisces"
+
+
+class InteriorStyleType(str, Enum):
+    """Home interior style — keeps a character's home scenery visually consistent."""
+    COZY_BOHEMIAN = "cozy_bohemian"
+    MODERN_MINIMAL = "modern_minimal"
+    LUXURY_GLAM = "luxury_glam"
+    RUSTIC_WARM = "rustic_warm"
+    SCANDINAVIAN_LIGHT = "scandinavian_light"
+    INDUSTRIAL_LOFT = "industrial_loft"
+    GIRLY_PASTEL = "girly_pastel"
+    ARTSY_ECLECTIC = "artsy_eclectic"
+
+
+class PaletteType(str, Enum):
+    """Color palette — a short lighting/color clause folded into scenery."""
+    WARM_NEUTRALS = "warm_neutrals"
+    SOFT_PASTELS = "soft_pastels"
+    BOLD_DARK = "bold_dark"
+    EARTHY_GREEN = "earthy_green"
+    CRISP_WHITE = "crisp_white"
+    JEWEL_TONES = "jewel_tones"

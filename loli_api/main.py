@@ -47,10 +47,12 @@ from services.character_store import CharacterStore
 from services.character_image_store import CharacterImageStore
 from services.chat_persona_store import ChatPersonaStore
 from services.persona_writer import PersonaWriter
+from services.trait_profile_writer import TraitProfileWriter
 from services.motion_writer import MotionWriter
 from services.scene_writer import SceneWriter
 from services.batch_store import BatchStore
 from services.nude_base_store import NudeBaseStore
+from services.trait_profile_store import TraitProfileStore
 from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
 from models.responses import HealthResponse, ErrorResponse
 from models.enums import PoseType
@@ -99,6 +101,25 @@ runpod_client = RunPodServerlessClient(
 )
 job_manager.attach_runpod_client(runpod_client)
 
+# Dedicated video (reel) endpoint (OPTIONAL, empty by default -> reels share
+# runpod_client above). The main endpoint's fleet is all A40s; WAN 2.2 14B
+# two-stage (20+20 steps, 81 frames) can't finish there within
+# RUNPOD_VIDEO_EXECUTION_TIMEOUT_MS, so reels need a separate fp8-capable
+# fast-GPU endpoint (L40S / RTX 6000 Ada / H100). Same api_key/base_url — only
+# the endpoint id and video-sized timeout/ttl differ.
+if settings.RUNPOD_VIDEO_ENDPOINT_ID and settings.RUNPOD_VIDEO_ENDPOINT_ID != settings.RUNPOD_ENDPOINT_ID:
+    video_runpod_client = RunPodServerlessClient(
+        api_key=settings.RUNPOD_API_KEY,
+        endpoint_id=settings.RUNPOD_VIDEO_ENDPOINT_ID,
+        base_url=settings.RUNPOD_BASE_URL,
+        default_execution_timeout_ms=settings.RUNPOD_VIDEO_EXECUTION_TIMEOUT_MS,
+        default_ttl_ms=settings.RUNPOD_VIDEO_TTL_MS,
+    )
+    logger.info(f"Dedicated video RunPod endpoint active: {settings.RUNPOD_VIDEO_ENDPOINT_ID}")
+else:
+    video_runpod_client = runpod_client
+job_manager.attach_video_runpod_client(video_runpod_client)
+
 prompt_generator = PromptGenerator()
 
 # Persona/bio writer (Feature 1). Unconditional — works keyless (deterministic
@@ -109,6 +130,17 @@ persona_writer = PersonaWriter(
     model=settings.PERSONA_WRITER_MODEL or settings.VENICE_MODEL,
     temperature=settings.PERSONA_WRITER_TEMPERATURE,
     max_tokens=settings.PERSONA_WRITER_MAX_TOKENS,
+)
+
+# Trait-profile writer (WS-B: durable per-character trait sheet). Unconditional —
+# works keyless (deterministic fallback tables) and uses Venice when VENICE_API_KEY
+# is set. Persistence is Supabase-gated (trait_profile_store, built below).
+trait_profile_writer = TraitProfileWriter(
+    api_key=settings.VENICE_API_KEY,
+    base_url=settings.VENICE_BASE_URL,
+    model=settings.TRAIT_WRITER_MODEL or settings.VENICE_MODEL,
+    temperature=settings.TRAIT_WRITER_TEMPERATURE,
+    max_tokens=settings.TRAIT_WRITER_MAX_TOKENS,
 )
 
 # Motion writer (Reels: interpret a custom motionPrompt). Unconditional — works
@@ -282,6 +314,7 @@ character_image_store = None
 chat_persona_store = None
 batch_store = None
 nude_base_store = None
+trait_profile_store = None
 batch_orchestrator = None
 batch_reconciler = None
 batch_engine = None
@@ -294,11 +327,15 @@ if supabase_db.is_configured():
     chat_persona_store = ChatPersonaStore(_db)
     batch_store = BatchStore(_db)
     nude_base_store = NudeBaseStore(_db)
+    trait_profile_store = TraitProfileStore(_db)
     batch_orchestrator = BatchOrchestrator(
         job_manager, character_store, batch_store, settings,
         # Lets rerun_item supersede a previously published gallery image so a
         # single-photo rerun replaces it instead of duplicating the row.
         character_image_store=character_image_store,
+        # Folds the character's saved trait profile into batch controls at launch
+        # (soft bias; body.use_trait_profile gates it, explicit admin values win).
+        trait_profile_store=trait_profile_store,
     )
     batch_reconciler = BatchReconciler(
         job_manager, character_store, batch_store, settings,
@@ -362,7 +399,9 @@ video_worker = VideoBackgroundWorker(
     image_cache_service=image_cache_service,
     notification_service=notification_service,
     supabase_storage_service=supabase_storage_service,
-    runpod_client=runpod_client,
+    # Dedicated video endpoint when RUNPOD_VIDEO_ENDPOINT_ID is set; otherwise the
+    # same object as runpod_client (see the video_runpod_client assignment above).
+    runpod_client=video_runpod_client,
     character_image_store=character_image_store,
     # FLF2V (first-last-frame) reel path. EMPTY (default) -> OFF: the worker's
     # FLF2V branch is never taken even if a request sets useFlf2v. Enabling it also
@@ -471,6 +510,8 @@ async def lifespan(app: FastAPI):
         chat_persona_store=chat_persona_store,
         nude_base_store=nude_base_store,
         scene_writer=scene_writer,
+        trait_profile_writer=trait_profile_writer,
+        trait_profile_store=trait_profile_store,
     )
 
     # Sync BASE_URL to Supabase so external services know our tunnel URL

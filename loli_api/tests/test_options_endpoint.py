@@ -30,6 +30,9 @@ _ENUM_KEYS = {
         "camera_angle", "expression",
     ],
     "video": ["motion"],
+    "trait_profile": [
+        "wardrobe_style", "demeanor", "zodiac", "interior_style", "color_palette",
+    ],
 }
 
 
@@ -53,7 +56,7 @@ def test_admin_can_reach_options():
     settings.ADMIN_USER_IDS = "admin-1"
     user = asyncio.run(require_admin(user={"sub": "admin-1"}))
     body = asyncio.run(ep.get_options(user=user))
-    assert set(body.keys()) == {"persona", "generation", "scene", "video"}
+    assert set(body.keys()) == {"persona", "generation", "scene", "video", "trait_profile"}
 
 
 def test_persona_occupation_contains_teacher():

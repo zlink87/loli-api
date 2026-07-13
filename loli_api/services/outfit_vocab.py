@@ -27,9 +27,9 @@ Exposure is strictly opt-in past LOW; a LOW-nudity request must never render
 a costume that is secretly half-undressed.
 """
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
-from models.enums import OutfitType, AccessoryType, NudityLevel
+from models.enums import OutfitType, AccessoryType, NudityLevel, WardrobeStyleType
 
 
 OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
@@ -366,6 +366,312 @@ OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Outfit exposure CAP — the most explicit nudity level a garment can HONESTLY show
+# ---------------------------------------------------------------------------
+# The reported bug: a batch item labeled "Mostly nude" (REVEALING) rendered a fully
+# dressed graphic-tee + denim shorts. Mechanism: the edit model resolves the
+# contradiction (a covering garment asked for near-nude exposure) toward the GARMENT
+# noun, so the label lies. This map states, per outfit, the ceiling level the garment
+# can actually render at — the planner then keeps each item's nudityLevel <= this cap
+# (swapping/re-picking outfits, or, as a last resort, lowering the LABEL so it stays
+# truthful). Exactly the same gap class the LOCATION_NUDITY_CEILING table closes for
+# places; this one closes it for garments.
+#
+# Classification principle (conservative, render-empirical — cap = what the garment
+# NOUN will reliably show, because the model renders the noun, not the aspirational
+# tier prose):
+#   * MEDIUM     — garment stays fundamentally DRESSED at its high tier: the model
+#                  renders it as itself and it bares at most cleavage / leg / midriff /
+#                  sideboob. Every structured dress & gown, tee/jeans/street outfit,
+#                  suit, jumpsuit, activewear (sports bra + leggings/shorts read as
+#                  activewear), covering one-piece swimsuit, traditional drape
+#                  (sari/cheongsam/hanbok/dirndl — yards of fabric read clothed),
+#                  loungewear pajamas, and the four uniforms.
+#   * REVEALING  — minimal / sheer / slip / micro / open-drape pieces the model renders
+#                  as barely-there: string bikini, sheer summer dress, satin slip,
+#                  sequin micro club set, lace bodysuit, and the STRUCTURED open coats
+#                  (leather / fur / puffer) which frame a mostly-bare body but read as a
+#                  coat, not full frontal. "Mostly nude, covering little."
+#   * HIGH       — literally naked, OR the thin open-front-over-nothing pieces whose
+#                  whole design is to hang open and bare breasts AND sex: NAKED, the
+#                  satin robe and silk kimono (thin boudoir robes that fall fully open),
+#                  and the trench coat (the flasher trope — worn open over nothing,
+#                  full-frontal). Bulky/structured coats stay REVEALING; thin robes that
+#                  are MEANT to be worn open reach HIGH.
+# Judgment calls (documented per the plan's "judge individually"):
+#   - satin_robe / kimono -> HIGH not REVEALING: their own high tier is "hanging open,
+#     bare breasts, stomach and bare sex" — an open-front robe is exactly the "arguably
+#     HIGH" case the plan calls out.
+#   - trench_coat -> HIGH (nude-underneath flasher) but fur/puffer/leather -> REVEALING:
+#     the trench is a thin drape that renders as a clean full-frontal reveal; the others
+#     are bulky/structured and render as a coat over a mostly-bare body.
+#   - white_summer_dress -> REVEALING (its high tier is explicitly see-through/transparent),
+#     unlike the opaque dresses which stay MEDIUM.
+#   - activewear + one_piece_swimsuit -> MEDIUM: a sports bra / swimsuit renders with the
+#     core covered no matter how the tier prose escalates (the exact lesson of the bug).
+# Every OutfitType is mapped (a coverage test makes an unmapped value impossible);
+# outfit_exposure_cap() still defaults MEDIUM defensively.
+OUTFIT_EXPOSURE_CAP: Dict[OutfitType, NudityLevel] = {
+    # --- dresses & gowns: render as a dress -> MEDIUM (cleavage/leg, still dressed) ---
+    OutfitType.RED_EVENING_GOWN: NudityLevel.MEDIUM,
+    OutfitType.LITTLE_BLACK_DRESS: NudityLevel.MEDIUM,
+    OutfitType.FLORAL_MAXI_DRESS: NudityLevel.MEDIUM,
+    OutfitType.COCKTAIL_DRESS: NudityLevel.MEDIUM,
+    OutfitType.BODYCON_DRESS: NudityLevel.MEDIUM,
+    OutfitType.VELVET_DRESS: NudityLevel.MEDIUM,
+    OutfitType.POLKA_DOT_DRESS_50S: NudityLevel.MEDIUM,
+    OutfitType.JUMPSUIT: NudityLevel.MEDIUM,
+    # sheer/slip dresses render see-through / barely-there -> REVEALING
+    OutfitType.WHITE_SUMMER_DRESS: NudityLevel.REVEALING,   # high tier = transparent
+    OutfitType.SATIN_SLIP_DRESS: NudityLevel.REVEALING,     # thin clingy slip, lingerie-class
+    # --- tailored / formal: a suit reads as a suit -> MEDIUM ---
+    OutfitType.BUSINESS_SUIT: NudityLevel.MEDIUM,
+    OutfitType.BLAZER_TROUSERS: NudityLevel.MEDIUM,
+    OutfitType.PENCIL_SKIRT_SET: NudityLevel.MEDIUM,
+    OutfitType.TUXEDO: NudityLevel.MEDIUM,
+    OutfitType.POWER_SUIT_80S: NudityLevel.MEDIUM,
+    # --- casual / street: top + bottoms read dressed -> MEDIUM (the exact bug item) ---
+    OutfitType.DENIM_JACKET_JEANS: NudityLevel.MEDIUM,
+    OutfitType.GRAPHIC_TEE_SHORTS: NudityLevel.MEDIUM,      # the reported "Mostly nude" tee
+    OutfitType.HOODIE_JOGGERS: NudityLevel.MEDIUM,
+    OutfitType.FLANNEL_SHIRT: NudityLevel.MEDIUM,
+    OutfitType.CROP_TOP_CARGO: NudityLevel.MEDIUM,
+    OutfitType.OVERSIZED_STREETWEAR: NudityLevel.MEDIUM,
+    OutfitType.BOMBER_JACKET_FIT: NudityLevel.MEDIUM,
+    OutfitType.BELL_BOTTOMS_70S: NudityLevel.MEDIUM,
+    # --- activewear: sports bra + leggings/shorts render as activewear -> MEDIUM ---
+    OutfitType.YOGA_OUTFIT: NudityLevel.MEDIUM,
+    OutfitType.TENNIS_OUTFIT: NudityLevel.MEDIUM,
+    OutfitType.RUNNING_GEAR: NudityLevel.MEDIUM,
+    OutfitType.GYM_SET: NudityLevel.MEDIUM,
+    # --- swim: covering one-piece -> MEDIUM; string bikini -> REVEALING ---
+    OutfitType.ONE_PIECE_SWIMSUIT: NudityLevel.MEDIUM,
+    OutfitType.BIKINI: NudityLevel.REVEALING,
+    # --- structured outerwear: renders as a coat over a mostly-bare body -> REVEALING ---
+    OutfitType.LEATHER_JACKET: NudityLevel.REVEALING,
+    OutfitType.PUFFER_JACKET: NudityLevel.REVEALING,
+    OutfitType.FUR_COAT: NudityLevel.REVEALING,
+    # --- traditional drapes: yards of fabric read heavily clothed -> MEDIUM ---
+    OutfitType.SARI: NudityLevel.MEDIUM,
+    OutfitType.CHEONGSAM: NudityLevel.MEDIUM,
+    OutfitType.HANBOK: NudityLevel.MEDIUM,
+    OutfitType.DIRNDL: NudityLevel.MEDIUM,
+    # --- eveningwear / lingerie / loungewear ---
+    OutfitType.SEQUIN_TOP_SKIRT: NudityLevel.REVEALING,     # micro sequin club set
+    OutfitType.LACE_BODYSUIT: NudityLevel.REVEALING,        # sheer lace bodysuit
+    OutfitType.SILK_PAJAMAS: NudityLevel.MEDIUM,            # loungewear, renders covered
+    # --- thin open-front-over-nothing robes/coats + naked -> HIGH ---
+    OutfitType.SATIN_ROBE: NudityLevel.HIGH,                # boudoir robe, falls fully open
+    OutfitType.KIMONO: NudityLevel.HIGH,                    # silk robe, unties fully open
+    OutfitType.TRENCH_COAT: NudityLevel.HIGH,               # flasher: open over nothing
+    # --- uniforms: render as a uniform -> MEDIUM ---
+    OutfitType.NURSE_UNIFORM: NudityLevel.MEDIUM,
+    OutfitType.SCHOOL_UNIFORM: NudityLevel.MEDIUM,
+    OutfitType.MILITARY_UNIFORM: NudityLevel.MEDIUM,
+    OutfitType.CHEF_UNIFORM: NudityLevel.MEDIUM,
+    OutfitType.NAKED: NudityLevel.HIGH,
+}
+
+
+def outfit_exposure_cap(outfit: Optional[OutfitType]) -> NudityLevel:
+    """
+    The most explicit nudity level `outfit` can honestly render at (see
+    OUTFIT_EXPOSURE_CAP). Unmapped/None -> MEDIUM (a safe "still dressed" default);
+    the coverage test in test_story_planner makes an unmapped OutfitType impossible,
+    so the default only guards a None passed by a caller.
+    """
+    if outfit is None:
+        return NudityLevel.MEDIUM
+    return OUTFIT_EXPOSURE_CAP.get(outfit, NudityLevel.MEDIUM)
+
+
+# ---------------------------------------------------------------------------
+# Wardrobe-style tags (WS-B trait profiles) — every garment's "style DNA".
+# ---------------------------------------------------------------------------
+# A character's TraitProfile carries wardrobe_styles (WardrobeStyleType); this map
+# turns those abstract styles into a concrete garment SET (outfits_for_styles), which
+# the trait-profile merge folds into BatchControls.wardrobe_outfits so the planner
+# SOFT-biases her batches toward clothes that fit her taste (a strong bias, NOT a hard
+# filter — see story_planner._prefer_wardrobe: intersect-with-fallback, never empties).
+#
+# Rules (coverage-tested in test_outfit_vocab_traits):
+#   * EVERY OutfitType except NAKED is tagged with >=1 WardrobeStyleType (NAKED is
+#     nudity, not a wardrobe taste, so it is deliberately ABSENT here just as it is
+#     from favorite_outfits/never_wears).
+#   * The four uniforms are tagged `professional` for DISPLAY/derivation completeness,
+#     but the planner NEVER style-filters them out — _prefer_wardrobe always retains
+#     _UNIFORM_OUTFITS so a nurse's work chapter keeps its uniform regardless of her
+#     wardrobe styles.
+# Tags describe the garment's expressed vibe, so a sporty/streetwear character and an
+# elegant/glamorous one draw visibly different wardrobes from the same beat pools.
+OUTFIT_STYLE_TAGS: Dict[OutfitType, frozenset] = {
+    # --- dresses & gowns ---
+    OutfitType.RED_EVENING_GOWN: frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.GLAMOROUS}),
+    OutfitType.LITTLE_BLACK_DRESS: frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.GLAMOROUS}),
+    OutfitType.WHITE_SUMMER_DRESS: frozenset({WardrobeStyleType.GIRLY, WardrobeStyleType.BOHEMIAN}),
+    OutfitType.FLORAL_MAXI_DRESS: frozenset({WardrobeStyleType.BOHEMIAN, WardrobeStyleType.GIRLY}),
+    OutfitType.COCKTAIL_DRESS: frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.ELEGANT}),
+    OutfitType.BODYCON_DRESS: frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.EDGY}),
+    OutfitType.VELVET_DRESS: frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.GLAMOROUS}),
+    OutfitType.SATIN_SLIP_DRESS: frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.ELEGANT}),
+    OutfitType.JUMPSUIT: frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.EDGY}),
+    OutfitType.POLKA_DOT_DRESS_50S: frozenset({WardrobeStyleType.GIRLY}),
+    # --- tailored / formal ---
+    OutfitType.BUSINESS_SUIT: frozenset({WardrobeStyleType.PROFESSIONAL, WardrobeStyleType.ELEGANT}),
+    OutfitType.BLAZER_TROUSERS: frozenset({WardrobeStyleType.PROFESSIONAL, WardrobeStyleType.CASUAL_MINIMAL}),
+    OutfitType.PENCIL_SKIRT_SET: frozenset({WardrobeStyleType.PROFESSIONAL, WardrobeStyleType.ELEGANT}),
+    OutfitType.TUXEDO: frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.GLAMOROUS}),
+    OutfitType.POWER_SUIT_80S: frozenset({WardrobeStyleType.PROFESSIONAL, WardrobeStyleType.GLAMOROUS}),
+    # --- casual / street ---
+    OutfitType.DENIM_JACKET_JEANS: frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.STREETWEAR}),
+    OutfitType.GRAPHIC_TEE_SHORTS: frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.STREETWEAR}),
+    OutfitType.HOODIE_JOGGERS: frozenset({WardrobeStyleType.COZY_LOUNGE, WardrobeStyleType.STREETWEAR}),
+    OutfitType.FLANNEL_SHIRT: frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.COZY_LOUNGE}),
+    OutfitType.CROP_TOP_CARGO: frozenset({WardrobeStyleType.STREETWEAR, WardrobeStyleType.EDGY}),
+    OutfitType.OVERSIZED_STREETWEAR: frozenset({WardrobeStyleType.STREETWEAR, WardrobeStyleType.EDGY}),
+    OutfitType.BOMBER_JACKET_FIT: frozenset({WardrobeStyleType.STREETWEAR, WardrobeStyleType.EDGY}),
+    OutfitType.BELL_BOTTOMS_70S: frozenset({WardrobeStyleType.BOHEMIAN, WardrobeStyleType.STREETWEAR}),
+    # --- activewear ---
+    OutfitType.YOGA_OUTFIT: frozenset({WardrobeStyleType.SPORTY}),
+    OutfitType.TENNIS_OUTFIT: frozenset({WardrobeStyleType.SPORTY, WardrobeStyleType.GIRLY}),
+    OutfitType.RUNNING_GEAR: frozenset({WardrobeStyleType.SPORTY}),
+    OutfitType.GYM_SET: frozenset({WardrobeStyleType.SPORTY}),
+    # --- swim ---
+    OutfitType.ONE_PIECE_SWIMSUIT: frozenset({WardrobeStyleType.SPORTY, WardrobeStyleType.ELEGANT}),
+    OutfitType.BIKINI: frozenset({WardrobeStyleType.SPORTY, WardrobeStyleType.GLAMOROUS}),
+    # --- outerwear ---
+    OutfitType.LEATHER_JACKET: frozenset({WardrobeStyleType.EDGY, WardrobeStyleType.STREETWEAR}),
+    OutfitType.TRENCH_COAT: frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.PROFESSIONAL}),
+    OutfitType.PUFFER_JACKET: frozenset({WardrobeStyleType.SPORTY, WardrobeStyleType.CASUAL_MINIMAL}),
+    OutfitType.FUR_COAT: frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.ELEGANT}),
+    # --- traditional drapes ---
+    OutfitType.KIMONO: frozenset({WardrobeStyleType.TRADITIONAL, WardrobeStyleType.ELEGANT}),
+    OutfitType.SARI: frozenset({WardrobeStyleType.TRADITIONAL, WardrobeStyleType.ELEGANT}),
+    OutfitType.CHEONGSAM: frozenset({WardrobeStyleType.TRADITIONAL, WardrobeStyleType.ELEGANT}),
+    OutfitType.HANBOK: frozenset({WardrobeStyleType.TRADITIONAL, WardrobeStyleType.GIRLY}),
+    OutfitType.DIRNDL: frozenset({WardrobeStyleType.TRADITIONAL, WardrobeStyleType.GIRLY}),
+    # --- eveningwear / lingerie / loungewear ---
+    OutfitType.SEQUIN_TOP_SKIRT: frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.GIRLY}),
+    OutfitType.SILK_PAJAMAS: frozenset({WardrobeStyleType.COZY_LOUNGE, WardrobeStyleType.GIRLY}),
+    OutfitType.LACE_BODYSUIT: frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.EDGY}),
+    OutfitType.SATIN_ROBE: frozenset({WardrobeStyleType.COZY_LOUNGE, WardrobeStyleType.GLAMOROUS}),
+    # --- uniforms: tagged professional for DISPLAY only; planner-filter-EXEMPT
+    #     (story_planner._prefer_wardrobe always retains _UNIFORM_OUTFITS) ---
+    OutfitType.NURSE_UNIFORM: frozenset({WardrobeStyleType.PROFESSIONAL}),
+    OutfitType.SCHOOL_UNIFORM: frozenset({WardrobeStyleType.PROFESSIONAL}),
+    OutfitType.MILITARY_UNIFORM: frozenset({WardrobeStyleType.PROFESSIONAL}),
+    OutfitType.CHEF_UNIFORM: frozenset({WardrobeStyleType.PROFESSIONAL}),
+}
+
+
+def _coerce_wardrobe_styles(styles) -> Set[WardrobeStyleType]:
+    """
+    Coerce a list/set of WardrobeStyleType-or-raw-values to a set of
+    WardrobeStyleType. Tolerant: raw string values are coerced, unknowns skipped,
+    None/empty -> empty set. Shared by outfits_for_styles and the generation-pool
+    wardrobe filter so both accept the same loose inputs.
+    """
+    wanted: Set[WardrobeStyleType] = set()
+    for s in (styles or []):
+        if isinstance(s, WardrobeStyleType):
+            wanted.add(s)
+        else:
+            try:
+                wanted.add(WardrobeStyleType(getattr(s, "value", s)))
+            except (ValueError, TypeError):
+                continue
+    return wanted
+
+
+def outfits_for_styles(styles) -> Set[OutfitType]:
+    """
+    Every OutfitType whose OUTFIT_STYLE_TAGS intersect `styles` (a list/set of
+    WardrobeStyleType or their values). Empty/None styles -> empty set (no bias).
+    NAKED is never returned (absent from OUTFIT_STYLE_TAGS). Tolerant of raw string
+    values so a stored/LLM style survives; unknown styles are skipped.
+    """
+    wanted = _coerce_wardrobe_styles(styles)
+    if not wanted:
+        return set()
+    return {o for o, tags in OUTFIT_STYLE_TAGS.items() if tags & wanted}
+
+
+# ---------------------------------------------------------------------------
+# Outfit keyword phrases (WS-B) — the like/dislike matching vocabulary per garment.
+# ---------------------------------------------------------------------------
+# VALUE-keyed (OutfitType.value -> phrase), exactly like scene_vocab.LOCATION_PHRASES,
+# so it can be passed straight to story_planner._weighted_pick as a phrase_map: a like
+# of "silk" or "gala" now boosts the right garments, and a dislike softly excludes them,
+# by matching real garment NOUNS / FABRICS / OCCASION words instead of only the enum name.
+#
+# DELIBERATELY NOT the graded OUTFIT_DESCRIPTIONS tier prose: that prose is full of
+# generic words ("black", "tight", "fitted", "short") that would false-match unrelated
+# likes/dislikes — the canonical failure the plan calls out is a dislike "black coffee"
+# nuking little_black_dress. So these phrases carry only DISTINCTIVE garment nouns,
+# fabrics and vibe words, and never a bare color/fit adjective standing alone.
+# Coverage-tested: every OutfitType value (incl. naked) has a non-empty phrase.
+OUTFIT_KEYWORD_PHRASES: Dict[str, str] = {
+    # dresses & gowns
+    "red_evening_gown": "gown formal gala chiffon silk glamour",
+    "little_black_dress": "chic evening minimalist crepe timeless",
+    "white_summer_dress": "sundress summer floaty cotton breezy linen",
+    "floral_maxi_dress": "floral maxi bohemian boho flowy chiffon",
+    "cocktail_dress": "cocktail sequined shimmer party glam",
+    "bodycon_dress": "bodycon bandage clubwear sleek stretch",
+    "velvet_dress": "velvet plush evening lush soft",
+    "satin_slip_dress": "slip satin silky camisole nightgown lingerie",
+    "jumpsuit": "jumpsuit romper sleek modern",
+    "polka_dot_dress_50s": "polka dot retro vintage swing pinup fifties",
+    # tailored / formal
+    "business_suit": "suit tailored blazer corporate office pinstripe",
+    "blazer_trousers": "blazer trousers smart office workwear",
+    "pencil_skirt_set": "pencil skirt blouse secretary office prim",
+    "tuxedo": "tuxedo satin lapel formal eveningwear",
+    "power_suit_80s": "powersuit eighties bold shoulderpads retro",
+    # casual / street
+    "denim_jacket_jeans": "denim jeans jacket casual everyday",
+    "graphic_tee_shorts": "tee tshirt shorts casual playful denim",
+    "hoodie_joggers": "hoodie joggers cozy loungewear athleisure sweats",
+    "flannel_shirt": "flannel plaid shirt cozy rustic casual",
+    "crop_top_cargo": "crop top cargo utility streetwear sporty",
+    "oversized_streetwear": "streetwear oversized baggy urban",
+    "bomber_jacket_fit": "bomber jacket streetwear casual sporty",
+    "bell_bottoms_70s": "bellbottoms flares seventies retro boho groovy",
+    # active
+    "yoga_outfit": "yoga leggings sportsbra activewear athletic stretch",
+    "tennis_outfit": "tennis skirt polo preppy sporty athletic",
+    "running_gear": "running athletic activewear jogging sporty compression",
+    "gym_set": "gym sportsbra workout activewear athletic fitness",
+    # swim
+    "one_piece_swimsuit": "swimsuit onepiece swim beach pool",
+    "bikini": "bikini swim beach poolside string",
+    # outerwear
+    "leather_jacket": "leather biker moto edgy rocker",
+    "trench_coat": "trench coat belted classic tailored",
+    "puffer_jacket": "puffer padded quilted winter cozy outdoor",
+    "fur_coat": "fur coat luxe glamour opulent plush",
+    # traditional
+    "kimono": "kimono silk robe traditional japanese obi",
+    "sari": "sari drape traditional indian silk",
+    "cheongsam": "cheongsam qipao silk traditional mandarin",
+    "hanbok": "hanbok traditional korean chima jeogori",
+    "dirndl": "dirndl bodice traditional bavarian laced",
+    # eveningwear / lingerie / loungewear
+    "sequin_top_skirt": "sequin sparkle glitter party clubwear",
+    "silk_pajamas": "pajamas silk loungewear sleepwear cozy pyjamas",
+    "lace_bodysuit": "lace bodysuit lingerie sheer delicate",
+    "satin_robe": "robe satin silky boudoir lounge",
+    # uniforms
+    "nurse_uniform": "nurse scrubs medical uniform",
+    "school_uniform": "schoolgirl uniform pleated preppy academic",
+    "military_uniform": "military uniform officer service",
+    "chef_uniform": "chef whites culinary kitchen uniform",
+    # nudity (never in a pick pool; present so every OutfitType value is covered)
+    "naked": "nude bare undressed skin",
+}
+
+
+# ---------------------------------------------------------------------------
 # Nude-base body description (per-character neutral anatomical reference asset)
 #
 # NOT a scene: the nude base is the neutral, once-per-character source image that
@@ -460,6 +766,49 @@ _GENERATION_DEFAULT_CLOTHING_POOL: Dict[NudityLevel, List[str]] = {
     ],
 }
 
+# WS-B style tags for the generation default-clothing POOL, INDEX-ALIGNED with
+# _GENERATION_DEFAULT_CLOTHING_POOL entry-for-entry (same keys, same list lengths).
+# Phase B3 will use these to filter the seeded generation pool by a character's
+# wardrobe_styles (empty filter -> full pool); authored here now so the alignment is
+# coverage-tested alongside the pool it mirrors. Each frozenset is the style DNA of the
+# concrete outfit at the SAME index; the single HIGH "nude" entry has no wardrobe style
+# (empty set). Do NOT reorder either list without updating the other — the test fails.
+_GENERATION_POOL_STYLE_TAGS: Dict[NudityLevel, List[frozenset]] = {
+    NudityLevel.LOW: [
+        frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.COZY_LOUNGE}),   # ribbed knit sweater + jeans
+        frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.PROFESSIONAL}),  # white linen shirt + trousers
+        frozenset({WardrobeStyleType.PROFESSIONAL, WardrobeStyleType.CASUAL_MINIMAL}),  # wrap blouse + slacks
+        frozenset({WardrobeStyleType.COZY_LOUNGE, WardrobeStyleType.CASUAL_MINIMAL}),   # oversized cardigan + tee + jeans
+        frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.CASUAL_MINIMAL}),       # turtleneck + camel midi skirt
+        frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.STREETWEAR}),    # chambray shirt dress
+    ],
+    NudityLevel.SUGGESTIVE: [
+        frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.EDGY}),          # fitted ribbed top + jeans
+        frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.PROFESSIONAL}),         # silky wrap blouse + trousers
+        frozenset({WardrobeStyleType.GIRLY, WardrobeStyleType.CASUAL_MINIMAL}),         # off-shoulder knit + denim skirt
+        frozenset({WardrobeStyleType.STREETWEAR, WardrobeStyleType.CASUAL_MINIMAL}),    # cropped tee + low-rise jeans
+        frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.STREETWEAR}),    # rust henley + skinny jeans
+        frozenset({WardrobeStyleType.ELEGANT, WardrobeStyleType.CASUAL_MINIMAL}),       # clingy ribbed midi dress
+    ],
+    NudityLevel.MEDIUM: [
+        frozenset({WardrobeStyleType.EDGY, WardrobeStyleType.STREETWEAR}),              # chambray shirt over bralette
+        frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.COZY_LOUNGE}),        # satin cami + shorts
+        frozenset({WardrobeStyleType.EDGY, WardrobeStyleType.GLAMOROUS}),               # sheer mesh top over bralette
+        frozenset({WardrobeStyleType.COZY_LOUNGE, WardrobeStyleType.GLAMOROUS}),        # loosely tied short robe
+        frozenset({WardrobeStyleType.STREETWEAR, WardrobeStyleType.CASUAL_MINIMAL}),    # cropped tank + denim shorts
+    ],
+    NudityLevel.REVEALING: [
+        frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.COZY_LOUNGE}),        # barely-tied silk robe
+        frozenset({WardrobeStyleType.CASUAL_MINIMAL, WardrobeStyleType.EDGY}),          # unbuttoned oversized shirt
+        frozenset({WardrobeStyleType.GLAMOROUS, WardrobeStyleType.ELEGANT}),            # sheer slip
+        frozenset({WardrobeStyleType.EDGY, WardrobeStyleType.GLAMOROUS}),               # thong + open shirt
+        frozenset({WardrobeStyleType.GLAMOROUS}),                                       # loosely draped sheet
+    ],
+    NudityLevel.HIGH: [
+        frozenset(),                                                                    # nude — no wardrobe style
+    ],
+}
+
 # WS3 positive coverage guard, appended to the default clothing clause at modest
 # levels only. Negatives are inert at cfg=1, so coverage has to be asserted with
 # POSITIVE tokens or a "low" request drifts toward exposure on the NSFW base.
@@ -480,11 +829,37 @@ def accessories_clause(accessories: Optional[List[AccessoryType]]) -> str:
     )
 
 
+def _wardrobe_filter_pool(
+    pool: List[str], nudity_level: NudityLevel, wardrobe_styles
+) -> List[str]:
+    """
+    (WS-B / B3) Bias a default-clothing POOL toward a character's wardrobe_styles.
+
+    Returns the SUBSET of `pool` whose index-aligned _GENERATION_POOL_STYLE_TAGS
+    entry overlaps `wardrobe_styles`. Returns the ORIGINAL pool object UNCHANGED when:
+      * wardrobe_styles is empty/None (parity: the caller's single seeded .choice
+        draw then stays byte-identical to the no-wardrobe path — enforced by tests);
+      * the tag list is missing or length-misaligned with the pool (defensive);
+      * the filter would remove every entry (empty result -> full pool).
+    Exactly one .choice draw happens in the caller regardless, so rng use is
+    unchanged — only the LIST it draws from narrows.
+    """
+    wanted = _coerce_wardrobe_styles(wardrobe_styles)
+    if not wanted:
+        return pool
+    tags = _GENERATION_POOL_STYLE_TAGS.get(nudity_level)
+    if not tags or len(tags) != len(pool):
+        return pool
+    filtered = [entry for entry, fs in zip(pool, tags) if fs & wanted]
+    return filtered or pool
+
+
 def generation_outfit_clause(
     outfit: Optional[OutfitType] = None,
     nudity_level: NudityLevel = NudityLevel.LOW,
     accessories: Optional[List[AccessoryType]] = None,
     variety_seed: Optional[int] = None,
+    wardrobe_styles=None,
 ) -> str:
     """
     Declarative clothing clause for a character-generation prompt.
@@ -498,6 +873,13 @@ def generation_outfit_clause(
                             cards differ) plus a positive coverage guard at
                             LOW/SUGGESTIVE; with ``variety_seed`` None, the legacy
                             single string (byte-identical to pre-WS3).
+
+    ``wardrobe_styles`` (WS-B / B3, a character's WardrobeStyleType list) only
+    matters on the seeded no-explicit-outfit pool path: it narrows the level's pool
+    to entries whose style tags overlap, so a sporty character draws sporty default
+    clothing. Still EXACTLY one seeded .choice draw; an empty/None value (or a filter
+    that matches nothing) leaves the draw byte-identical to today. Ignored when a
+    specific outfit is given or variety is off.
     Accessories are appended when present.
     """
     if outfit == OutfitType.NAKED:
@@ -514,6 +896,7 @@ def generation_outfit_clause(
         pool = _GENERATION_DEFAULT_CLOTHING_POOL.get(
             nudity_level, _GENERATION_DEFAULT_CLOTHING_POOL[NudityLevel.LOW]
         )
+        pool = _wardrobe_filter_pool(pool, nudity_level, wardrobe_styles)
         clause = random.Random(variety_seed).choice(pool)
         clause += _GENERATION_COVERAGE_GUARD.get(nudity_level, "")
     else:

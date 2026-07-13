@@ -154,7 +154,10 @@ def test_dims_for_precedence():
 def test_photo_style_rewrites_node_125():
     wf = _workflow()
     out = ComfyUIClient.prepare_character_workflow(wf, "prompt", photo_style="polished")
-    assert out["125"]["inputs"]["value"] == pc.PHOTO_STYLE_TEMPLATES["polished"]
+    # photo_style_template() is the source of truth for node 125 (it applies the
+    # tunable color-grade clause on top of the raw PHOTO_STYLE_TEMPLATES entry --
+    # see test_color_grade_* below), so compare against the function, not the dict.
+    assert out["125"]["inputs"]["value"] == pc.photo_style_template("polished")
     # None leaves the baked-in text
     out2 = ComfyUIClient.prepare_character_workflow(wf, "prompt", photo_style=None)
     assert out2["125"]["inputs"]["value"] == wf["125"]["inputs"]["value"]
@@ -234,8 +237,14 @@ def test_lighting_joins_shot_block():
     assert "neon" in cv.compose_shot_block(shot).lower()
 
 
-def test_polished_wrapper_adapts_to_night():
-    """polished@night swaps the daylight grade for a low-key night grade."""
+def test_polished_wrapper_adapts_to_night(monkeypatch):
+    """polished@night swaps the daylight grade for a low-key night grade.
+
+    Isolated from the (separate) color-grade clause via monkeypatch so this
+    test stays focused on the time-of-day swap mechanic; see
+    test_color_grade_default_generation_color_grade_* for that clause.
+    """
+    monkeypatch.setattr(pc.settings, "GENERATION_COLOR_GRADE", "")
     day = pc.photo_style_template("polished")
     night = pc.photo_style_template("polished", "night")
     assert day == pc.PHOTO_STYLE_TEMPLATES["polished"]      # default byte-identical
@@ -256,6 +265,82 @@ def test_night_wrapper_reaches_node_125():
         wf, "prompt", photo_style="polished", time_of_day="night"
     )
     assert "night" in out["125"]["inputs"]["value"].lower()
+
+
+# --- color grade (GENERATION styles only; node 125) ---
+def test_color_grade_default_present_in_generation_styles():
+    """Default settings.GENERATION_COLOR_GRADE clause lands in every GENERATION
+    style's wrapper text -- natural/polished/studio get it verbatim, candid_phone
+    gets the deliberately milder companion clause."""
+    grade = pc.settings.GENERATION_COLOR_GRADE
+    assert grade  # the shipped default is non-empty
+    for style in ("natural", "polished", "studio"):
+        assert grade in pc.photo_style_template(style), f"{style} missing color-grade clause"
+    assert pc._CANDID_COLOR_GRADE_MILD in pc.photo_style_template("candid_phone")
+    assert grade not in pc.photo_style_template("candid_phone")  # gets the mild variant, not verbatim
+
+
+def test_color_grade_empty_env_is_byte_identical_to_legacy(monkeypatch):
+    """Empty GENERATION_COLOR_GRADE disables the clause entirely -- every style's
+    wrapper (including the polished@night time-swapped variant) reverts to
+    exactly the pre-feature text."""
+    monkeypatch.setattr(pc.settings, "GENERATION_COLOR_GRADE", "")
+    for style in ("natural", "polished", "studio", "candid_phone"):
+        assert pc.photo_style_template(style) == pc.PHOTO_STYLE_TEMPLATES[style]
+    night = pc.photo_style_template("polished", "night")
+    assert night == pc.PHOTO_STYLE_TEMPLATES["polished"].replace(
+        pc._POLISHED_DAY_LINE, pc._POLISHED_TIME_LINES["night"]
+    )
+
+
+def test_color_grade_candid_phone_is_milder_than_standard():
+    """candid_phone's clause deliberately drops the 'more produced' language
+    (polished final finish / balanced contrast) so the raw/candid look isn't
+    pushed toward a graded, finished aesthetic -- while still addressing the
+    washed-out/faded complaint that motivated this feature."""
+    standard = pc.settings.GENERATION_COLOR_GRADE
+    mild = pc._CANDID_COLOR_GRADE_MILD
+    assert "polished final finish" in standard
+    assert "polished final finish" not in mild
+    assert "balanced contrast" in standard
+    assert "balanced contrast" not in mild
+    assert "no washed-out or faded tones" in standard
+    assert "no washed-out or faded tones" in mild  # core fix kept in both
+
+
+def test_color_grade_avoids_oversaturation_trigger_words():
+    """Explicit guard against wording that flips the subtle grade into an
+    Instagram-filter look."""
+    banned = ("vibrant", "hdr", "oversaturat")  # covers oversaturated/oversaturation
+    for clause in (pc.settings.GENERATION_COLOR_GRADE, pc._CANDID_COLOR_GRADE_MILD):
+        low = clause.lower()
+        for word in banned:
+            assert word not in low, f"'{word}' in color-grade clause: {clause}"
+
+
+def test_color_grade_is_tunable_via_settings(monkeypatch):
+    """Changing settings.GENERATION_COLOR_GRADE (i.e. the env var) changes the
+    wording with no code change -- proves the env-tunability requirement."""
+    marker = "a distinctive marker color-grade phrase for this test"
+    monkeypatch.setattr(pc.settings, "GENERATION_COLOR_GRADE", marker)
+    for style in ("natural", "polished", "studio"):
+        assert marker in pc.photo_style_template(style)
+
+
+def test_color_grade_never_touches_edit_suffixes(monkeypatch):
+    """The GENERATION color-grade knob is fully independent of the EDIT-pipeline
+    suffixes (qwen edit steps) -- changing one must never leak into the other."""
+    marker = "a distinctive marker color-grade phrase for this test"
+    monkeypatch.setattr(pc.settings, "GENERATION_COLOR_GRADE", marker)
+    for suffix in pc.EDIT_PHOTO_STYLE_SUFFIXES.values():
+        assert marker not in suffix
+    prompt = "Change the person's clothing to: red evening gown"
+    out = pc.apply_edit_photo_style(prompt, "polished")
+    assert marker not in out
+    assert out == f"{prompt}. {pc.EDIT_PHOTO_STYLE_SUFFIXES['polished']}"
+    # Disabling the generation knob must not affect the edit suffix either.
+    monkeypatch.setattr(pc.settings, "GENERATION_COLOR_GRADE", "")
+    assert pc.apply_edit_photo_style(prompt, "polished") == out
 
 
 def test_kink_moods_capped_at_two():

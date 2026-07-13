@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from .endpoints import (
     generate, jobs, preview, edit, outfit, pose, background, pipeline,
     characters, batches, video, persona, nude_base, scenes, options,
+    trait_profile,
 )
 
 # Create main API router
@@ -27,6 +28,7 @@ api_router.include_router(persona.router)
 api_router.include_router(nude_base.router)
 api_router.include_router(scenes.router)
 api_router.include_router(options.router)
+api_router.include_router(trait_profile.router)
 
 
 def configure_services(
@@ -49,6 +51,8 @@ def configure_services(
     chat_persona_store=None,
     nude_base_store=None,
     scene_writer=None,
+    trait_profile_writer=None,
+    trait_profile_store=None,
 ):
     """
     Configure services for all endpoint modules.
@@ -136,3 +140,22 @@ def configure_services(
     # (deterministic fallback) and uses Venice when VENICE_API_KEY is set.
     if scene_writer is not None:
         scenes.set_scene_writer(scene_writer)
+    # Character trait profiles (WS-B). Writer works keyless (deterministic tables);
+    # persistence is Supabase-gated (character_store + trait_profile_store).
+    if trait_profile_writer is not None:
+        trait_profile.set_trait_profile_writer(trait_profile_writer)
+    if character_store is not None:
+        trait_profile.set_character_store(character_store)
+    if trait_profile_store is not None:
+        trait_profile.set_trait_profile_store(trait_profile_store)
+    # Trait-aware character generation (B3): POST /v1/generate/image|batch can
+    # auto-fill wardrobeStyles/demeanor from a characterId. Wired only when the
+    # Supabase-backed trait store exists; degrades gracefully when absent.
+    if trait_profile_store is not None:
+        generate.set_trait_profile_store(trait_profile_store)
+    # POST /v1/characters can optionally generate the trait profile in the same call
+    # (CharacterCreate.generate_traits) — reuses these same already-built instances.
+    if trait_profile_writer is not None:
+        characters.set_trait_profile_writer(trait_profile_writer)
+    if trait_profile_store is not None:
+        characters.set_trait_profile_store(trait_profile_store)

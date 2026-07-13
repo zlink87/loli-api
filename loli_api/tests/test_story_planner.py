@@ -15,6 +15,7 @@ from models.batch import BatchControls
 from models.scene import SceneSpec
 from services import scene_vocab as sv
 from services import story_planner as sp
+from services import outfit_vocab as ov
 from services.story_planner import (
     Character, DeterministicScenePlanner, validate_and_repair, plan_scenes,
     _parse_arcs_json, _coerce_enum, _nudity_index, _nudity_ramp,
@@ -879,6 +880,442 @@ def test_ceiling_relocation_respects_blocked_locations():
     for s in out:
         assert s.location not in blocked, f"relocated onto blocked {s.location}"
         assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location))
+
+
+# ---------------------------------------------------------------------------
+# WS-A / A1: outfit exposure cap (label always matches what the garment can show)
+# ---------------------------------------------------------------------------
+import math
+
+from models.enums import OutfitType as _OutfitType
+
+
+def _planned(char, n, controls):
+    """A full deterministic plan run through validate_and_repair — the real batch path."""
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, n, controls)
+    return validate_and_repair(scenes, char, n, controls)
+
+
+def test_exposure_cap_covers_every_outfit():
+    # Every OutfitType must be mapped, so no garment is silently unmapped (the helper's
+    # MEDIUM default then only guards a None passed by a caller).
+    for o in OutfitType:
+        assert o in ov.OUTFIT_EXPOSURE_CAP, f"missing exposure cap for {o.value}"
+    # And the caps are real NudityLevels within the ladder.
+    for cap in ov.OUTFIT_EXPOSURE_CAP.values():
+        assert cap in set(NudityLevel)
+    # NAKED is the only-and-always HIGH anchor; the reported bug item stays MEDIUM.
+    assert ov.OUTFIT_EXPOSURE_CAP[OutfitType.NAKED] == NudityLevel.HIGH
+    assert ov.outfit_exposure_cap(OutfitType.GRAPHIC_TEE_SHORTS) == NudityLevel.MEDIUM
+    assert ov.outfit_exposure_cap(None) == NudityLevel.MEDIUM  # defensive default
+
+
+def test_every_planned_item_within_outfit_cap_and_location_ceiling():
+    # The core A1 guarantee, on a demanding batch (high building ramp, multi-day, nurse):
+    # every item's nudity is <= its outfit's exposure cap AND <= its location's ceiling.
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    out = _planned(char, 24, controls)
+    for s in out:
+        if s.outfit is not None:
+            assert _nudity_index(s.nudityLevel) <= _nudity_index(ov.outfit_exposure_cap(s.outfit)), (
+                f"{s.nudityLevel} exceeds cap of {s.outfit} ({ov.outfit_exposure_cap(s.outfit)})"
+            )
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location)), (
+            f"{s.nudityLevel} exceeds ceiling of {s.location}"
+        )
+
+
+def test_high_batch_final_items_carry_high_capable_outfits():
+    # A max_nudity=high batch's HIGH-labeled items must carry a HIGH-capable outfit (NAKED is
+    # reachable and appears among the options when allowed) — never a dressed MEDIUM garment
+    # wearing a "high" label.
+    char = _character(occupation="model")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=5)
+    out = _planned(char, 16, controls)
+    high_items = [s for s in out if s.nudityLevel == NudityLevel.HIGH]
+    assert high_items, "expected at least one HIGH item in a high building ramp"
+    for s in high_items:
+        assert s.outfit is not None
+        assert ov.outfit_exposure_cap(s.outfit) == NudityLevel.HIGH, (
+            f"HIGH item wears {s.outfit} capped at {ov.outfit_exposure_cap(s.outfit)}"
+        )
+    # NAKED is reachable: with the exposure re-pick pool including it, a high batch that does
+    # not block NAKED can land it (assert it is at least an eligible HIGH-capable option).
+    assert ov.OUTFIT_EXPOSURE_CAP[OutfitType.NAKED] == NudityLevel.HIGH
+
+
+def test_exposure_last_resort_lowers_label_when_no_high_capable_allowed():
+    # Documented monotonicity EXCEPTION: block NAKED and every non-naked HIGH-capable outfit
+    # (satin_robe/kimono/trench_coat). Now nothing can honestly render HIGH, so the guard
+    # lowers the label to the best achievable cap (REVEALING) rather than lie — truthful
+    # label beats reaching max.
+    blocked = [OutfitType.NAKED, OutfitType.SATIN_ROBE, OutfitType.KIMONO, OutfitType.TRENCH_COAT]
+    char = _character(occupation="model")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             blocked_outfits=blocked, base_seed=3)
+    out = _planned(char, 12, controls)
+    assert all(s.outfit not in blocked for s in out), "a blocked outfit was introduced"
+    # No item reaches HIGH (no allowed garment can render it) — the truthful dip.
+    assert max(_nudity_index(s.nudityLevel) for s in out) == _nudity_index(NudityLevel.REVEALING)
+    # But every label is still honest w.r.t. its garment.
+    for s in out:
+        if s.outfit is not None:
+            assert _nudity_index(s.nudityLevel) <= _nudity_index(ov.outfit_exposure_cap(s.outfit))
+
+
+def test_exposure_cap_pass_is_byte_identical_noop_for_sfw():
+    # A1 contract: the exposure-cap pass must not touch an sfw batch (all-LOW ramp fits every
+    # garment). Assert the function itself is identity on sfw input.
+    char = _character()
+    controls = BatchControls(sfw_only=True, max_nudity=NudityLevel.HIGH, base_seed=1)
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 12, controls)
+    before = [s.model_dump() for s in scenes]
+    sp._enforce_outfit_exposure_cap(scenes, _nudity_ramp(12, controls), controls)
+    assert [s.model_dump() for s in scenes] == before
+    # And a full sfw plan stays LOW with no NAKED introduced.
+    out = _planned(char, 12, controls)
+    assert all(s.nudityLevel == NudityLevel.LOW for s in out)
+    assert all(s.outfit != OutfitType.NAKED for s in out)
+
+
+def test_exposure_repick_never_introduces_blocked_outfit():
+    # An exposure re-pick draws only from the controls-allowed pool: a blocked outfit is never
+    # introduced to satisfy a cap, even under a demanding high ramp.
+    blocked = [OutfitType.NAKED, OutfitType.BIKINI, OutfitType.SATIN_SLIP_DRESS]
+    char = _character(occupation="model")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             blocked_outfits=blocked, base_seed=9)
+    out = _planned(char, 16, controls)
+    assert all(s.outfit not in blocked for s in out)
+
+
+# ---------------------------------------------------------------------------
+# WS-A / A2: conscious-model variety — per-item expression + candid share
+# ---------------------------------------------------------------------------
+def test_every_item_has_an_expression():
+    char = _character()
+    controls = BatchControls(max_nudity=NudityLevel.MEDIUM, base_seed=4)
+    out = _planned(char, 16, controls)
+    assert all(s.expression for s in out), "an item was left with no expression"
+    # Every assigned expression comes from the batch pool (survives _scrub_expression intact).
+    for s in out:
+        assert s.expression in set(sp._BATCH_EXPRESSION_POOL)
+
+
+def test_expressions_are_varied_at_least_four_distinct_per_eight():
+    char = _character()
+    controls = BatchControls(max_nudity=NudityLevel.MEDIUM, base_seed=4)
+    out = _planned(char, 16, controls)
+    exprs = [s.expression for s in out]
+    for start in range(0, len(exprs) - 7):
+        window = exprs[start:start + 8]
+        assert len(set(window)) >= 4, f"window {start} too repetitive: {window}"
+
+
+def test_no_adjacent_duplicate_expressions():
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    out = _planned(char, 24, controls)
+    for i in range(1, len(out)):
+        assert out[i].expression != out[i - 1].expression, f"adjacent expression dup at {i}"
+
+
+def test_candid_share_within_band():
+    # ~1/3 of items carry a CANDID (camera-unaware) expression; the band is generous.
+    char = _character()
+    controls = BatchControls(max_nudity=NudityLevel.MEDIUM, base_seed=4)
+    out = _planned(char, 24, controls)
+    candid = sum(1 for s in out if s.expression in set(sp._BATCH_EXPRESSIONS_CANDID))
+    share = candid / len(out)
+    assert 0.25 <= share <= 0.45, f"candid share {share} outside band"
+
+
+def test_expressions_are_seeded_reproducible():
+    char = _character()
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building", base_seed=13)
+    a = _planned(char, 20, controls)
+    b = _planned(char, 20, controls)
+    assert [s.expression for s in a] == [s.expression for s in b]
+
+
+def test_expression_survives_scrub_unchanged():
+    # The pool strings must carry NO facial-feature/identity tokens, so _scrub_expression is a
+    # no-op on them (otherwise the render would receive a gutted string).
+    from services.story_planner import _scrub_expression
+    for e in sp._BATCH_EXPRESSION_POOL:
+        assert _scrub_expression(e) == e, f"scrub altered pool expression: {e!r}"
+
+
+# ---------------------------------------------------------------------------
+# WS-A / A2: pose adjacency + GLOBAL pose usage cap
+# ---------------------------------------------------------------------------
+def test_no_adjacent_duplicate_poses_in_twelve_item_plan():
+    # No identical pose in any window of 2 (consecutive), on a template with enough pose
+    # variety (nurse, single day).
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.MEDIUM, base_seed=21)
+    out = _planned(char, 12, controls)
+    for i in range(1, len(out)):
+        if out[i].pose is not None and out[i - 1].pose is not None:
+            assert out[i].pose != out[i - 1].pose, f"adjacent pose dup at {i}: {out[i].pose}"
+
+
+def test_pose_cap_is_global_across_multi_day_batch():
+    # The reported "standing_leaning 8x in a 24-item batch": the pose usage cap is GLOBAL
+    # across the whole (multi-day) batch, so no pose exceeds max(2, ceil(24/8)) = 3. Before
+    # the fix a slot-constrained re-pick left overflow "unresolved"; the broadened fallback
+    # makes the global cap bite.
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    out = _planned(char, 24, controls)
+    cap = max(2, math.ceil(24 / 8))
+    counts: dict = {}
+    for s in out:
+        if s.pose is not None:
+            counts[s.pose.value] = counts.get(s.pose.value, 0) + 1
+    assert max(counts.values()) <= cap, counts
+    # …and adjacency still holds alongside the global cap.
+    for i in range(1, len(out)):
+        if out[i].pose is not None and out[i - 1].pose is not None:
+            assert out[i].pose != out[i - 1].pose
+
+
+# ---------------------------------------------------------------------------
+# WS-A / A2 (coordinator add): mood-phrase monotony — gate mood tags
+# ---------------------------------------------------------------------------
+def test_mood_tags_present_on_about_one_third():
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    out = _planned(char, 24, controls)
+    with_mood = sum(1 for s in out if s.mood_kinks or s.mood_personality)
+    share = with_mood / len(out)
+    assert 0.2 <= share <= 0.5, f"mood share {share} outside band"
+
+
+def test_mood_tags_absent_on_low_and_public_items():
+    # The classroom/street/office fix: no LOW item and no public (SUGGESTIVE-ceiling) item may
+    # carry the intimate "sultry, seductive" mood tail.
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    out = _planned(char, 24, controls)
+    for s in out:
+        if s.mood_kinks or s.mood_personality:
+            assert s.nudityLevel != NudityLevel.LOW, "mood on a LOW item"
+            assert _location_ceiling(s.location) != NudityLevel.SUGGESTIVE, (
+                f"mood on a public {s.location} item"
+            )
+
+
+def test_mood_tags_are_seeded_reproducible():
+    char = _character(occupation="nurse")
+    controls = BatchControls(max_nudity=NudityLevel.HIGH, escalation="building",
+                             period_days=3, base_seed=7)
+    a = _planned(char, 24, controls)
+    b = _planned(char, 24, controls)
+    assert [(s.mood_kinks, s.mood_personality) for s in a] == \
+        [(s.mood_kinks, s.mood_personality) for s in b]
+
+
+def test_sfw_batch_carries_no_mood_tags():
+    # sfw -> all LOW -> nothing mood-eligible -> no mood tags anywhere.
+    char = _character(occupation="nurse")
+    controls = BatchControls(sfw_only=True, max_nudity=NudityLevel.HIGH, base_seed=7)
+    out = _planned(char, 12, controls)
+    assert all(not (s.mood_kinks or s.mood_personality) for s in out)
+
+
+# ---------------------------------------------------------------------------
+# WS-B / Phase B2: trait-profile bias in the planner
+# ---------------------------------------------------------------------------
+import random as _random  # noqa: E402
+from models.enums import DemeanorType, WardrobeStyleType  # noqa: E402
+from services.story_planner import (  # noqa: E402
+    _weighted_pick, _prefer_wardrobe, _allowed_outfit_pool,
+    _OUTFIT_PHRASE_MAP, _POSE_PHRASE_MAP, DEMEANOR_POSE_FAVOR, _DEMEANOR_EXPRESSION_FAVOR,
+)
+from services.outfit_vocab import outfits_for_styles, OUTFIT_STYLE_TAGS  # noqa: E402
+
+
+def test_weighted_pick_favored_is_about_3x():
+    # A favored candidate (weight 3.0) is picked ~3x as often as a non-favored one (1.0).
+    pool = [OutfitType.COCKTAIL_DRESS, OutfitType.BUSINESS_SUIT]
+    favored = {OutfitType.COCKTAIL_DRESS}
+    counts = {o: 0 for o in pool}
+    rng = _random.Random(0)
+    for _ in range(6000):
+        counts[_weighted_pick(pool, rng, set(), set(), {}, favored=favored)] += 1
+    ratio = counts[OutfitType.COCKTAIL_DRESS] / counts[OutfitType.BUSINESS_SUIT]
+    assert 2.5 < ratio < 3.6, f"favored ratio {ratio:.2f} not ~3x"
+
+
+def test_weighted_pick_favored_weight_two_for_poses():
+    pool = [PoseType.LYING_BACK, PoseType.STANDING_LEANING]
+    favored = {PoseType.LYING_BACK}
+    counts = {p: 0 for p in pool}
+    rng = _random.Random(0)
+    for _ in range(6000):
+        counts[_weighted_pick(pool, rng, set(), set(), {}, favored=favored, favored_weight=2.0)] += 1
+    ratio = counts[PoseType.LYING_BACK] / counts[PoseType.STANDING_LEANING]
+    assert 1.6 < ratio < 2.4, f"pose favored ratio {ratio:.2f} not ~2x"
+
+
+def test_like_and_favored_are_maxed_not_multiplied():
+    # A candidate that is BOTH like-matched AND favored is weighted 3.0, not 9.0.
+    pool = [OutfitType.RED_EVENING_GOWN, OutfitType.BUSINESS_SUIT]
+    counts = {o: 0 for o in pool}
+    rng = _random.Random(0)
+    for _ in range(6000):
+        # RED_EVENING_GOWN is both liked ("gown") and favored -> still 3.0 vs 1.0.
+        counts[_weighted_pick(pool, rng, {"gown"}, set(), _OUTFIT_PHRASE_MAP,
+                              favored={OutfitType.RED_EVENING_GOWN})] += 1
+    ratio = counts[OutfitType.RED_EVENING_GOWN] / counts[OutfitType.BUSINESS_SUIT]
+    assert 2.5 < ratio < 3.6, f"like+favored ratio {ratio:.2f} should be ~3x (maxed), not ~9x"
+
+
+def test_like_gown_boosts_evening_gown_via_phrase_map():
+    # The phrase map makes a free-text like ("gown") match RED_EVENING_GOWN's garment words.
+    pool = [OutfitType.RED_EVENING_GOWN, OutfitType.BUSINESS_SUIT]
+    counts = {o: 0 for o in pool}
+    rng = _random.Random(1)
+    for _ in range(6000):
+        counts[_weighted_pick(pool, rng, {"gown"}, set(), _OUTFIT_PHRASE_MAP)] += 1
+    assert counts[OutfitType.RED_EVENING_GOWN] > 2 * counts[OutfitType.BUSINESS_SUIT]
+
+
+def test_dislike_never_empties_the_pool():
+    # A dislike that matches the ONLY candidate must not empty the pool (fallback to it).
+    rng = _random.Random(0)
+    res = _weighted_pick([OutfitType.RED_EVENING_GOWN], rng, set(), {"gown"}, _OUTFIT_PHRASE_MAP)
+    assert res == OutfitType.RED_EVENING_GOWN
+
+
+def test_prefer_wardrobe_intersect_fallback_and_uniform_bypass():
+    pool = [OutfitType.COCKTAIL_DRESS, OutfitType.RED_EVENING_GOWN, OutfitType.GYM_SET]
+    # >=2 in wardrobe -> use the soft subset.
+    c2 = BatchControls(wardrobe_outfits=[OutfitType.COCKTAIL_DRESS, OutfitType.RED_EVENING_GOWN])
+    assert _prefer_wardrobe(pool, c2, min_keep=2) == [OutfitType.COCKTAIL_DRESS, OutfitType.RED_EVENING_GOWN]
+    # only 1 in wardrobe -> fallback to the full pool (never a 1-option choke).
+    c1 = BatchControls(wardrobe_outfits=[OutfitType.COCKTAIL_DRESS])
+    assert _prefer_wardrobe(pool, c1, min_keep=2) == pool
+    # a UNIFORM is always retained even when not in the wardrobe set.
+    pool_u = [OutfitType.COCKTAIL_DRESS, OutfitType.NURSE_UNIFORM]
+    assert _prefer_wardrobe(pool_u, c1, min_keep=2) == pool_u
+    # no wardrobe_outfits -> no-op (byte-identical, the regression-safe path).
+    assert _prefer_wardrobe(pool, BatchControls(), min_keep=2) == pool
+
+
+def test_allowed_outfit_pool_inherits_wardrobe_bias():
+    from types import SimpleNamespace
+    tmpl = SimpleNamespace(outfit_pool=(
+        OutfitType.COCKTAIL_DRESS, OutfitType.RED_EVENING_GOWN, OutfitType.GYM_SET,
+    ))
+    c = BatchControls(wardrobe_outfits=[OutfitType.COCKTAIL_DRESS, OutfitType.RED_EVENING_GOWN])
+    assert set(_allowed_outfit_pool(tmpl, c)) == {OutfitType.COCKTAIL_DRESS, OutfitType.RED_EVENING_GOWN}
+
+
+def test_wardrobe_bias_never_breaks_cap_or_ceiling_and_cap_beats_wardrobe():
+    # A sporty wardrobe is ALL MEDIUM-capped; on a HIGH batch the exposure pass must still
+    # reach HIGH via a non-wardrobe HIGH-capable garment (cap compliance beats wardrobe),
+    # and no item may ever exceed its outfit cap or location ceiling.
+    from services.outfit_vocab import outfit_exposure_cap
+    char = _character(occupation="model")
+    controls = BatchControls(
+        max_nudity=NudityLevel.HIGH, escalation="building", base_seed=5,
+        wardrobe_outfits=sorted(outfits_for_styles([WardrobeStyleType.SPORTY,
+                                                    WardrobeStyleType.STREETWEAR]),
+                                key=lambda o: o.value),
+    )
+    out = _planned(char, 20, controls)
+    for s in out:
+        if s.outfit is not None:
+            assert _nudity_index(s.nudityLevel) <= _nudity_index(outfit_exposure_cap(s.outfit))
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location))
+    highs = [s for s in out if s.nudityLevel == NudityLevel.HIGH]
+    assert highs, "a HIGH building batch should reach HIGH"
+    for s in highs:
+        assert s.outfit is not None and outfit_exposure_cap(s.outfit) == NudityLevel.HIGH
+
+
+def test_demeanor_pose_favor_biases_pose_pick():
+    fav = DEMEANOR_POSE_FAVOR[DemeanorType.SULTRY]           # {lying_back, bending_over, kneeling}
+    assert PoseType.STANDING_LEANING not in fav
+    pool = [PoseType.LYING_BACK, PoseType.STANDING_LEANING]
+    counts = {p: 0 for p in pool}
+    rng = _random.Random(0)
+    for _ in range(6000):
+        counts[_weighted_pick(pool, rng, set(), set(), _POSE_PHRASE_MAP,
+                              favored=fav, favored_weight=2.0)] += 1
+    assert counts[PoseType.LYING_BACK] > counts[PoseType.STANDING_LEANING]
+
+
+def test_every_demeanor_has_pose_and_expression_favor():
+    for d in DemeanorType:
+        assert DEMEANOR_POSE_FAVOR.get(d), f"no pose favor for {d}"
+        assert all(isinstance(p, PoseType) for p in DEMEANOR_POSE_FAVOR[d])
+        favor = _DEMEANOR_EXPRESSION_FAVOR.get(d)
+        assert favor, f"no expression favor for {d}"
+        # every favored expression is a real batch-pool string
+        assert favor <= set(sp._BATCH_EXPRESSION_POOL), f"{d} favors a non-pool expression"
+        # >=2 from EACH register so both can be biased without starving.
+        assert len(favor & set(sp._BATCH_EXPRESSIONS_CAMERA_AWARE)) >= 2
+        assert len(favor & set(sp._BATCH_EXPRESSIONS_CANDID)) >= 2
+
+
+def test_demeanor_biases_batch_expressions_toward_consistent_states():
+    char = _character()
+    controls = BatchControls(max_nudity=NudityLevel.MEDIUM, base_seed=4, demeanor=[DemeanorType.SHY])
+    out = _planned(char, 16, controls)
+    favor = _DEMEANOR_EXPRESSION_FAVOR[DemeanorType.SHY]
+    hits = sum(1 for s in out if s.expression in favor)
+    assert hits >= 12, f"only {hits}/16 expressions were demeanor-consistent"
+    # invariants preserved: non-null + no adjacent duplicates.
+    assert all(s.expression for s in out)
+    assert all(out[i].expression != out[i - 1].expression for i in range(1, len(out)))
+
+
+def test_no_profile_fields_byte_identical_regression_lock():
+    # THE regression lock: with none of the new profile-derived fields set, the plan is
+    # byte-identical to the pre-B2 behavior under the same seed. A plain controls and one
+    # with every new field EXPLICITLY None must produce identical plans (no likes/dislikes,
+    # so the newly-wired phrase maps are inert too).
+    char = _character(occupation="nurse")
+    plain = BatchControls(max_nudity=NudityLevel.MEDIUM, escalation="building", base_seed=42)
+    explicit_none = BatchControls(
+        max_nudity=NudityLevel.MEDIUM, escalation="building", base_seed=42,
+        wardrobe_outfits=None, favored_outfits=None, favored_locations=None,
+        demeanor=None, interior_style=None, color_palette=None,
+    )
+    a = _planned(char, 24, plain)
+    b = _planned(char, 24, explicit_none)
+    assert [s.model_dump() for s in a] == [s.model_dump() for s in b]
+
+
+def test_profile_fields_actually_change_the_plan():
+    # The companion to the regression lock: proving the machinery is wired, a wardrobe +
+    # favored + demeanor bias DOES change the plan for the same seed (at minimum via the
+    # demeanor-biased expressions; wardrobe/favored outfit shifts are proven separately in
+    # the unit tests above and the trait_batch integration test).
+    char = _character(occupation="student")
+    base = BatchControls(max_nudity=NudityLevel.MEDIUM, escalation="building", base_seed=42)
+    biased = base.model_copy(update={
+        "wardrobe_outfits": sorted(outfits_for_styles([WardrobeStyleType.SPORTY,
+                                                        WardrobeStyleType.STREETWEAR]),
+                                   key=lambda o: o.value),
+        "favored_outfits": [OutfitType.GYM_SET],
+        "demeanor": [DemeanorType.ENERGETIC],
+    })
+    a = _planned(char, 24, base)
+    b = _planned(char, 24, biased)
+    assert [s.model_dump() for s in a] != [s.model_dump() for s in b]
+    # And the demeanor's fingerprint is visible in the expressions specifically.
+    favor = _DEMEANOR_EXPRESSION_FAVOR[DemeanorType.ENERGETIC]
+    assert sum(1 for s in b if s.expression in favor) >= 12
 
 
 if __name__ == "__main__":

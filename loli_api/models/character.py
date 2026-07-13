@@ -73,6 +73,15 @@ class CharacterCreate(BaseModel):
             "when generate_persona=false."
         ),
     )
+    generate_traits: bool = Field(
+        default=True,
+        description=(
+            "If true (default), immediately generate + persist the character's durable "
+            "trait profile (wardrobe styles, demeanor, home taste, likes/dislikes, "
+            "zodiac, ...) via the trait writer right after creation, in this same call. "
+            "Best-effort: a failure never fails creation. Also covers /characters/bulk."
+        ),
+    )
 
     @field_validator("hero_image_url")
     @classmethod

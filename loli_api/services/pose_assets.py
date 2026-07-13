@@ -36,6 +36,34 @@ _DATA_URI_PREFIX = "data:image/png;base64,"
 _cache: Dict[str, Tuple[str, str]] = {}
 
 
+# ---------------------------------------------------------------------------
+# Pose text descriptions — SINGLE SOURCE OF TRUTH for the per-pose prose injected
+# into the pose workflow prompt (node 114) and used by scripts/generate_pose_refs.py
+# to render each reference image. This lives here (a service) rather than in
+# api/v1/endpoints/pose.py so services and scripts never import from api/; the
+# endpoint re-exports it (``from services.pose_assets import POSE_DESCRIPTIONS``)
+# for back-compat. Keep in lockstep with PoseType (one entry per member).
+# ---------------------------------------------------------------------------
+POSE_DESCRIPTIONS: Dict[PoseType, str] = {
+    PoseType.STANDING_LEANING: "standing and leaning against a wall or surface, relaxed casual pose",
+    PoseType.SITTING: "sitting upright on a chair or seat, legs together, relaxed posture",
+    PoseType.SITTING_LEGS_WIDE_OPEN: "sitting with legs spread wide open, provocative seated pose",
+    PoseType.SOFA: "sitting comfortably on a sofa, relaxed, leaning back slightly",
+    PoseType.LYING_BACK: "lying on her back on a bed or soft surface, relaxed, looking up",
+    PoseType.LYING_STOMACH: "lying face down on her stomach, head turned to one side",
+    PoseType.KNEELING: "kneeling on the ground or bed, upright torso, knees apart",
+    PoseType.BENDING_OVER: "bending over at the waist, looking back over shoulder",
+    PoseType.HANDS_BEHIND_HEAD: "standing with hands behind head, chest out, confident pose",
+    PoseType.SQUATTING: "squatting down low, knees bent wide, balanced posture",
+    PoseType.ALL_FOURS: "on all fours, hands and knees on the ground or bed",
+    PoseType.SPREAD_LEGS: "lying back or sitting with legs spread wide apart",
+    PoseType.EATING: "sitting at a table eating, casual everyday pose",
+    PoseType.JOGGING: "jogging or running, dynamic motion pose",
+    PoseType.OPENING_FRIDGE: "standing and reaching into an open refrigerator",
+    PoseType.COOKING: "standing in a kitchen cooking, hands busy with food preparation",
+}
+
+
 def worker_filename(pose: PoseType) -> str:
     """
     Flat filename the worker's LoadImage node (170) references for this pose.

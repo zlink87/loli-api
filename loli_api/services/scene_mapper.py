@@ -234,6 +234,11 @@ def scene_to_pipeline_request(
         mood_personality=scene.mood_personality,
         free_text=activity_text,
         lead_text=setting_text,
+        # WS-B home scenery: her styled room replaces the generic home phrase, and the
+        # palette clause joins the lighting section. Both come from the (merged) controls,
+        # so an un-profiled batch (both None) composes byte-identically to before.
+        interior_style=controls.interior_style,
+        color_palette=controls.color_palette,
     )
 
     # Guarantee at least one active step (PipelineEditRequest requires >=1).
@@ -246,7 +251,8 @@ def scene_to_pipeline_request(
             ] if p
         )
         background_text = sv.build_scene_background_text(
-            location=scene.location, free_text=persona_bits or "a tasteful natural setting"
+            location=scene.location, free_text=persona_bits or "a tasteful natural setting",
+            interior_style=controls.interior_style, color_palette=controls.color_palette,
         )
 
     if seed is None:

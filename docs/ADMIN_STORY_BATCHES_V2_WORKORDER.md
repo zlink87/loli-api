@@ -436,3 +436,45 @@ skin, straight black hair, brown eyes") — into the edit prompts. This is the
 fix for dark-skinned characters coming back with a white body after edits.
 Panel action: include `characterId` in every edit call made from a character
 context. No other payload change.
+
+---
+
+## 10. Addendum (2026-07-13 PM) — truthful nudity, life-like variety, trait profiles
+
+Second server-side pass landed the same day. **Panel impact is "none / automatic"
+for everything here except the two items already listed as pending in §9** (per-photo
+Edit scene / Re-run UI, and sending `characterId` on standalone edit calls). No new
+batch-launch fields are required; batches simply render better.
+
+**Truthful nudity labels (exposure cap).** Every outfit now carries an "exposure
+cap" — the most explicit level that garment can honestly render (a t-shirt can't show
+"mostly nude" no matter the prompt). The planner keeps each item's `nudityLevel ≤ cap`,
+swapping in a HIGH-capable garment (robe / lingerie / naked class) for high slots and,
+as a last resort when nothing suitable is allowed, lowering that item's label to match
+the pixels. The `nudityLevel` badge (WI-3) now always matches what renders. Automatic.
+
+**Life-like variety (expression / candid / pose adjacency).** Every batch item now
+gets an `expression` (previously often none → a permanent camera-smile); ~1 in 3 items
+is candid / camera-unaware; and no pose OR expression repeats on adjacent items. The
+storyboard already surfaces `expression` (WI-3) — no change needed; it just renders more
+often and more variedly. Automatic.
+
+**Mood-phrase gating.** The "sultry, seductive" mood clause is no longer sprayed across
+the set: it appears on only ~1 in 3 eligible items and never on low-nudity or public
+scenes, so heated moods stop leaking onto clothed / at-work photos. Purely a render/
+prompt-composition change — nothing on the card to build. Automatic.
+
+**Global pose caps.** Pose repetition is now bounded across the whole batch (not just
+locally), so an 8-photo set spreads across more of the 16 pose silhouettes instead of
+recycling two. This is a planner constraint; see the §7 "poses can look
+stiff/repetitive" limit for the ceiling it works within. Automatic.
+
+**Trait-profile batch consumption + `use_trait_profile`.** `BatchCreate` now accepts
+`use_trait_profile: bool = true`; when on (the default), the character's saved trait
+profile fills any batch controls the admin left unset — wardrobe soft-pool (~3× weight,
+variety preserved), `never_wears` hard-blocked, favored/avoided locations, demeanor →
+pose+expression bias, and interior style + palette for consistent home scenery. Explicit
+launch-form values always win; the profile can never raise nudity above the batch
+settings. Optional single checkbox in the launch form (default on) — full contract in
+[`ADMIN_TRAIT_PROFILE_INTEGRATION.md`](./ADMIN_TRAIT_PROFILE_INTEGRATION.md) §6. Automatic
+otherwise.

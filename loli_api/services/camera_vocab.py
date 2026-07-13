@@ -13,6 +13,7 @@ not introduce any camera/framing language of its own.
 """
 from typing import List, Optional
 
+from models.enums import DemeanorType
 from services.attribute_phrases import phrase
 
 
@@ -101,6 +102,24 @@ _EXPRESSION_VARIETY_POOL = [
     "soft_smile", "neutral", "playful", "seductive", "confident", "laughing",
 ]
 
+# WS-B trait profiles: a character's demeanor swaps the default expression pool
+# above for one weighted toward her personality, so a shy character reads gentle
+# and a sultry one reads sultry across a batch — without touching the rng draw
+# ORDER (framing, angle, expression) that varied_shot_fields consumes, so seeded
+# tests stay byte-identical when demeanor is None. Values are EXISTING
+# ExpressionType keys (EXPRESSION_PHRASES above); repetition encodes weighting.
+# One entry per DemeanorType (coverage enforced by tests).
+DEMEANOR_EXPRESSION_POOLS = {
+    DemeanorType.SHY: ["soft_smile", "soft_smile", "soft_smile", "neutral", "neutral", "playful"],
+    DemeanorType.CONFIDENT: ["confident", "confident", "confident", "soft_smile", "soft_smile", "seductive"],
+    DemeanorType.PLAYFUL: ["playful", "playful", "playful", "laughing", "laughing", "soft_smile"],
+    DemeanorType.SULTRY: ["seductive", "seductive", "seductive", "confident", "confident", "neutral"],
+    DemeanorType.ELEGANT: ["soft_smile", "soft_smile", "neutral", "neutral", "confident", "seductive"],
+    DemeanorType.ENERGETIC: ["laughing", "laughing", "laughing", "playful", "playful", "soft_smile"],
+    DemeanorType.COZY: ["soft_smile", "soft_smile", "soft_smile", "neutral", "laughing", "playful"],
+    DemeanorType.MYSTERIOUS: ["neutral", "neutral", "neutral", "seductive", "seductive", "soft_smile"],
+}
+
 POSE_VARIETY_PHRASES = [
     "standing with her weight on one hip, one hand in her pocket",
     "seated, leaning slightly toward the camera",
@@ -115,17 +134,32 @@ POSE_VARIETY_PHRASES = [
 ]
 
 
-def varied_shot_fields(rng) -> dict:
+def varied_shot_fields(rng, demeanor=None) -> dict:
     """
     Seeded weighted pick of framing/angle/expression enum VALUES (WS3). Consumes
     the rng in a fixed order (framing, angle, expression) so it stays reproducible.
     The returned dict feeds ShotOptions(**fields); repetition in the pools weights
     the rotation toward coherent hero crops.
+
+    WS-B: when ``demeanor`` is given (a DemeanorType or its value), ONLY the
+    expression pool is swapped for that demeanor's weighted pool — the framing and
+    angle draws, and the rng draw ORDER/COUNT, are unchanged, so a None demeanor is
+    byte-identical to the legacy behavior (rng-parity with existing seeded tests).
+    An unknown demeanor falls back to the default expression pool.
     """
+    expr_pool = _EXPRESSION_VARIETY_POOL
+    if demeanor is not None:
+        try:
+            key = demeanor if isinstance(demeanor, DemeanorType) else DemeanorType(
+                getattr(demeanor, "value", demeanor)
+            )
+            expr_pool = DEMEANOR_EXPRESSION_POOLS.get(key, _EXPRESSION_VARIETY_POOL)
+        except (ValueError, TypeError):
+            expr_pool = _EXPRESSION_VARIETY_POOL
     return {
         "framing": rng.choice(_FRAMING_VARIETY_POOL),
         "angle": rng.choice(_CAMERA_ANGLE_VARIETY_POOL),
-        "expression": rng.choice(_EXPRESSION_VARIETY_POOL),
+        "expression": rng.choice(expr_pool),
     }
 
 

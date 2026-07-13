@@ -40,25 +40,12 @@ _character_store = None
 # Pose Descriptions - Text descriptions of each target pose, injected into the
 # workflow prompt (node 114). The reference image itself is resolved and shipped
 # per-request via services/pose_assets.py (worker_filename -> node 170).
+#
+# The canonical map now lives in services/pose_assets.py (single source of truth,
+# so services and scripts never import from api/); re-exported here for back-compat
+# (`pose_ep.POSE_DESCRIPTIONS` and `from api.v1.endpoints.pose import POSE_DESCRIPTIONS`).
 # ---------------------------------------------------------------------------
-POSE_DESCRIPTIONS: Dict[PoseType, str] = {
-    PoseType.STANDING_LEANING: "standing and leaning against a wall or surface, relaxed casual pose",
-    PoseType.SITTING: "sitting upright on a chair or seat, legs together, relaxed posture",
-    PoseType.SITTING_LEGS_WIDE_OPEN: "sitting with legs spread wide open, provocative seated pose",
-    PoseType.SOFA: "sitting comfortably on a sofa, relaxed, leaning back slightly",
-    PoseType.LYING_BACK: "lying on her back on a bed or soft surface, relaxed, looking up",
-    PoseType.LYING_STOMACH: "lying face down on her stomach, head turned to one side",
-    PoseType.KNEELING: "kneeling on the ground or bed, upright torso, knees apart",
-    PoseType.BENDING_OVER: "bending over at the waist, looking back over shoulder",
-    PoseType.HANDS_BEHIND_HEAD: "standing with hands behind head, chest out, confident pose",
-    PoseType.SQUATTING: "squatting down low, knees bent wide, balanced posture",
-    PoseType.ALL_FOURS: "on all fours, hands and knees on the ground or bed",
-    PoseType.SPREAD_LEGS: "lying back or sitting with legs spread wide apart",
-    PoseType.EATING: "sitting at a table eating, casual everyday pose",
-    PoseType.JOGGING: "jogging or running, dynamic motion pose",
-    PoseType.OPENING_FRIDGE: "standing and reaching into an open refrigerator",
-    PoseType.COOKING: "standing in a kitchen cooking, hands busy with food preparation",
-}
+POSE_DESCRIPTIONS: Dict[PoseType, str] = pose_assets.POSE_DESCRIPTIONS
 
 
 # ---------------------------------------------------------------------------

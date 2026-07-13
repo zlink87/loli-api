@@ -8,7 +8,10 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from .enums import NudityLevel, OutfitType, PoseType, LocationType, PhotoStyleType
+from .enums import (
+    NudityLevel, OutfitType, PoseType, LocationType, PhotoStyleType,
+    DemeanorType, InteriorStyleType, PaletteType,
+)
 
 
 class SeedStrategy(str, Enum):
@@ -135,6 +138,58 @@ class BatchControls(BaseModel):
         ),
     )
 
+    # --- Character trait-profile bias (WS-B Phase B2) ---------------------------
+    # These are a SOFT bias, normally profile-DERIVED at launch by
+    # services.trait_profile_merge.apply_trait_profile (from the character's saved
+    # TraitProfile) — the admin rarely sets them by hand. When the admin DOES set one
+    # explicitly, the explicit value WINS (the merge is fill-only for these). None means
+    # "no bias" and keeps the planner byte-identical to its pre-trait-profile behavior.
+    wardrobe_outfits: Optional[List[OutfitType]] = Field(
+        default=None,
+        description=(
+            "Soft wardrobe bias: outfits that fit the character's style. The planner "
+            "intersects each beat's pool with this set (keeping uniforms), using the "
+            "subset only when >=2 survive so variety is preserved (never a hard filter). "
+            "Normally profile-derived at launch; explicit admin values win."
+        ),
+    )
+    favored_outfits: Optional[List[OutfitType]] = Field(
+        default=None,
+        description=(
+            "Soft favourite-outfit bias (her favorite_outfits minus blocks): weighted up "
+            "(~3x) in outfit picks. Profile-derived at launch; explicit admin values win."
+        ),
+    )
+    favored_locations: Optional[List[LocationType]] = Field(
+        default=None,
+        description=(
+            "Soft favourite-location bias: weighted up (~3x) in location picks. "
+            "Profile-derived at launch; explicit admin values win."
+        ),
+    )
+    demeanor: Optional[List[DemeanorType]] = Field(
+        default=None,
+        description=(
+            "The character's default demeanor(s): biases per-item expression toward "
+            "demeanor-consistent states and favours matching poses. Profile-derived at "
+            "launch; explicit admin values win."
+        ),
+    )
+    interior_style: Optional[InteriorStyleType] = Field(
+        default=None,
+        description=(
+            "Home interior style: gives the character a consistent, styled room for "
+            "home/hotel scenes. Profile-derived at launch; explicit admin value wins."
+        ),
+    )
+    color_palette: Optional[PaletteType] = Field(
+        default=None,
+        description=(
+            "Color palette: a short color/light clause folded into scene backgrounds. "
+            "Profile-derived at launch; explicit admin value wins."
+        ),
+    )
+
 
 class BatchCreate(BaseModel):
     """Request body for POST /v1/characters/{id}/batches."""
@@ -152,6 +207,16 @@ class BatchCreate(BaseModel):
     dry_run: bool = Field(
         default=False,
         description="Plan + map + persist items and return the estimate, but do NOT enqueue GPU jobs",
+    )
+    use_trait_profile: bool = Field(
+        default=True,
+        description=(
+            "When True (default) and the character has a saved trait profile, the "
+            "orchestrator folds that profile's wardrobe/demeanor/home-scenery/likes bias "
+            "into the batch controls at launch (best-effort; explicit admin values win, "
+            "nudity controls are never touched). Set False to launch a batch that ignores "
+            "the character's trait profile entirely."
+        ),
     )
 
     class Config:

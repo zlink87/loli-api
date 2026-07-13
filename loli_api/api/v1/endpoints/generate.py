@@ -9,6 +9,7 @@ import logging
 from models.requests import GenerateImageRequest, BatchGenerateRequest
 from models.responses import JobCreateResponse, BatchGenerateResponse, BatchGenerateItemResult
 from models.enums import JobStatus
+from models.trait_profile import TraitProfile
 from auth.dependencies import get_current_user
 from auth.admin import require_admin
 from services.notification_service import NotificationService
@@ -20,6 +21,9 @@ router = APIRouter(tags=["Generation"])
 # These will be injected from main.py
 _job_manager = None
 _notification_service: Optional[NotificationService] = None
+# Optional (Supabase-gated). Used only to auto-fill wardrobeStyles/demeanor from a
+# GenerateImageRequest.characterId; None (store not configured) degrades gracefully.
+_trait_profile_store = None
 
 
 def set_job_manager(job_manager):
@@ -32,6 +36,59 @@ def set_notification_service(notification_service: NotificationService):
     """Set the notification service instance (called from main.py)."""
     global _notification_service
     _notification_service = notification_service
+
+
+def set_trait_profile_store(store) -> None:
+    """Set the trait-profile store (called from router.configure_services)."""
+    global _trait_profile_store
+    _trait_profile_store = store
+
+
+async def populate_wardrobe_traits(trait_store, request) -> None:
+    """
+    If ``request.characterId`` is set and ``wardrobeStyles``/``demeanor`` are absent,
+    load the character's trait profile via ``trait_store`` and auto-fill them (her
+    wardrobe styles + first demeanor) so a themed generation biases toward her taste.
+
+    No-ops (leaving the request untouched) when:
+      * the request carries no characterId, or already has BOTH fields set (an
+        explicit caller value is never overridden — each field is filled independently);
+      * ``trait_store`` is None (trait store not configured / Supabase not wired);
+      * the character has no profile row, or an empty profile;
+      * the store raises for any reason (logged, swallowed).
+    Never raises and NEVER touches nudity/identity — wardrobe/expression bias only.
+    """
+    character_id = getattr(request, "characterId", None)
+    if not character_id:
+        return
+    have_styles = bool(getattr(request, "wardrobeStyles", None))
+    have_demeanor = getattr(request, "demeanor", None) is not None
+    if have_styles and have_demeanor:
+        return  # both explicit — nothing to derive
+    if trait_store is None:
+        logger.warning(
+            "characterId=%s provided but trait profile store not configured; "
+            "proceeding without wardrobe traits",
+            character_id,
+        )
+        return
+
+    try:
+        row = await trait_store.get(character_id)
+    except Exception as e:  # noqa: BLE001 — wardrobe bias is protective, not critical
+        logger.warning(
+            "Failed to load trait profile for character %s: %s; proceeding without",
+            character_id, e,
+        )
+        return
+
+    if not row:
+        return
+    profile = TraitProfile.coerce(row.get("profile") or {})
+    if not have_styles and profile.wardrobe_styles:
+        request.wardrobeStyles = list(profile.wardrobe_styles)
+    if not have_demeanor and profile.demeanor:
+        request.demeanor = profile.demeanor[0]
 
 
 def get_job_manager():
@@ -122,6 +179,10 @@ async def create_generate_job(
                 detail="Age must be at least 18"
             )
 
+        # Trait-aware generation: resolve wardrobeStyles/demeanor from characterId
+        # when the caller left them unset (best-effort; never fails the request).
+        await populate_wardrobe_traits(_trait_profile_store, request)
+
         # Send payload to Google Chat webhook for logging
         notification_service = get_notification_service()
         if notification_service:
@@ -206,6 +267,8 @@ async def create_batch_generate_jobs(
 
     results = []
     for index, item in enumerate(items):
+        # Trait-aware theming per item (no-op unless the item carries a characterId).
+        await populate_wardrobe_traits(_trait_profile_store, item)
         # queue="creation" isolates batch traffic while keeping job_type="text_to_image"
         # so GET /v1/jobs/{jobId} is byte-identical to single-generate.
         job = await job_manager.create_job(item, user_id, queue="creation")

@@ -12,6 +12,7 @@ cleanly with the identity-preserving background edit.
 import re
 from typing import List, Optional
 
+from models.enums import InteriorStyleType, PaletteType
 from services.attribute_phrases import phrase, KINK_PHRASES, PERSONALITY_PHRASES
 
 
@@ -78,6 +79,154 @@ LIGHTING_PHRASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Home scenery consistency (WS-B trait profiles) — a character's OWN styled rooms.
+# ---------------------------------------------------------------------------
+# A TraitProfile carries an interior_style; for her HOME (and hotel) scenes the styled
+# room description below REPLACES the generic LOCATION_PHRASES entry, so the same
+# character's bedroom looks the same every batch AND matches her taste, while two
+# differently-styled characters get visibly different homes. Curated visual text only —
+# NEVER free LLM prose and NEVER identity (see build_scene_background_text). The keys are
+# exactly the "home-ish" locations (every home_* LocationType + hotel_room); non-home
+# locations are intentionally absent, so a styled lookup there returns None and the
+# generic phrase stands. Coverage-tested: every InteriorStyleType x every home room.
+_HOME_LIKE_LOCATIONS = frozenset({
+    "home_bedroom", "home_living_room", "home_kitchen",
+    "home_bathroom", "home_balcony", "home_office", "hotel_room",
+})
+
+INTERIOR_ROOM_PHRASES = {
+    InteriorStyleType.COZY_BOHEMIAN: {
+        "home_bedroom": "a cozy bohemian bedroom with layered textiles, hanging plants, warm string lights and a low wooden bed",
+        "home_living_room": "a bohemian living room with a rattan sofa, macrame wall hangings, floor cushions and trailing plants",
+        "home_kitchen": "a warm eclectic kitchen with open wooden shelves, hanging herbs, patterned tiles and terracotta pots",
+        "home_bathroom": "a boho bathroom with a hanging fern, woven baskets, warm wood accents and a clawfoot tub",
+        "home_balcony": "a snug plant-filled balcony with fairy lights, a rattan chair and draped textiles",
+        "home_office": "a cozy bohemian study with a wooden desk, stacked books, a woven rug and hanging plants",
+        "hotel_room": "a warm boho-styled hotel room with layered throws, woven textures and soft lamp light",
+    },
+    InteriorStyleType.MODERN_MINIMAL: {
+        "home_bedroom": "a minimalist bedroom with clean lines, a low platform bed, neutral bedding and uncluttered surfaces",
+        "home_living_room": "a modern minimalist living room with a low grey sofa, bare walls and a single statement plant",
+        "home_kitchen": "a sleek minimalist kitchen with handleless matte cabinets, clear counters and a stone island",
+        "home_bathroom": "a minimalist bathroom with a floating vanity, matte fixtures and a large frameless mirror",
+        "home_balcony": "a clean modern balcony with a slim rail, a single lounge chair and unobstructed views",
+        "home_office": "a minimalist home office with a slim desk, a single monitor and clean empty walls",
+        "hotel_room": "a modern minimalist hotel room with a low bed, neutral tones and uncluttered surfaces",
+    },
+    InteriorStyleType.LUXURY_GLAM: {
+        "home_bedroom": "a luxurious glam bedroom with a tufted velvet headboard, satin bedding, mirrored nightstands and a crystal chandelier",
+        "home_living_room": "an opulent living room with plush velvet sofas, gold accents, marble tables and a crystal chandelier",
+        "home_kitchen": "a glamorous kitchen with marble counters, gold hardware, mirrored splashback and polished surfaces",
+        "home_bathroom": "a lavish marble bathroom with gold fixtures, a freestanding tub and a backlit mirror",
+        "home_balcony": "an elegant balcony with marble flooring, plush seating, gold planters and city views",
+        "home_office": "a plush glam study with a lacquered desk, velvet chair, gold lamp and mirrored shelves",
+        "hotel_room": "a lavish upscale hotel suite with a tufted headboard, satin bedding and gilded accents",
+    },
+    InteriorStyleType.RUSTIC_WARM: {
+        "home_bedroom": "a rustic bedroom with a reclaimed-wood bed, exposed beams, wool throws and a warm lamp",
+        "home_living_room": "a warm rustic living room with a stone fireplace, worn leather sofa, wooden beams and knit blankets",
+        "home_kitchen": "a farmhouse kitchen with butcher-block counters, open wood shelving, cast-iron pans and a ceramic sink",
+        "home_bathroom": "a rustic bathroom with reclaimed-wood panelling, a stone basin and a vintage tub",
+        "home_balcony": "a wooden balcony with a weathered bench, potted greenery and a woollen throw",
+        "home_office": "a warm wood-panelled study with a heavy oak desk, brass lamp and shelves of old books",
+        "hotel_room": "a warm rustic lodge-style room with a timber bed frame, wool blankets and a stone accent wall",
+    },
+    InteriorStyleType.SCANDINAVIAN_LIGHT: {
+        "home_bedroom": "a bright Scandinavian bedroom with pale wood, white bedding, soft grey textiles and a leafy plant",
+        "home_living_room": "an airy Scandinavian living room with a light-grey sofa, pale wood floor, white walls and greenery",
+        "home_kitchen": "a bright Nordic kitchen with white cabinets, pale wood counters, clean lines and potted herbs",
+        "home_bathroom": "a light Scandinavian bathroom with white tiles, pale wood accents and simple fixtures",
+        "home_balcony": "a bright airy balcony with pale wood decking, a simple chair and a few green plants",
+        "home_office": "a bright Nordic workspace with a pale wood desk, white walls, a simple chair and a small plant",
+        "hotel_room": "a bright Scandinavian-style hotel room with pale wood, crisp white linens and soft daylight",
+    },
+    InteriorStyleType.INDUSTRIAL_LOFT: {
+        "home_bedroom": "an industrial loft bedroom with exposed brick, a black metal bed frame, concrete floor and Edison bulbs",
+        "home_living_room": "an industrial loft living room with exposed brick, a leather sofa, black steel shelving and pendant bulbs",
+        "home_kitchen": "an industrial kitchen with stainless steel counters, black metal shelving, concrete and exposed pipes",
+        "home_bathroom": "an industrial bathroom with concrete walls, black metal fixtures and an exposed-bulb mirror",
+        "home_balcony": "a concrete loft balcony with black steel railings, a metal stool and city rooftops beyond",
+        "home_office": "an industrial workspace with a reclaimed-wood-and-steel desk, exposed brick and a metal task lamp",
+        "hotel_room": "an industrial-style hotel room with exposed brick, black metal fittings and Edison-bulb lighting",
+    },
+    InteriorStyleType.GIRLY_PASTEL: {
+        "home_bedroom": "a soft girly bedroom with blush-pink bedding, fairy lights, plush cushions and pastel decor",
+        "home_living_room": "a pastel living room with a blush velvet sofa, soft throw pillows, fairy lights and cute decor",
+        "home_kitchen": "a pastel kitchen with mint cabinets, pink accessories, soft light and dainty crockery",
+        "home_bathroom": "a girly pastel bathroom with pink tiles, soft towels, a round mirror and dainty bottles",
+        "home_balcony": "a sweet pastel balcony with a blush chair, potted flowers and string fairy lights",
+        "home_office": "a girly pastel desk nook with a white desk, pink accessories, fairy lights and cute stationery",
+        "hotel_room": "a soft pastel-toned hotel room with blush linens, plush cushions and warm fairy lights",
+    },
+    InteriorStyleType.ARTSY_ECLECTIC: {
+        "home_bedroom": "an eclectic artsy bedroom with a gallery wall, mismatched patterned textiles and a vintage headboard",
+        "home_living_room": "an artsy eclectic living room with a gallery wall, a bold patterned rug, mixed vintage furniture and sculptures",
+        "home_kitchen": "an eclectic kitchen with mismatched tiles, colorful crockery, quirky art and open shelving",
+        "home_bathroom": "an artsy bathroom with patterned tiles, framed prints and a bold vintage mirror",
+        "home_balcony": "a quirky balcony with mismatched chairs, colorful pots, string lights and hanging art",
+        "home_office": "an eclectic studio-office with a paint-flecked desk, a gallery wall, sculptures and a patterned rug",
+        "hotel_room": "an artsy boutique hotel room with a gallery wall, bold patterns and mixed vintage furnishings",
+    },
+}
+
+# Palette -> a short color/light clause folded into the LIGHTING section of the scene
+# background (see build_scene_background_text). One entry per PaletteType (coverage-tested).
+PALETTE_PHRASES = {
+    PaletteType.WARM_NEUTRALS: "a warm neutral palette of beige, cream and soft tan tones",
+    PaletteType.SOFT_PASTELS: "soft pastel colors in blush, mint and powder-blue tones",
+    PaletteType.BOLD_DARK: "a bold dark palette of deep charcoal and moody tones",
+    PaletteType.EARTHY_GREEN: "earthy green and terracotta tones with natural wood",
+    PaletteType.CRISP_WHITE: "a crisp bright palette of clean whites and cool light",
+    PaletteType.JEWEL_TONES: "rich jewel tones of emerald, sapphire and ruby",
+}
+
+
+def _coerce_interior_style(v) -> Optional[InteriorStyleType]:
+    if v is None:
+        return None
+    if isinstance(v, InteriorStyleType):
+        return v
+    try:
+        return InteriorStyleType(getattr(v, "value", v))
+    except (ValueError, TypeError):
+        return None
+
+
+def _coerce_palette(v) -> Optional[PaletteType]:
+    if v is None:
+        return None
+    if isinstance(v, PaletteType):
+        return v
+    try:
+        return PaletteType(getattr(v, "value", v))
+    except (ValueError, TypeError):
+        return None
+
+
+def styled_room_phrase(interior_style, location) -> Optional[str]:
+    """
+    The character's styled room description for `location` under `interior_style`, or
+    None when the style is unknown or the location is not a home-ish room (so the caller
+    falls back to the generic LOCATION_PHRASES entry). interior_style/location accept an
+    enum or its raw value.
+    """
+    style = _coerce_interior_style(interior_style)
+    if style is None:
+        return None
+    loc_val = getattr(location, "value", location)
+    rooms = INTERIOR_ROOM_PHRASES.get(style)
+    if not rooms:
+        return None
+    return rooms.get(loc_val)
+
+
+def palette_phrase(color_palette) -> str:
+    """Short color/light clause for a PaletteType (or value); '' when unknown/None."""
+    pal = _coerce_palette(color_palette)
+    return PALETTE_PHRASES.get(pal, "") if pal is not None else ""
+
+
 def location_phrase(location) -> str:
     """Descriptive phrase for a LocationType (or its value)."""
     return phrase(LOCATION_PHRASES, location)
@@ -134,6 +283,8 @@ def build_scene_background_text(
     mood_personality=None,
     free_text: Optional[str] = None,
     lead_text: Optional[str] = None,
+    interior_style=None,
+    color_palette=None,
 ) -> str:
     """
     Compose location + time + lighting (+ optional mood + free text) into the
@@ -145,11 +296,22 @@ def build_scene_background_text(
     LEADS the composition and the location enum phrase follows as an anchor, then
     time/lighting/mood as before. Only scene_mapper passes it (story batches);
     every other caller omits it and gets the location-first composition unchanged.
+
+    ``interior_style`` / ``color_palette`` (opt-in, WS-B home scenery): the character's
+    saved taste. For a HOME/HOTEL location the styled INTERIOR_ROOM_PHRASES text REPLACES
+    the generic location phrase (so her home stays visually consistent AND personal); for
+    any other location the generic phrase stands. The palette clause (if any) joins the
+    LIGHTING section. Both default None -> byte-identical to the pre-trait-profile output,
+    so every non-batch caller is unaffected.
     """
     parts: List[str] = []
     if lead_text and lead_text.strip():
         parts.append(lead_text.strip())
-    loc = location_phrase(location)
+    # Styled home room REPLACES the generic location phrase for home-ish locations;
+    # elsewhere (styled_room_phrase returns None) the generic phrase stands.
+    loc = styled_room_phrase(interior_style, location) if interior_style is not None else None
+    if not loc:
+        loc = location_phrase(location)
     if loc:
         parts.append(loc)
     t = phrase(TIME_OF_DAY_PHRASES, time_of_day)
@@ -158,6 +320,10 @@ def build_scene_background_text(
     li = phrase(LIGHTING_PHRASES, lighting)
     if li:
         parts.append(li)
+    # Palette clause joins the lighting section (right after the lighting phrase).
+    pal = palette_phrase(color_palette) if color_palette is not None else ""
+    if pal:
+        parts.append(pal)
     mood = scene_mood_phrase(mood_kinks, mood_personality)
     if mood:
         parts.append(mood)

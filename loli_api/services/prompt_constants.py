@@ -9,6 +9,8 @@ anti-deformity and identity-preservation language.
 import re
 from typing import Optional
 
+from config import settings
+
 # Anti-deformity / quality negative. Merged from the strongest strings that were
 # hardcoded in test_final_API.json and edit_final_AIO.json (the latter is a
 # dev-only template used only by test_edit_chain.py, not a production workflow).
@@ -195,6 +197,38 @@ _POLISHED_TIME_LINES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Color-grade clause (GENERATION styles only). Feedback: hero photos render
+# realistic but flat/desaturated -- the "android phone cam-quality" realism
+# wording in candid_phone (and the true-to-life restraint in the others) is
+# deliberate and stays; this only adds a subtle richness/finish pass on top.
+# Driven by settings.GENERATION_COLOR_GRADE so wording is tunable via env
+# without a redeploy; empty string disables it entirely (byte-identical
+# legacy prompts on every style). This is entirely separate from
+# EDIT_PHOTO_STYLE_SUFFIXES below, which serves the qwen edit steps.
+#
+# candid_phone -- the legacy raw/candid phone-cam look -- gets a fixed,
+# deliberately milder clause instead of the tunable value verbatim, so the
+# "gritty candid" aesthetic isn't pushed toward a graded/finished look;
+# natural/polished/studio (the more "finished" styles already) get the full
+# tunable clause. Both are gated by the SAME settings switch.
+# ---------------------------------------------------------------------------
+_CANDID_COLOR_GRADE_MILD = (
+    "natural true-to-life color with a gentle touch of warmth and richness, "
+    "no washed-out or faded tones"
+)
+_COLOR_GRADE_SENTENCE = "Your photographs also have {grade}.\n"
+
+
+def _with_color_grade(base: str, style_val: str) -> str:
+    grade = (settings.GENERATION_COLOR_GRADE or "").strip()
+    if not grade or "---\n" not in base:
+        return base
+    text = _CANDID_COLOR_GRADE_MILD if style_val == "candid_phone" else grade
+    sentence = _COLOR_GRADE_SENTENCE.format(grade=text)
+    return base.replace("---\n", f"{sentence}---\n", 1)
+
+
 def photo_style_template(style, time_of_day=None) -> str:
     """
     Resolve the node-125 wrapper text for a photo style + optional time of day.
@@ -203,6 +237,9 @@ def photo_style_template(style, time_of_day=None) -> str:
     * polished + a mapped time -> the polished template with its lighting
       sentence swapped for the time-matched one (same structure, same {$@}).
     * studio/candid_phone ignore time (controlled studio light / legacy raw).
+    * settings.GENERATION_COLOR_GRADE, when non-empty, appends a subtle
+      color-grade clause (see _with_color_grade); empty -> no-op, byte-identical
+      to the base template (with any time-of-day swap already applied).
     """
     style_val = getattr(style, "value", style)
     base = PHOTO_STYLE_TEMPLATES.get(style_val, "")
@@ -210,8 +247,8 @@ def photo_style_template(style, time_of_day=None) -> str:
         return ""
     time_val = getattr(time_of_day, "value", time_of_day)
     if style_val == "polished" and time_val in _POLISHED_TIME_LINES:
-        return base.replace(_POLISHED_DAY_LINE, _POLISHED_TIME_LINES[time_val])
-    return base
+        base = base.replace(_POLISHED_DAY_LINE, _POLISHED_TIME_LINES[time_val])
+    return _with_color_grade(base, style_val)
 
 
 # ---------------------------------------------------------------------------

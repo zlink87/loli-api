@@ -35,6 +35,8 @@ _character_store = None
 _character_image_store = None
 _persona_writer = None
 _chat_persona_store = None
+_trait_profile_writer = None
+_trait_profile_store = None
 
 
 def set_character_store(store) -> None:
@@ -55,6 +57,16 @@ def set_persona_writer(writer) -> None:
 def set_chat_persona_store(store) -> None:
     global _chat_persona_store
     _chat_persona_store = store
+
+
+def set_trait_profile_writer(writer) -> None:
+    global _trait_profile_writer
+    _trait_profile_writer = writer
+
+
+def set_trait_profile_store(store) -> None:
+    global _trait_profile_store
+    _trait_profile_store = store
 
 
 def get_character_store():
@@ -131,65 +143,95 @@ def _image_read(row: dict) -> CharacterImageRead:
 _DEFAULT_PERSONA_FIELDS = [f for f in PersonaField if f != PersonaField.name]
 
 
+async def _generate_traits_best_effort(character: CharacterRead) -> None:
+    """
+    Generate + persist the character's trait profile (WS-B). Best-effort: a failure is
+    logged and swallowed so it NEVER fails character creation (covers /characters/bulk).
+    Writes to character_trait_profiles only, so the character row is unaffected.
+    """
+    if _trait_profile_writer is None or _trait_profile_store is None:
+        logger.warning(
+            "generate_traits requested but trait services not configured — skipping "
+            f"(character {character.id})"
+        )
+        return
+    try:
+        values, provider = await _trait_profile_writer.write(
+            character.persona, None, {}, character_id=character.id, bio=character.bio
+        )
+        await _trait_profile_store.apply(character.id, generated=values, provider=provider)
+        logger.info(
+            f"Trait profile auto-generated on creation for character {character.id}: "
+            f"provider={provider}"
+        )
+    except Exception as e:  # noqa: BLE001 - traits must never fail creation
+        logger.error(
+            f"generate_traits failed for character {character.id}; creation still "
+            f"succeeded: {e}"
+        )
+
+
 async def _create_character_with_persona(body: CharacterCreate) -> CharacterRead:
     """
-    Create one character row and, when body.generate_persona is set, generate + persist
-    its chat persona in the same call. Shared by POST /v1/characters (single) and
-    POST /v1/characters/bulk so both behave identically. Persona generation is best-effort:
-    a failure there is logged and creation still succeeds (it never raises).
+    Create one character row and, best-effort, generate + persist its chat persona
+    (when body.generate_persona is set) and its trait profile (when body.generate_traits
+    is set — default on). Shared by POST /v1/characters (single) and POST
+    /v1/characters/bulk so both behave identically. Both generation blocks are
+    best-effort: a failure is logged and creation still succeeds (it never raises).
     """
     store = get_character_store()
     character = await store.create(body)
 
-    if not body.generate_persona:
-        return character
-
-    if _persona_writer is None or _chat_persona_store is None:
-        logger.warning(
-            "generate_persona requested but persona services not configured — skipping "
-            f"(character {character.id})"
-        )
-        return character
-
-    try:
-        if body.persona_fields is not None:
-            effective_fields = list(body.persona_fields)
+    if body.generate_persona:
+        if _persona_writer is None or _chat_persona_store is None:
+            logger.warning(
+                "generate_persona requested but persona services not configured — skipping "
+                f"(character {character.id})"
+            )
         else:
-            effective_fields = list(_DEFAULT_PERSONA_FIELDS)
-            if body.bio and body.bio.strip():
-                # A bio typed on this same request is never silently overwritten by
-                # generation — regenerating it too requires an explicit persona_fields.
-                effective_fields = [f for f in effective_fields if f != PersonaField.bio]
+            try:
+                if body.persona_fields is not None:
+                    effective_fields = list(body.persona_fields)
+                else:
+                    effective_fields = list(_DEFAULT_PERSONA_FIELDS)
+                    if body.bio and body.bio.strip():
+                        # A bio typed on this same request is never silently overwritten by
+                        # generation — regenerating it too requires an explicit persona_fields.
+                        effective_fields = [f for f in effective_fields if f != PersonaField.bio]
 
-        if effective_fields:
-            enrichment = (body.persona_enrichment or PersonaEnrichment()).model_dump()
-            display_name = character.name or character.persona.name
+                if effective_fields:
+                    enrichment = (body.persona_enrichment or PersonaEnrichment()).model_dump()
+                    display_name = character.name or character.persona.name
 
-            values, provider = await _persona_writer.write(
-                character.persona, effective_fields, enrichment, name=display_name
-            )
-            await _chat_persona_store.apply(
-                character.id,
-                generated=values,
-                existing_persona_id=None,
-                model_id=body.persona_model_id,
-                name_default=display_name,
-            )
-            logger.info(
-                f"Persona auto-generated on creation for character {character.id}: "
-                f"fields={list(values.keys())} provider={provider}"
-            )
-            # chat_persona_store.apply() writes characters.chat_persona_id (and
-            # possibly welcome_message/context) via its own path, so the object from
-            # store.create() above is now stale — refresh before returning it.
-            refreshed = await store.get(character.id)
-            if refreshed is not None:
-                character = refreshed
-    except Exception as e:
-        logger.error(
-            f"generate_persona failed for character {character.id}; creation still "
-            f"succeeded: {e}"
-        )
+                    values, provider = await _persona_writer.write(
+                        character.persona, effective_fields, enrichment, name=display_name
+                    )
+                    await _chat_persona_store.apply(
+                        character.id,
+                        generated=values,
+                        existing_persona_id=None,
+                        model_id=body.persona_model_id,
+                        name_default=display_name,
+                    )
+                    logger.info(
+                        f"Persona auto-generated on creation for character {character.id}: "
+                        f"fields={list(values.keys())} provider={provider}"
+                    )
+                    # chat_persona_store.apply() writes characters.chat_persona_id (and
+                    # possibly welcome_message/context) via its own path, so the object from
+                    # store.create() above is now stale — refresh before returning it.
+                    refreshed = await store.get(character.id)
+                    if refreshed is not None:
+                        character = refreshed
+            except Exception as e:
+                logger.error(
+                    f"generate_persona failed for character {character.id}; creation still "
+                    f"succeeded: {e}"
+                )
+
+    # Trait profile is opt-OUT (default on) and independent of the persona block.
+    if body.generate_traits:
+        await _generate_traits_best_effort(character)
 
     return character
 

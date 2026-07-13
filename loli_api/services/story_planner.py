@@ -40,12 +40,15 @@ from models.enums import (
     LightingType,
     KinkType,
     PersonalityType,
+    DemeanorType,
 )
 from models.batch import BatchControls
 from models.scene import SceneSpec
 from services import attribute_phrases as ap
 from services import scene_vocab as sv
 from services import story_templates as st
+from services import outfit_vocab as ov
+from services.pose_assets import POSE_DESCRIPTIONS
 from services.venice_client import VeniceClient
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,151 @@ _NUDITY_LADDER: List[NudityLevel] = [
 # daytime, golden_hour, sunset, evening, night); the time helpers index off it the
 # same index-based way the nudity helpers use _NUDITY_LADDER.
 _TIME_LADDER: List[TimeOfDayType] = list(TimeOfDayType)
+
+
+# ---------------------------------------------------------------------------
+# Batch expression / gaze pool (A2 — "conscious model" variety)
+# ---------------------------------------------------------------------------
+# The deterministic planner used to leave SceneSpec.expression None, so every render
+# fell through to the edit model's default camera-aware smile — a 24-item batch read as
+# the same posed smile 24x. These short literal expression/gaze states are assigned one
+# per scene (seeded, adjacency- and usage-capped) and flow through the EXISTING
+# SceneSpec.expression -> pose-step expression clause; no new prompt path is added.
+#
+# Two registers: CAMERA-AWARE (she engages the lens) and CANDID (camera-unaware — a life
+# observed, not a photoshoot). ~1/3 of items draw from the candid subset (deterministic).
+# Every string is authored to SURVIVE _scrub_expression: NO facial-FEATURE / identity
+# tokens (no eyes/lips/teeth/jaw/cheekbone/nose/chin, no hair/skin) — "calm, eyes closed"
+# would be gutted by the scrub, so it is written "calm, lids lowered" instead. Kept module-
+# local (NOT imported from camera_vocab) per the WS-A file-ownership boundary.
+_BATCH_EXPRESSIONS_CAMERA_AWARE: Tuple[str, ...] = (
+    "soft smile at the camera",
+    "playful grin",
+    "warm, easy smile",
+    "confident look to the camera",
+    "bright, open smile",
+    "relaxed, faint smile",
+    "amused half-smile",
+    "cheerful laugh",
+)
+_BATCH_EXPRESSIONS_CANDID: Tuple[str, ...] = (
+    "soft smile looking away",
+    "caught mid-laugh",
+    "calm, lids lowered",
+    "absorbed in her phone, unaware of the camera",
+    "glancing over her shoulder",
+    "focused on what she's doing",
+    "quietly lost in thought",
+    "gazing off to the side",
+)
+# The full pool (camera-aware first, then candid). ~1/3 candid share is achieved by
+# routing every 3rd slot (i % 3 == 2) to the candid subset; see _assign_batch_expressions.
+_BATCH_EXPRESSION_POOL: Tuple[str, ...] = (
+    _BATCH_EXPRESSIONS_CAMERA_AWARE + _BATCH_EXPRESSIONS_CANDID
+)
+
+
+# ---------------------------------------------------------------------------
+# Trait-profile bias maps (WS-B Phase B2)
+# ---------------------------------------------------------------------------
+# Value-keyed phrase maps handed to _weighted_pick as its `phrase_map`, so likes/dislikes
+# finally match real garment/pose WORDS instead of only the enum names:
+#   * _OUTFIT_PHRASE_MAP — outfit_vocab.OUTFIT_KEYWORD_PHRASES verbatim (already value-keyed).
+#   * _POSE_PHRASE_MAP   — POSE_DESCRIPTIONS re-keyed by pose VALUE (POSE_DESCRIPTIONS is
+#                          keyed by PoseType; _enum_keywords wants a value->text map).
+# Both are inert when likes/dislikes are empty (no keyword to match -> all weights 1.0),
+# so a no-likes batch is byte-identical to the pre-B2 empty-map behavior.
+_OUTFIT_PHRASE_MAP: Dict[str, str] = ov.OUTFIT_KEYWORD_PHRASES
+_POSE_PHRASE_MAP: Dict[str, str] = {p.value: desc for p, desc in POSE_DESCRIPTIONS.items()}
+
+# Demeanor -> a small set of POSES that read as that demeanor. _pick_pose favours these
+# (weight 2.0) WITHIN the beat's own allowed pool, so a shy character leans to reserved
+# poses and an energetic one to dynamic ones — a soft nudge, never a filter. Every
+# DemeanorType is covered (coverage-tested). Explicit/anatomical poses are deliberately
+# excluded (they are already gated by nudity/location, not a demeanor's default vibe).
+DEMEANOR_POSE_FAVOR: Dict[DemeanorType, frozenset] = {
+    DemeanorType.SHY: frozenset({PoseType.SITTING, PoseType.STANDING_LEANING, PoseType.LYING_STOMACH}),
+    DemeanorType.CONFIDENT: frozenset({PoseType.HANDS_BEHIND_HEAD, PoseType.STANDING_LEANING, PoseType.SITTING}),
+    DemeanorType.PLAYFUL: frozenset({PoseType.JOGGING, PoseType.EATING, PoseType.HANDS_BEHIND_HEAD}),
+    DemeanorType.SULTRY: frozenset({PoseType.LYING_BACK, PoseType.BENDING_OVER, PoseType.KNEELING}),
+    DemeanorType.ELEGANT: frozenset({PoseType.STANDING_LEANING, PoseType.SITTING, PoseType.SOFA}),
+    DemeanorType.ENERGETIC: frozenset({PoseType.JOGGING, PoseType.SQUATTING, PoseType.HANDS_BEHIND_HEAD}),
+    DemeanorType.COZY: frozenset({PoseType.SOFA, PoseType.LYING_STOMACH, PoseType.SITTING}),
+    DemeanorType.MYSTERIOUS: frozenset({PoseType.STANDING_LEANING, PoseType.LYING_BACK, PoseType.KNEELING}),
+}
+
+# Demeanor -> the batch expression/gaze STRINGS (subset of _BATCH_EXPRESSION_POOL) that
+# read as that demeanor. _assign_batch_expressions filters each register (camera-aware /
+# candid) to these when a demeanor is set, falling back to the full register when the
+# demeanor-consistent subset is too small (<2) — so the candid share, adjacency and usage
+# caps are all preserved. Each demeanor lists >=2 camera-aware AND >=2 candid entries so
+# both registers can be biased. Coverage-tested against _BATCH_EXPRESSION_POOL.
+_DEMEANOR_EXPRESSION_FAVOR: Dict[DemeanorType, frozenset] = {
+    DemeanorType.SHY: frozenset({
+        "soft smile at the camera", "relaxed, faint smile", "amused half-smile",
+        "soft smile looking away", "calm, lids lowered", "quietly lost in thought", "gazing off to the side",
+    }),
+    DemeanorType.CONFIDENT: frozenset({
+        "confident look to the camera", "warm, easy smile", "bright, open smile", "amused half-smile",
+        "glancing over her shoulder", "focused on what she's doing",
+    }),
+    DemeanorType.PLAYFUL: frozenset({
+        "playful grin", "cheerful laugh", "amused half-smile", "bright, open smile",
+        "caught mid-laugh", "glancing over her shoulder",
+    }),
+    DemeanorType.SULTRY: frozenset({
+        "confident look to the camera", "amused half-smile", "relaxed, faint smile", "soft smile at the camera",
+        "glancing over her shoulder", "gazing off to the side", "calm, lids lowered",
+    }),
+    DemeanorType.ELEGANT: frozenset({
+        "soft smile at the camera", "relaxed, faint smile", "warm, easy smile", "confident look to the camera",
+        "soft smile looking away", "gazing off to the side", "quietly lost in thought",
+    }),
+    DemeanorType.ENERGETIC: frozenset({
+        "cheerful laugh", "bright, open smile", "playful grin", "warm, easy smile",
+        "caught mid-laugh", "focused on what she's doing",
+    }),
+    DemeanorType.COZY: frozenset({
+        "warm, easy smile", "relaxed, faint smile", "soft smile at the camera", "amused half-smile",
+        "soft smile looking away", "calm, lids lowered", "quietly lost in thought", "focused on what she's doing",
+    }),
+    DemeanorType.MYSTERIOUS: frozenset({
+        "relaxed, faint smile", "amused half-smile", "confident look to the camera", "soft smile at the camera",
+        "gazing off to the side", "quietly lost in thought", "calm, lids lowered", "glancing over her shoulder",
+    }),
+}
+
+
+def _coerce_demeanor(v) -> Optional[DemeanorType]:
+    """A DemeanorType from an enum or raw value; None when unknown."""
+    if v is None:
+        return None
+    if isinstance(v, DemeanorType):
+        return v
+    try:
+        return DemeanorType(getattr(v, "value", v))
+    except (ValueError, TypeError):
+        return None
+
+
+def _demeanor_pose_favor(controls: BatchControls) -> set:
+    """Union of DEMEANOR_POSE_FAVOR over the batch's demeanor(s); empty when none set."""
+    favored: set = set()
+    for d in (getattr(controls, "demeanor", None) or []):
+        dd = _coerce_demeanor(d)
+        if dd is not None:
+            favored |= DEMEANOR_POSE_FAVOR.get(dd, frozenset())
+    return favored
+
+
+def _demeanor_expression_favor(controls: BatchControls) -> set:
+    """Union of _DEMEANOR_EXPRESSION_FAVOR over the batch's demeanor(s); empty when none."""
+    favored: set = set()
+    for d in (getattr(controls, "demeanor", None) or []):
+        dd = _coerce_demeanor(d)
+        if dd is not None:
+            favored |= _DEMEANOR_EXPRESSION_FAVOR.get(dd, frozenset())
+    return favored
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +317,29 @@ def _allowed_pose_pool(tmpl, controls: BatchControls) -> List[PoseType]:
     return [p for p in tmpl.pose_pool if p not in (controls.blocked_poses or [])]
 
 
+def _prefer_wardrobe(
+    pool: List[OutfitType], controls: BatchControls, *, min_keep: int = 2
+) -> List[OutfitType]:
+    """
+    Soft wardrobe bias (WS-B). When the batch carries controls.wardrobe_outfits, keep only
+    the outfits in that set (PLUS any uniform — the four _UNIFORM_OUTFITS are ALWAYS retained
+    so a work chapter keeps its uniform regardless of taste) — but ONLY when at least
+    ``min_keep`` survive; otherwise return `pool` unchanged. This is the "intersect with
+    fallback, never empties" rule: a strong bias that still preserves variety and never
+    strands a beat with too few (or zero) options. A no-op — pool returned as-is — when the
+    batch has no wardrobe_outfits (so the pre-B2 behavior is byte-identical). Order is
+    preserved (a stable slice of `pool`). This is the SINGLE choke point: _allowed_outfit_pool
+    routes every deterministic pick, beat-pool repair, Venice menu and slot-based variety
+    candidate through it, and the fill / exposure-cap re-pick pools apply it too.
+    """
+    wardrobe = getattr(controls, "wardrobe_outfits", None)
+    if not wardrobe:
+        return pool
+    ws = set(wardrobe)
+    soft = [o for o in pool if o in ws or o in _UNIFORM_OUTFITS]
+    return soft if len(soft) >= min_keep else pool
+
+
 def _allowed_outfit_pool(tmpl, controls: BatchControls) -> List[OutfitType]:
     pool = []
     for o in tmpl.outfit_pool:
@@ -179,7 +350,9 @@ def _allowed_outfit_pool(tmpl, controls: BatchControls) -> List[OutfitType]:
         if controls.allowed_outfits and o not in controls.allowed_outfits:
             continue
         pool.append(o)
-    return pool
+    # Soft wardrobe bias LAST, after the hard allow/block filters (never empties; no-op
+    # when the batch carries no wardrobe_outfits — see _prefer_wardrobe).
+    return _prefer_wardrobe(pool, controls, min_keep=2)
 
 
 def _allowed_location_pool(tmpl, controls: BatchControls) -> List[LocationType]:
@@ -264,14 +437,23 @@ class DeterministicScenePlanner(StoryPlanner):
                         location=location,
                         time_of_day=time_of_day,
                         lighting=rng.choice(tmpl.lighting_pool),
-                        mood_kinks=character.persona.kinks,
-                        mood_personality=character.persona.personality,
+                        # mood_kinks/mood_personality are assigned below to a seeded ~1/3
+                        # eligible subset (never on LOW/public scenes) so the batch stops
+                        # ending every card on the same "sultry, seductive" mood tail.
+                        mood_kinks=None,
+                        mood_personality=None,
                         seed=_derive_seed(controls, gidx),
                         narrative=narrative,
                         story_title=story_title,
                     )
                 )
                 gidx += 1
+        # A2 / mood-monotony: populate per-item expression (variety) and gate the mood tags
+        # to a seeded ~1/3 eligible subset. Both use dedicated offset RNGs so none of the
+        # per-beat draws above shift (existing reproducibility is byte-identical bar these
+        # two fields).
+        _assign_batch_expressions(scenes, controls)
+        _assign_batch_moods(character, scenes, controls)
         return scenes
 
     @staticmethod
@@ -288,13 +470,21 @@ class DeterministicScenePlanner(StoryPlanner):
         pool = _allowed_pose_pool(tmpl, controls)
         if not pool:
             return None
-        return _weighted_pick(pool, rng, like_kw, dislike_kw, {})
+        # Real pose phrase map (likes match pose words now) + demeanor-favored poses (2.0).
+        return _weighted_pick(
+            pool, rng, like_kw, dislike_kw, _POSE_PHRASE_MAP,
+            favored=_demeanor_pose_favor(controls), favored_weight=2.0,
+        )
 
     def _pick_outfit(self, tmpl, rng, like_kw, dislike_kw, controls):
         pool = _allowed_outfit_pool(tmpl, controls)
         if not pool:
             return None  # skip outfit step for this scene
-        return _weighted_pick(pool, rng, like_kw, dislike_kw, {})
+        # Real garment phrase map (likes match garment words now) + favored outfits (3.0).
+        return _weighted_pick(
+            pool, rng, like_kw, dislike_kw, _OUTFIT_PHRASE_MAP,
+            favored=set(controls.favored_outfits or []),
+        )
 
     def _pick_location(self, tmpl, rng, like_kw, dislike_kw, controls):
         pool = _allowed_location_pool(tmpl, controls)
@@ -308,7 +498,10 @@ class DeterministicScenePlanner(StoryPlanner):
                     for loc in LocationType
                     if loc not in (controls.blocked_locations or [])
                 ] or [LocationType.HOME_LIVING_ROOM]
-        return _weighted_pick(pool, rng, like_kw, dislike_kw, sv.LOCATION_PHRASES)
+        return _weighted_pick(
+            pool, rng, like_kw, dislike_kw, sv.LOCATION_PHRASES,
+            favored=set(controls.favored_locations or []),
+        )
 
 
 @dataclass(frozen=True)
@@ -560,7 +753,21 @@ def _vary_beat_description(desc: str, cycle: int) -> str:
     return f"{desc}{suffix}"[:280]
 
 
-def _weighted_pick(pool, rng, like_kw: set, dislike_kw: set, phrase_map: dict):
+def _weighted_pick(
+    pool, rng, like_kw: set, dislike_kw: set, phrase_map: dict,
+    favored: Optional[set] = None, favored_weight: float = 3.0,
+):
+    """
+    Seeded weighted pick from `pool`, soft-excluding dislikes and boosting likes/favorites.
+
+    A candidate's weight is the MAX of its like-match weight (3.0 when its keywords hit a
+    like, else 1.0) and its favored weight (``favored_weight`` when it is in ``favored``,
+    else 1.0) — MAX, not a product, so a like-and-favored candidate is 3.0, not 9.0 (a
+    strong-but-bounded bias). ``favored`` is a set of enum members (WS-B: favored_outfits /
+    favored_locations at 3.0, demeanor-favored poses at 2.0). Both default to the pre-B2
+    behavior when unset (favored None + empty like/dislike -> all weights 1.0), so a
+    no-likes/no-profile pick is byte-identical.
+    """
     candidates = list(pool)
     if not candidates:
         return None
@@ -568,8 +775,136 @@ def _weighted_pick(pool, rng, like_kw: set, dislike_kw: set, phrase_map: dict):
     kept = [c for c in candidates if not (_enum_keywords(c, phrase_map) & dislike_kw)]
     if not kept:
         kept = candidates
-    weights = [3.0 if (_enum_keywords(c, phrase_map) & like_kw) else 1.0 for c in kept]
+    weights = []
+    for c in kept:
+        like_w = 3.0 if (_enum_keywords(c, phrase_map) & like_kw) else 1.0
+        fav_w = favored_weight if (favored and c in favored) else 1.0
+        weights.append(max(like_w, fav_w))
     return rng.choices(kept, weights=weights, k=1)[0]
+
+
+# ---------------------------------------------------------------------------
+# "Conscious model" variety (A2): per-item expression + mood gating
+# ---------------------------------------------------------------------------
+def _assign_batch_expressions(scenes: List[SceneSpec], controls: BatchControls) -> None:
+    """
+    Assign a short expression/gaze state to every scene (mutates in place), seeded from
+    controls.base_seed so the same batch reproduces exactly. Rules mirror the pose usage
+    caps:
+      * ~1/3 CANDID share — every 3rd slot (i % 3 == 2) draws from the camera-UNAWARE
+        subset, the rest from the camera-aware subset (deterministic, not random, so the
+        share is exact);
+      * no identical expression on ADJACENT items;
+      * per-expression usage cap of max(2, ceil(n/8)) (same formula as the pose cap), so no
+        single expression dominates a long batch.
+    Uses a dedicated RNG (offset base_seed) so it does NOT perturb the planner's other
+    seeded draws (existing reproducibility tests stay byte-identical except for this
+    newly-populated field). Best-effort: if the constraints can't all be met for a slot
+    (tiny pool exhausted), the least-used still-non-adjacent option is taken, and failing
+    that any least-used option — an expression is always assigned (never left None).
+    """
+    n = len(scenes)
+    if n == 0:
+        return
+    cap = max(2, math.ceil(n / 8))
+    # WS-B: when the batch carries a demeanor, bias BOTH registers toward the demeanor-
+    # consistent expression strings. Filtering happens per-register below (so the ~1/3
+    # candid share, adjacency and usage caps are all untouched); empty favor (no demeanor)
+    # leaves the pools — and the seeded output — byte-identical to the pre-B2 behavior.
+    favor = _demeanor_expression_favor(controls)
+    counts: Dict[str, int] = {}
+    prev: Optional[str] = None
+    for i in range(n):
+        rng = random.Random((controls.base_seed or 0) + 1900009 * (i + 1))
+        candid = (i % 3) == 2
+        pool = list(_BATCH_EXPRESSIONS_CANDID if candid else _BATCH_EXPRESSIONS_CAMERA_AWARE)
+        # Demeanor bias: keep only demeanor-consistent entries when >=2 survive in this
+        # register (fallback to the full register otherwise — never starves a register).
+        if favor:
+            biased = [e for e in pool if e in favor]
+            if len(biased) >= 2:
+                pool = biased
+        rng.shuffle(pool)
+        # Prefer: under-cap AND not adjacent-duplicate; then under-cap; then any.
+        under_cap = [e for e in pool if counts.get(e, 0) < cap]
+        non_adj = [e for e in under_cap if e != prev]
+        choice = (non_adj or under_cap or pool)[0]
+        # As a last resort if even `pool` somehow left a stale adjacency (both register
+        # subsets exhausted under the cap), try the whole cross-register pool for a
+        # non-adjacent value (keeps the no-adjacent invariant). Seeded via the same rng so it
+        # stays reproducible.
+        if choice == prev:
+            alt = [e for e in _BATCH_EXPRESSION_POOL if e != prev and counts.get(e, 0) < cap]
+            if alt:
+                choice = rng.choice(alt)
+        scenes[i].expression = choice
+        counts[choice] = counts.get(choice, 0) + 1
+        prev = choice
+
+
+def _mood_eligible(nudity, location) -> bool:
+    """
+    May this scene carry a kink/personality MOOD tag (mood_kinks/mood_personality)?
+    The mood phrase renders as "a sultry, seductive expression, intense intimate..."
+    (scene_vocab.scene_mood_phrase) — appropriate only where the scene is already
+    intimate. Eligible iff the level is above LOW AND the location is private enough that
+    its ceiling reaches REVEALING (i.e. NOT a SUGGESTIVE-ceiling public/professional place
+    like a classroom, office, gym or street). This is what stops every card in a batch —
+    including a fully-clothed classroom shot — ending on the same "sultry, seductive" tail.
+    """
+    return (
+        _nudity_index(nudity) > 0
+        and _nudity_index(_location_ceiling(location)) >= _nudity_index(NudityLevel.REVEALING)
+    )
+
+
+def _assign_batch_moods(character: "Character", scenes: List[SceneSpec], controls: BatchControls) -> None:
+    """
+    Set mood_kinks/mood_personality on a seeded ~1/3 subset of ELIGIBLE scenes (mutates in
+    place); clear them everywhere else. Eligibility (_mood_eligible) excludes every LOW and
+    every public/professional (SUGGESTIVE-ceiling) scene, so those never carry the intimate
+    mood tail. Among the eligible scenes, round(n/3) are chosen with a dedicated RNG (offset
+    base_seed, so the planner's other draws are untouched). The chosen scenes get the
+    character's kinks + personality as their per-scene mood; the mood phrase itself is still
+    rendered downstream by scene_vocab.scene_mood_phrase — this only decides WHICH scenes
+    carry it, breaking the "every item is sultry" monotony. validate_and_repair re-applies
+    the eligibility strip on the FINAL (post-ceiling-swap) state as a safety net.
+    """
+    n = len(scenes)
+    # Clear first so a non-selected/ineligible scene never keeps a stale mood.
+    for s in scenes:
+        s.mood_kinks = None
+        s.mood_personality = None
+    if n == 0:
+        return
+    eligible = [i for i in range(n) if _mood_eligible(scenes[i].nudityLevel, scenes[i].location)]
+    if not eligible:
+        return
+    target = min(len(eligible), max(1, round(n / 3)))
+    rng = random.Random((controls.base_seed or 0) + 2300003)
+    chosen = set(rng.sample(eligible, target))
+    kinks = character.persona.kinks or None
+    personality = character.persona.personality
+    for i in chosen:
+        scenes[i].mood_kinks = kinks
+        scenes[i].mood_personality = personality
+
+
+def _strip_ineligible_moods(scenes: List[SceneSpec]) -> None:
+    """
+    Final safety net (called from validate_and_repair after the ceiling/exposure passes
+    settle each scene's FINAL nudity + location): clear mood_kinks/mood_personality on any
+    scene that is no longer mood-eligible (LOW, or a public SUGGESTIVE-ceiling place). A
+    whole-scene ceiling SWAP can move a mood-carrying intimate scene onto a low positional
+    ramp slot; this strip guarantees the "never on LOW/public" invariant holds on the output
+    of EVERY provider (Venice included), not just the deterministic planner. It never ADDS a
+    mood, so the deterministic planner's ~1/3 share is preserved (only over-broad moods are
+    removed).
+    """
+    for s in scenes:
+        if (s.mood_kinks or s.mood_personality) and not _mood_eligible(s.nudityLevel, s.location):
+            s.mood_kinks = None
+            s.mood_personality = None
 
 
 # ---------------------------------------------------------------------------
@@ -1475,7 +1810,12 @@ def _variety_pose_candidates(scene: SceneSpec, slot, controls: BatchControls) ->
 
 
 def _variety_outfit_candidates(scene: SceneSpec, slot, controls: BatchControls) -> List[OutfitType]:
-    base = _allowed_outfit_pool(slot.tmpl, controls) if slot is not None else _outfit_fill_pool(controls)
+    # WITH a slot: _allowed_outfit_pool already applies the wardrobe bias (choke point).
+    # WITHOUT one: the fill pool gets the same soft wardrobe preference here.
+    base = (
+        _allowed_outfit_pool(slot.tmpl, controls) if slot is not None
+        else _prefer_wardrobe(_outfit_fill_pool(controls), controls, min_keep=2)
+    )
     return [o for o in base if o != OutfitType.NAKED and _outfit_ok_at(o, scene.location)]
 
 
@@ -1649,11 +1989,27 @@ def _enforce_usage_caps(
         slot = slots[i] if i < len(slots) else None
 
         # Pose cap (checked first, so the location re-pick below sees the final pose).
+        # The pose cap is GLOBAL: pose_counts is tracked across the WHOLE batch (not
+        # per-arc/day), so a multi-day batch does not multiply the allowance. The reported
+        # "standing_leaning 8x in a 24-item batch" was NOT per-arc counting — it was the
+        # re-pick being confined to this beat's own hand-authored slot pool, which for many
+        # beats offered no under-cap alternative, so the overflow survived as "unresolved".
+        # Fix: when the slot-constrained pool is exhausted, FALL BACK to the full
+        # controls-filtered pose vocab (slot=None candidates, still coherence-guarded by
+        # _pose_ok_at), so the global cap actually bites. Poses are largely location-
+        # agnostic (only cooking/jogging/eating/opening_fridge are guarded), so dropping the
+        # soft beat-pool restriction for an overflow pose is coherent and far better than
+        # busting the cap.
         if s.pose is not None and pose_counts.get(_val(s.pose), 0) >= pose_cap:
             candidates = [
                 p for p in _variety_pose_candidates(s, slot, controls)
                 if _val(p) != _val(s.pose) and pose_counts.get(_val(p), 0) < pose_cap
             ]
+            if not candidates:
+                candidates = [
+                    p for p in _variety_pose_candidates(s, None, controls)
+                    if _val(p) != _val(s.pose) and pose_counts.get(_val(p), 0) < pose_cap
+                ]
             if candidates:
                 rng = random.Random((controls.base_seed or 0) + 900007 * (i + 1))
                 least = min(pose_counts.get(_val(p), 0) for p in candidates)
@@ -1816,7 +2172,8 @@ def _enforce_location_nudity_ceiling(
     # Re-set nudity from the ramp, clamped to the final location's ceiling (clamp only bites when
     # no private location was allowed at all). Refresh a now-exposed scene that has no outfit so
     # the exposure actually renders (the outfit step only runs when an outfit enum is set).
-    fill_pool = _outfit_fill_pool(controls)
+    # The fill prefers the wardrobe subset (never empties — see _prefer_wardrobe).
+    fill_pool = _prefer_wardrobe(_outfit_fill_pool(controls), controls, min_keep=2)
     for i in range(n):
         if i >= len(ramp):
             continue
@@ -1825,6 +2182,226 @@ def _enforce_location_nudity_ceiling(
         if scenes[i].nudityLevel != NudityLevel.LOW and scenes[i].outfit is None and fill_pool:
             rng = random.Random((controls.base_seed or 0) + 1700003 * (i + 1))
             scenes[i].outfit = rng.choice(fill_pool)
+    return scenes
+
+
+# ---------------------------------------------------------------------------
+# Outfit <-> nudity coherence (exposure-cap guard) — A1
+# ---------------------------------------------------------------------------
+def _exposure_repick_pool(
+    controls: BatchControls, need_idx: int, location
+) -> List[OutfitType]:
+    """
+    Outfits eligible for an exposure-cap re-pick at `location`: batch-allowed (allow/block +
+    sfw rules) AND exposure-capable (cap >= need_idx) AND location-coherent
+    (_outfit_ok_at). CRUCIAL DIFFERENCE from _outfit_fill_pool: this pool INCLUDES NAKED
+    (cap HIGH) whenever content is not sfw_only and NAKED isn't blocked/disallowed — a slot
+    that needs full nudity must be able to reach it, and the ordinary fill pool deliberately
+    strips NAKED (a caption names clothing). Stable enum order for deterministic seeding.
+    """
+    out: List[OutfitType] = []
+    for o in OutfitType:
+        if controls.sfw_only and o == OutfitType.NAKED:
+            continue
+        if o in (controls.blocked_outfits or []):
+            continue
+        if controls.allowed_outfits and o not in controls.allowed_outfits:
+            continue
+        if _nudity_index(ov.outfit_exposure_cap(o)) < need_idx:
+            continue
+        if not _outfit_ok_at(o, location):
+            continue
+        out.append(o)
+    # Prefer the wardrobe subset when any cap-compliant wardrobe outfit exists (min_keep=1),
+    # but CAP COMPLIANCE BEATS WARDROBE: `out` is already cap-constrained, so if no wardrobe
+    # outfit is compliant the full compliant pool stands (_prefer_wardrobe falls back).
+    return _prefer_wardrobe(out, controls, min_keep=1)
+
+
+def _enforce_outfit_exposure_cap(
+    scenes: List[SceneSpec], ramp: List[NudityLevel], controls: BatchControls
+) -> List[SceneSpec]:
+    """
+    Keep every photo's nudity LABEL within what its OUTFIT can honestly render
+    (ov.OUTFIT_EXPOSURE_CAP): no photo may be labeled more explicit than its garment can
+    show (so "Mostly nude" never renders a fully-dressed tee + shorts). The sibling of
+    _enforce_location_nudity_ceiling, and it runs immediately AFTER it, mirroring its
+    swap-first design — but the constraint is the garment, not the place.
+
+    ORDER + INTERPLAY (documented): the location pass runs FIRST and is authoritative for
+    each scene's final LOCATION; this pass then treats those locations as fixed and
+    reconciles the OUTFIT to the position's need, where a position's need is
+    `min(ramp[i], ceiling(final_location))` — i.e. the exact level the location pass left.
+    So an exposure re-pick is always constrained by the already-final location ceiling, and
+    the two invariants compose: final label <= cap(outfit) AND <= ceiling(location).
+
+    For each position whose outfit can't reach its need:
+      (a) SWAP OUTFITS with a partner j so BOTH positions end compliant — e.g. a HIGH-capable
+          satin_robe that landed on a low slot trades with the MEDIUM dress stuck on a high
+          slot. Only the outfit (+ its outfit_detail/dominant flag) moves; each position
+          KEEPS its location, so the location pass's ceiling outcome is preserved exactly (a
+          whole-scene swap would drag a public scene onto a high slot and silently undo the
+          ceiling pass). The outfit multiset is preserved, so variety/usage-cap counts hold,
+          and coherence is re-checked with _outfit_ok_at at each new home.
+      (b) else RE-PICK the outfit for this position from _exposure_repick_pool (cap >= need,
+          location-coherent, controls-allowed, NAKED included when allowed). The stale
+          outfit_detail/dominant flag is dropped (it described the old garment), mirroring
+          how a pose re-pick drops pose_detail.
+      (c) last resort — no compliant outfit exists at all (e.g. only MEDIUM-capable outfits
+          allowed but the slot needs HIGH): the final re-assert below LOWERS the label to
+          the outfit's cap. Truthful label beats reaching max. This is the DOCUMENTED
+          monotonicity exception — the ramp may dip only when no allowed garment can
+          honestly render the target.
+
+    Finally every label is re-asserted to `min(positional need, outfit cap)` with locations
+    unchanged, so a swap/re-pick keeps the ramp exactly (cap >= need -> min is need) and only
+    (c) yields a dip. No-op for sfw_only / an all-LOW ramp (LOW <= every cap).
+    """
+    n = len(scenes)
+    if n == 0 or not ramp or controls.sfw_only:
+        return scenes
+
+    def positional_need(i: int) -> int:
+        base = _nudity_index(ramp[i]) if i < len(ramp) else 0
+        return min(base, _nudity_index(_location_ceiling(scenes[i].location)))
+
+    def cap_idx(outfit) -> int:
+        # No outfit -> nothing to cap (the location pass fills an outfit on every non-LOW
+        # scene, so a None here is a zero-need slot); treat as trivially compliant.
+        return 999 if outfit is None else _nudity_index(ov.outfit_exposure_cap(outfit))
+
+    if all(positional_need(i) == 0 for i in range(n)):
+        return scenes  # all-LOW target fits every garment — nothing to do
+
+    def _outfit_bundle(s: SceneSpec) -> Tuple:
+        return (s.outfit, s.outfit_detail, s.outfit_detail_dominant)
+
+    def _set_outfit_bundle(s: SceneSpec, bundle: Tuple) -> None:
+        s.outfit, s.outfit_detail, s.outfit_detail_dominant = bundle
+
+    # (a)/(b): hardest (highest-need) positions first, so they claim the scarce
+    # exposure-capable garments before the easy low slots.
+    for i in sorted(range(n), key=positional_need, reverse=True):
+        if cap_idx(scenes[i].outfit) >= positional_need(i):
+            continue
+        # (a) OUTFIT-only swap — locations stay put (ceiling outcome preserved). Prefer the
+        # lowest-need partners so this over-promised garment drifts to a low slot. Require
+        # both garments compliant at their new positions AND location-coherent there.
+        swapped = False
+        for j in sorted(range(n), key=positional_need):
+            if j == i or scenes[j].outfit is None:
+                continue
+            oi, oj = scenes[i].outfit, scenes[j].outfit
+            if cap_idx(oj) < positional_need(i) or cap_idx(oi) < positional_need(j):
+                continue
+            if not _outfit_ok_at(oj, scenes[i].location) or not _outfit_ok_at(oi, scenes[j].location):
+                continue
+            bundle_i = _outfit_bundle(scenes[i])
+            _set_outfit_bundle(scenes[i], _outfit_bundle(scenes[j]))
+            _set_outfit_bundle(scenes[j], bundle_i)
+            swapped = True
+            break
+        if swapped:
+            continue
+        # (b) re-pick the outfit for this position (cap >= need, location-coherent, allowed).
+        pool = _exposure_repick_pool(controls, positional_need(i), scenes[i].location)
+        if pool:
+            rng = random.Random((controls.base_seed or 0) + 1500007 * (i + 1))
+            new_outfit = rng.choice(pool)
+            if new_outfit != scenes[i].outfit:
+                scenes[i].outfit = new_outfit
+                # The old caption described the previous garment class — stale now.
+                scenes[i].outfit_detail = None
+                scenes[i].outfit_detail_dominant = False
+        # (c) empty pool -> no compliant garment exists: fall through; the re-assert below
+        # lowers this label to the outfit's cap (the documented monotonicity exception).
+
+    # Re-assert every label = min(positional need, outfit cap): ramp preserved wherever a
+    # swap/re-pick made the outfit compliant; a truthful dip only where (c) applied.
+    for i in range(n):
+        need = positional_need(i)
+        if scenes[i].outfit is None:
+            scenes[i].nudityLevel = _NUDITY_LADDER[need]
+        else:
+            scenes[i].nudityLevel = _NUDITY_LADDER[min(need, cap_idx(scenes[i].outfit))]
+    return scenes
+
+
+# ---------------------------------------------------------------------------
+# Adjacency variety (A2 item 5): no identical pose/expression in consecutive items
+# ---------------------------------------------------------------------------
+def _enforce_pose_adjacency(scenes: List[SceneSpec], controls: BatchControls) -> List[SceneSpec]:
+    """
+    Best-effort: no identical pose in two CONSECUTIVE items (a sliding window of 2). Repairs
+    by SWAPPING the pose field between the offending position and a donor — its pose_detail
+    travels WITH the pose (they are a matched pair describing the same body position, so
+    moving them together keeps the detail non-stale). A swap preserves the global pose
+    MULTISET, so the global pose usage cap just enforced stays satisfied, and it touches
+    neither nudity/outfit/location nor the scene order, so the location-ceiling and
+    exposure-cap invariants are left intact. A donor is valid only when it keeps BOTH ends
+    location-coherent (_pose_ok_at) and creates NO new adjacency at either site. If no donor
+    fits, the pair is left as-is — a soft constraint never overrides the hard ones.
+    """
+    n = len(scenes)
+    for i in range(1, n):
+        a, b = scenes[i - 1].pose, scenes[i].pose
+        if a is None or b is None or _val(a) != _val(b):
+            continue
+        for j in range(n):
+            if j == i or scenes[j].pose is None:
+                continue
+            pj = scenes[j].pose
+            if _val(pj) == _val(b):
+                continue  # identical pose — swapping it in wouldn't break the duplicate
+            if not _pose_ok_at(pj, scenes[i].location) or not _pose_ok_at(b, scenes[j].location):
+                continue
+            # pj lands at i: must differ from i's neighbors
+            if _val(pj) == _val(scenes[i - 1].pose):
+                continue
+            if i + 1 < n and scenes[i + 1].pose is not None and _val(pj) == _val(scenes[i + 1].pose):
+                continue
+            # b lands at j: must differ from j's neighbors
+            if j - 1 >= 0 and scenes[j - 1].pose is not None and _val(b) == _val(scenes[j - 1].pose):
+                continue
+            if j + 1 < n and scenes[j + 1].pose is not None and _val(b) == _val(scenes[j + 1].pose):
+                continue
+            scenes[i].pose, scenes[j].pose = pj, b
+            scenes[i].pose_detail, scenes[j].pose_detail = scenes[j].pose_detail, scenes[i].pose_detail
+            break
+    return scenes
+
+
+def _enforce_expression_adjacency(scenes: List[SceneSpec], controls: BatchControls) -> List[SceneSpec]:
+    """
+    Best-effort: no identical expression in two consecutive items. Ceiling/exposure SWAPS can
+    reorder scenes and put two equal expressions side by side (the deterministic planner
+    assigned them adjacency-free on the ORIGINAL order); this restores the invariant on the
+    FINAL order by swapping the expression field between positions. A field swap preserves the
+    expression multiset, so the ~1/3 candid share and per-expression usage cap are kept.
+    Expression has no location coherence, so a donor only needs to avoid creating a new
+    adjacency at either site. Leaves the pair as-is if no donor fits.
+    """
+    n = len(scenes)
+    for i in range(1, n):
+        a, b = scenes[i - 1].expression, scenes[i].expression
+        if not a or not b or a != b:
+            continue
+        for j in range(n):
+            if j == i or not scenes[j].expression:
+                continue
+            ej = scenes[j].expression
+            if ej == b:
+                continue
+            if ej == scenes[i - 1].expression:
+                continue
+            if i + 1 < n and scenes[i + 1].expression and ej == scenes[i + 1].expression:
+                continue
+            if j - 1 >= 0 and scenes[j - 1].expression and b == scenes[j - 1].expression:
+                continue
+            if j + 1 < n and scenes[j + 1].expression and b == scenes[j + 1].expression:
+                continue
+            scenes[i].expression, scenes[j].expression = ej, b
+            break
     return scenes
 
 
@@ -1955,7 +2532,8 @@ def validate_and_repair(
             if derived is not None and _outfit_allowed(derived, controls):
                 s.outfit = derived
             else:
-                fill_pool = _outfit_fill_pool(controls)
+                # Prefer the wardrobe subset for the auto-fill (never empties).
+                fill_pool = _prefer_wardrobe(_outfit_fill_pool(controls), controls, min_keep=2)
                 if fill_pool:
                     fill_rng = random.Random((controls.base_seed or 0) + 700001 * (i + 1))
                     s.outfit = fill_rng.choice(fill_pool)
@@ -2042,14 +2620,30 @@ def validate_and_repair(
         # pose/location, and clear a now-stale pose_detail).
         repaired = _enforce_usage_caps(repaired, slots, controls)
 
-    # Location<->nudity coherence: keep the positional nudity ramp from landing explicit
-    # exposure on a public place. Runs LAST — after variety + usage caps — so it sees the
-    # FINAL locations and gets the final say on the ceiling invariant; its swaps are
-    # permutations, so they can't re-break the variety/cap guarantees just enforced. Gated
-    # on the ramp being authoritative (enforce_nudity_ramp); the manual path keeps the
-    # admin's exact levels/locations untouched. See _enforce_location_nudity_ceiling.
+    # Location<->nudity coherence, THEN outfit<->nudity coherence — a two-stage atomic
+    # guarantee. Both run only when the ramp is authoritative (enforce_nudity_ramp); the
+    # manual path keeps the admin's exact levels/outfits/locations untouched.
+    #   1. LOCATION pass first: keep the positional ramp from landing explicit exposure on a
+    #      public place; authoritative for each scene's FINAL location. Its swaps are
+    #      permutations, so they can't re-break the variety/cap guarantees just enforced.
+    #   2. OUTFIT (exposure-cap) pass second: with locations now fixed, keep each label
+    #      within what its GARMENT can honestly render. Its re-picks are constrained by the
+    #      already-final location ceiling, so the invariants compose:
+    #      final label <= cap(outfit) AND <= ceiling(location).
     if enforce_nudity_ramp and ramp:
         repaired = _enforce_location_nudity_ceiling(repaired, ramp, controls)
+        repaired = _enforce_outfit_exposure_cap(repaired, ramp, controls)
+
+    # Conscious-model variety net (rides the variety gate, so the manual path is untouched):
+    #  * strip mood tags left on now-LOW/public scenes (a ceiling swap can move an intimate
+    #    mood-carrying scene onto a low positional slot) — the "no sultry tail on a clothed
+    #    classroom shot" invariant, enforced on the FINAL nudity+location of every provider;
+    #  * break any consecutive identical pose / expression left by the reordering swaps
+    #    (multiset-preserving field swaps, so caps + candid share survive).
+    if enforce_variety:
+        _strip_ineligible_moods(repaired)
+        repaired = _enforce_pose_adjacency(repaired, controls)
+        repaired = _enforce_expression_adjacency(repaired, controls)
 
     # Re-index global order so downstream ordering is contiguous.
     for i, s in enumerate(repaired):

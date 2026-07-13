@@ -32,6 +32,8 @@ from .enums import (
     PhotoStyleType,
     TimeOfDayType,
     LightingType,
+    WardrobeStyleType,
+    DemeanorType,
 )
 
 
@@ -301,6 +303,39 @@ class GenerateImageRequest(BaseModel):
         description="Optional freeform body-position/pose text. When set, it is used "
                     "verbatim in place of the seeded pose rotation (and the pose pool "
                     "pick is skipped). None = seeded pose variety when enabled."
+    )
+    characterId: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional id of an existing character to theme this generation. When set "
+            "AND wardrobeStyles/demeanor are absent, the server loads the character's "
+            "trait profile and auto-fills them (skin/identity are unaffected — this is "
+            "wardrobe/expression bias only, and only engages the seeded variety path). "
+            "Best-effort: an unknown id or an unconfigured trait store leaves both unset "
+            "(unchanged behavior). Explicit wardrobeStyles/demeanor below are never "
+            "overridden by the profile."
+        ),
+    )
+    wardrobeStyles: Optional[List[WardrobeStyleType]] = Field(
+        default=None,
+        max_length=3,
+        description=(
+            "Optional wardrobe-style bias (a character's trait-profile wardrobe_styles). "
+            "On the seeded no-explicit-outfit variety path ONLY, narrows the default "
+            "clothing pool toward these styles. Usually left unset and derived server-side "
+            "from characterId; an explicit value here is respected and NOT overridden. No "
+            "effect when a specific outfit is given or variety is off."
+        ),
+    )
+    demeanor: Optional[DemeanorType] = Field(
+        default=None,
+        description=(
+            "Optional demeanor bias (a character's trait-profile demeanor). On the "
+            "synthesized-shot variety path ONLY, swaps the seeded expression pool toward "
+            "this demeanor. Usually left unset and derived server-side from characterId; "
+            "an explicit value here is respected and NOT overridden. No effect when an "
+            "explicit shot is given or variety is off."
+        ),
     )
     providerHints: Optional[ProviderHints] = Field(
         default=None,
