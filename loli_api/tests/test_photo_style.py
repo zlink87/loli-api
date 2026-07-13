@@ -118,6 +118,38 @@ def test_polished_studio_distinct_from_natural_via_light_identity():
         assert EDIT_PHOTO_STYLE_SUFFIXES[style] != EDIT_PHOTO_STYLE_SUFFIXES["natural"]
 
 
+# --- PROMPT DE-GLOSS: natural counters the base model's heavy-makeup prior --
+
+def test_natural_edit_suffix_counters_glamour_makeup_prior():
+    # A "natural" batch was still reading as a styled photoshoot because nothing pushed
+    # back on the base model's heavy-makeup prior; the edit suffix now says so explicitly.
+    natural = EDIT_PHOTO_STYLE_SUFFIXES["natural"]
+    assert "light everyday makeup, not a styled photoshoot" in natural
+    # Natural-only: polished/studio/candid_phone (recently rewritten) are untouched.
+    for style in ("polished", "studio", "candid_phone"):
+        assert "everyday makeup" not in EDIT_PHOTO_STYLE_SUFFIXES[style]
+
+
+def test_natural_generation_template_counters_glamour_makeup_prior():
+    natural = PHOTO_STYLE_TEMPLATES["natural"]
+    makeup_line = "Your subjects wear light everyday makeup, never heavy glamour makeup."
+    assert makeup_line in natural
+    # The line belongs to YOUR CONTEXT, so it must land BEFORE the "---" divider that
+    # separates context from the substituted YOUR PHOTO prompt.
+    assert natural.index(makeup_line) < natural.index("---")
+    for style in ("polished", "studio", "candid_phone"):
+        assert "everyday makeup" not in PHOTO_STYLE_TEMPLATES[style]
+
+
+def test_apply_natural_leads_with_makeup_clause():
+    # End-to-end: the new clause actually reaches the assembled edit prompt (not just the
+    # constant), leading the body the same way the rest of the natural clause does.
+    prompt = "Change the person's clothing to: red evening gown"
+    out = apply_edit_photo_style(prompt, PhotoStyleType.NATURAL)
+    assert out.startswith(EDIT_PHOTO_STYLE_SUFFIXES["natural"])
+    assert "light everyday makeup, not a styled photoshoot" in out
+
+
 # --- worker wiring ---------------------------------------------------------
 
 def _worker():

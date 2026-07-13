@@ -42,6 +42,7 @@ from models.enums import (
     PersonalityType,
     DemeanorType,
     WardrobeStyleType,
+    PhotoStyleType,
 )
 from models.batch import BatchControls
 from models.scene import SceneSpec
@@ -378,6 +379,45 @@ def _allowed_location_pool(tmpl, controls: BatchControls) -> List[LocationType]:
     return pool
 
 
+# Photo styles that read as an unstaged/candid photo rather than a styled shoot. Raw
+# string values (not enum members), mirroring scene_mapper.py's _SOFT_PHOTO_STYLES —
+# kept as its own copy per this module's existing convention of self-contained
+# pool-filter constants (e.g. _NUDITY_LADDER/_TIME_LADDER above) rather than a
+# cross-module import of a private name.
+_NATURAL_PHOTO_STYLES = ("natural", "candid_phone")
+
+# Substrings that mark a LIGHTING_PHRASES entry as a staged/theatrical light rather
+# than an unstaged snapshot's — matched against the rendered PHRASE TEXT (not the enum
+# key), so a multi-word phrase like "rim lighting" matches even though its enum value
+# is "backlit_rim". Derived from the actual scene_vocab.LIGHTING_PHRASES pool: excludes
+# moody_dim ("moody dim low-key lighting"), neon ("vivid neon lighting") and backlit_rim
+# ("dramatic backlit rim lighting"); keeps natural_soft, bright_daylight, golden_warm,
+# candlelit, studio_softbox, overcast untouched.
+_DRAMATIC_LIGHTING_KEYWORDS = ("dramatic", "backlit", "rim lighting", "spotlight", "neon", "moody")
+
+
+def _allowed_lighting_pool(tmpl, controls: BatchControls) -> List[LightingType]:
+    """
+    Lighting pool for a beat, filtered for photo_style natural/candid_phone (PROMPT
+    DE-GLOSS: a "natural" batch was still landing dramatic/theatrical light — see
+    _DRAMATIC_LIGHTING_KEYWORDS). polished/studio and every other style return
+    `tmpl.lighting_pool` unchanged (byte-identical pool, no behavior change).
+
+    Safe fallback: if excluding theatrical phrases would empty a beat's pool entirely
+    (e.g. a night-club beat whose ONLY options are neon/moody), the ORIGINAL pool is
+    returned instead — a theatrical light beats no light. Callers filter BEFORE the
+    seeded rng.choice pick (never re-draw), so this never disturbs determinism.
+    """
+    pool = list(tmpl.lighting_pool)
+    if _val(controls.photo_style) not in _NATURAL_PHOTO_STYLES:
+        return pool
+    filtered = [
+        li for li in pool
+        if not any(kw in sv.lighting_phrase(li).lower() for kw in _DRAMATIC_LIGHTING_KEYWORDS)
+    ]
+    return filtered or pool
+
+
 # ---------------------------------------------------------------------------
 # Deterministic planner (always available, seedable, NSFW-safe)
 # ---------------------------------------------------------------------------
@@ -448,7 +488,10 @@ class DeterministicScenePlanner(StoryPlanner):
                         nudityLevel=nudity,
                         location=location,
                         time_of_day=time_of_day,
-                        lighting=rng.choice(tmpl.lighting_pool),
+                        # Filtered for photo_style natural/candid_phone (excludes theatrical
+                        # phrases like "dramatic backlit rim lighting") BEFORE this seeded
+                        # pick, so determinism is preserved — see _allowed_lighting_pool.
+                        lighting=rng.choice(_allowed_lighting_pool(tmpl, controls)),
                         # mood_kinks/mood_personality are assigned below to a seeded ~1/3
                         # eligible subset (never on LOW/public scenes) so the batch stops
                         # ending every card on the same "sultry, seductive" mood tail.
@@ -1159,7 +1202,10 @@ class VeniceScenePlanner(StoryPlanner):
                 fallback = controls.allowed_locations[0] if controls.allowed_locations else LocationType.HOME_LIVING_ROOM
                 location_pool = [_val(fallback)]
             time_pool = [_val(t) for t in slot.tmpl.time_pool]
-            lighting_pool = [_val(li) for li in slot.tmpl.lighting_pool]
+            # Same natural/candid_phone theatrical-lighting exclusion the deterministic
+            # planner applies (see _allowed_lighting_pool) — Venice must not even be
+            # OFFERED a dramatic/moody/neon option on a natural-style batch.
+            lighting_pool = [_val(li) for li in _allowed_lighting_pool(slot.tmpl, controls)]
             beat_lines.append(
                 f'  BEAT {i + 1} (vibe: "{slot.tmpl.beat_description}"):\n'
                 f'    pose: {", ".join(pose_pool) or "(none allowed - output null)"}\n'
@@ -1545,8 +1591,13 @@ def _enforce_beat_pool(s: SceneSpec, slot: _BeatSlot, controls: BatchControls, s
 
     if s.time_of_day not in slot.tmpl.time_pool:
         s.time_of_day = rng.choice(list(slot.tmpl.time_pool))
-    if s.lighting not in slot.tmpl.lighting_pool:
-        s.lighting = rng.choice(list(slot.tmpl.lighting_pool))
+    # Same natural/candid_phone theatrical-lighting exclusion as the initial pick (see
+    # _allowed_lighting_pool) — an off-pool value from Venice/Manual is repaired INTO the
+    # filtered pool, not the raw beat pool, so a natural-style repair can't reintroduce a
+    # dramatic/moody/neon light either.
+    lighting_pool = _allowed_lighting_pool(slot.tmpl, controls)
+    if s.lighting not in lighting_pool:
+        s.lighting = rng.choice(lighting_pool)
 
     return s
 

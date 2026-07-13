@@ -113,6 +113,7 @@ PHOTO_STYLE_TEMPLATES = {
         "light that matches the scene's own light sources, realistic skin with visible "
         "fine texture and pores, and backgrounds rendered sharp and true to the "
         "described setting.\n"
+        "Your subjects wear light everyday makeup, never heavy glamour makeup.\n"
         "---\n"
         "YOUR PHOTO:\n"
         "{$@}"
@@ -294,7 +295,7 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
         "Shoot this as a real, unstaged photo: accurate natural exposure, "
         "true-to-life color, light that matches the scene's own light sources, "
         "and realistic skin with visible fine texture and pores, skin tone even "
-        "and consistent with the face."
+        "and consistent with the face; light everyday makeup, not a styled photoshoot."
     ),
     "polished": (
         "Give this a professional photographic retouch of light only: balanced "

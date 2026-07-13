@@ -1763,6 +1763,112 @@ def test_mood_cap_is_seeded_reproducible():
         [(s.mood_kinks, s.mood_personality) for s in b]
 
 
+# ---------------------------------------------------------------------------
+# PROMPT DE-GLOSS: natural-style lighting filter — a photo_style=natural batch was
+# still landing theatrical/editorial lighting phrases ("dramatic backlit rim
+# lighting", "vivid neon lighting", "moody dim low-key lighting") regardless of
+# style. _allowed_lighting_pool (services/story_planner.py) filters those out for
+# natural/candid_phone at every pick site (plan_scenes_sync, the Venice per-beat
+# menu, and the validate_and_repair beat-pool repair).
+# ---------------------------------------------------------------------------
+from models.enums import PhotoStyleType  # noqa: E402
+from services.story_planner import _allowed_lighting_pool  # noqa: E402
+
+# Independent literal (not imported from the source constant) so this test file
+# doubles as a black-box regression lock on the feature, not a re-assertion of it.
+_DRAMATIC_LIGHTING_WORDS = ("dramatic", "backlit", "rim lighting", "spotlight", "neon", "moody")
+
+
+def _has_dramatic_lighting(scene) -> bool:
+    return any(kw in sv.lighting_phrase(scene.lighting).lower() for kw in _DRAMATIC_LIGHTING_WORDS)
+
+
+def test_allowed_lighting_pool_excludes_dramatic_for_natural_and_candid():
+    tmpl = SimpleNamespace(lighting_pool=(LightingType.GOLDEN_WARM, LightingType.BACKLIT_RIM))
+    for style in (PhotoStyleType.NATURAL, PhotoStyleType.CANDID_PHONE):
+        pool = _allowed_lighting_pool(tmpl, BatchControls(photo_style=style))
+        assert pool == [LightingType.GOLDEN_WARM], f"{style} kept the dramatic option: {pool}"
+    # polished/studio (and every other style) are untouched — byte-identical pool, same order.
+    for style in (PhotoStyleType.POLISHED, PhotoStyleType.STUDIO):
+        pool = _allowed_lighting_pool(tmpl, BatchControls(photo_style=style))
+        assert pool == list(tmpl.lighting_pool)
+
+
+def test_allowed_lighting_pool_fallback_never_empties():
+    # A beat whose ENTIRE authored pool is theatrical (e.g. a night-club beat: neon +
+    # moody_dim) must not be stranded with zero lighting options — the ORIGINAL pool is
+    # kept rather than emptied.
+    tmpl = SimpleNamespace(lighting_pool=(LightingType.NEON, LightingType.MOODY_DIM))
+    pool = _allowed_lighting_pool(tmpl, BatchControls(photo_style=PhotoStyleType.NATURAL))
+    assert pool == list(tmpl.lighting_pool)
+
+
+def test_allowed_lighting_pool_fallback_matches_real_fully_theatrical_beats():
+    # These three hand-authored beats (verified against story_templates.py) really do offer
+    # ONLY theatrical lighting — confirms the safe fallback fires on REAL content, not just
+    # the synthetic pool used above.
+    fully_theatrical = [
+        (_st.NIGHT_OUT_ARC, "Owning the club"),
+        (_st.OFFICE_ARC, "Late at the office, tie loosened"),
+        (_st.FRIENDS_DATE_NIGHT_ARC, "Drinks and laughter with friends"),
+    ]
+    natural = BatchControls(photo_style=PhotoStyleType.NATURAL)
+    for arc, desc in fully_theatrical:
+        beat = next(b for b in arc.beats if b.beat_description == desc)
+        assert _allowed_lighting_pool(beat, natural) == list(beat.lighting_pool), desc
+
+
+def test_natural_batch_24_items_excludes_dramatic_lighting_vocab():
+    # THE reported bug: a photo_style=natural batch still landed theatrical light. Single
+    # day (period_days=1, the default) so every beat comes from an occupation arc — none of
+    # which is fully theatrical (the fully-theatrical beats live in night_out/office/
+    # friends_and_date — see the fallback tests above for that documented exception).
+    char = _character(occupation="nurse")  # (morning_home, on_the_ward, evening_unwind)
+    controls = BatchControls(base_seed=7, photo_style=PhotoStyleType.NATURAL)
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 24, controls)
+    assert len(scenes) == 24
+    bad = [(s.global_index, s.lighting) for s in scenes if _has_dramatic_lighting(s)]
+    assert not bad, bad
+    # candid_phone gets the identical exclusion (same char/seed).
+    controls_candid = BatchControls(base_seed=7, photo_style=PhotoStyleType.CANDID_PHONE)
+    scenes_candid = DeterministicScenePlanner().plan_scenes_sync(char, 24, controls_candid)
+    assert not [s for s in scenes_candid if _has_dramatic_lighting(s)]
+
+
+def test_polished_batch_lighting_is_unfiltered():
+    # Same character/seed as the natural-exclusion test above (isolates STYLE as the only
+    # variable) — polished may still land a dramatic phrase; the filter must not leak.
+    char = _character(occupation="nurse")
+    controls = BatchControls(base_seed=7, photo_style=PhotoStyleType.POLISHED)
+    scenes = DeterministicScenePlanner().plan_scenes_sync(char, 24, controls)
+    assert any(_has_dramatic_lighting(s) for s in scenes), \
+        "expected at least one dramatic lighting phrase on an unfiltered polished batch"
+
+
+def test_natural_lighting_pick_is_seeded_reproducible():
+    char = _character(occupation="nurse")
+    controls = BatchControls(base_seed=7, photo_style=PhotoStyleType.NATURAL)
+    a = DeterministicScenePlanner().plan_scenes_sync(char, 24, controls)
+    b = DeterministicScenePlanner().plan_scenes_sync(char, 24, controls)
+    assert [s.lighting for s in a] == [s.lighting for s in b]
+    assert [s.model_dump() for s in a] == [s.model_dump() for s in b]
+
+
+def test_validate_and_repair_lighting_excludes_dramatic_for_natural_style():
+    # STUDIO_ARC beat 0 ("model" occupation) authors (studio_softbox, backlit_rim). Feed an
+    # off-pool value at that slot on a natural-style batch: the repair must land on
+    # studio_softbox, never the dramatic backlit_rim, even though backlit_rim IS one of the
+    # beat's own hand-authored options.
+    char = _character(occupation="model")  # (in_the_studio, out_and_about, evening_unwind)
+    controls = BatchControls(base_seed=1, photo_style=PhotoStyleType.NATURAL)
+    bad = SceneSpec(
+        arc_id="x", arc_title="X", beat_index=0, global_index=0, beat_description="b",
+        location=LocationType.PHOTO_STUDIO, lighting=LightingType.CANDLELIT,  # off-pool
+    )
+    out = validate_and_repair([bad], char, 1, controls)
+    assert out[0].lighting == LightingType.STUDIO_SOFTBOX
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

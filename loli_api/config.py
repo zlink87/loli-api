@@ -253,7 +253,9 @@ class Settings(BaseSettings):
     # already love) and NOT nude_bases (an edit SOURCE; grain there would
     # compound through re-diffusion). Master switch -- OUTPUT_FILM_GRAIN_STRENGTH
     # below still gates the pass even when this is True (0 disables it).
-    OUTPUT_FILM_GRAIN: bool = True
+    # Default OFF (2026-07-14): live A/B read as visible noise, not film feel;
+    # re-enable only at a lower strength (<=0.015) if ever revisited.
+    OUTPUT_FILM_GRAIN: bool = False
     # Grain amplitude as a fraction of the 0-255 luma range (e.g. 0.03 -> ~3%
     # of full-scale noise in shadows/mids, tapering in bright highlights).
     # 0 disables the finishing pass even when OUTPUT_FILM_GRAIN is True.
