@@ -26,6 +26,7 @@ from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
 from services.notification_service import NotificationService
 from services.image_cache_service import ImageCacheService
+from services.character_image_store import action_keywords
 from models.enums import JobStatus
 from models.requests import (
     VIDEO_DEFAULT_WIDTH,
@@ -330,13 +331,31 @@ class VideoBackgroundWorker(BaseEditWorker):
                 "video_hash": video_hash,
             },
         )
+        label = request.motionLabel or motion_label(request.motion)
+
+        # Best-effort keyword enrichment off the source still's scene. Must NEVER
+        # raise: this runs after create_image already succeeded, and an exception
+        # here would bubble up to _process_job's persistence try/except and mark an
+        # otherwise-fine reel FAILED (REEL_PERSIST_ERROR) over a missing keyword.
+        source_scene = None
+        try:
+            source_image = await self.character_image_store.get_image(request.source_image_id)
+            if source_image:
+                source_scene = (source_image.get("metadata") or {}).get("scene_spec")
+        except Exception as e:  # noqa: BLE001 - keywords are best-effort, never a gate
+            logger.warning(
+                f"[VIDEO] {job.job_id} | source scene lookup for keywords failed: {e}"
+            )
+            source_scene = None
+
         await self.character_image_store.create_action(
             request.character_id,
             character_image_id=image_id,
             media_url=video_url,
-            label=request.motionLabel or motion_label(request.motion),
+            label=label,
             media_type="video",
             is_active=False,  # DRAFT — admin publishes after review
+            trigger_keywords=action_keywords(source_scene, extra_texts=[label, request.motion.value]),
         )
         logger.info(
             f"[VIDEO] {job.job_id} | Persisted reel -> character_images {image_id} "

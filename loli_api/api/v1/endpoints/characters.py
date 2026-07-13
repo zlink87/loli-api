@@ -26,6 +26,7 @@ from models.character import (
     BulkCharacterError,
 )
 from models.persona import PersonaEnrichment, PersonaField
+from services.character_image_store import action_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -375,6 +376,7 @@ async def save_character_image(
             character_image_id=image_id,
             media_url=body.imageUrl,
             label=body.label,
+            trigger_keywords=action_keywords(None, extra_texts=[body.label, body.outfit]),
         )
     if body.setAsAvatar:
         await images.set_avatar(character_id, image_id)

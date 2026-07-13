@@ -27,7 +27,7 @@ from services.scene_mapper import scene_to_pipeline_request, resolve_seed
 from services.trait_profile_merge import apply_trait_profile
 from services.batch_store import BatchStore, TERMINAL_ITEM_STATUSES
 from services.character_store import CharacterStore
-from services.character_image_store import CharacterImageStore, action_label
+from services.character_image_store import CharacterImageStore, action_label, action_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -594,6 +594,7 @@ class BatchReconciler:
             # The story beat reads out in chat when the user taps the quick action.
             suggested_prompt=narrative or beat_description,
             sort_order=item.scene_index,
+            trigger_keywords=action_keywords(item.scene_spec, extra_texts=[beat_description]),
         )
         logger.info(
             f"[BATCH {batch.id}] published item {item.scene_index} -> "

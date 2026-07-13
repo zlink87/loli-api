@@ -122,6 +122,11 @@ def test_success_publishes_image_and_action_then_marks_item():
     assert act_kw["character_image_id"] == "img-1"
     assert act_kw["label"] == "Sipping coffee by the window"
     assert act_kw["sort_order"] == 3
+    # trigger_keywords derived from the scene_spec (HOME_KITCHEN/SILK_PAJAMAS) +
+    # the beat_description passed as extra_texts.
+    assert "kitchen" in act_kw["trigger_keywords"]
+    assert "silk" in act_kw["trigger_keywords"]
+    assert "coffee" in act_kw["trigger_keywords"]
 
     # item marked succeeded exactly once, AFTER publishing, with the image id
     assert len(store.item_updates) == 1

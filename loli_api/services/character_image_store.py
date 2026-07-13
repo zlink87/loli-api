@@ -11,7 +11,8 @@ character fully chat-ready (once the admin publishes it).
 """
 import asyncio
 import logging
-from typing import List, Optional
+import re
+from typing import Iterable, List, Optional
 
 from supabase import Client
 
@@ -41,6 +42,66 @@ def action_label(
     if len(text) > _MAX_LABEL_LEN:
         text = text[: _MAX_LABEL_LEN - 1].rstrip() + "…"
     return text
+
+
+# chat_persona_actions.trigger_keywords: tokens a chat runtime matches against
+# conversation context to pick a relevant photo. Small, deliberately conservative
+# stopword list — the <3-char length filter already catches most junk articles/
+# prepositions, so this only needs the ones long enough to survive that.
+_KEYWORD_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "with",
+    "her", "his", "by", "for", "from",
+    "she", "he", "it", "its", "is", "are", "was", "were", "be", "been",
+    "being", "this", "that", "these", "those", "as", "but",
+}
+_MAX_KEYWORDS = 16
+_MIN_KEYWORD_LEN = 3
+_KEYWORD_SPLIT_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+# Raw scene_spec jsonb keys read for keywords, in order. Deliberately excludes
+# nudityLevel and narrative — neither is a useful chat-matching signal.
+_SCENE_KEYWORD_FIELDS = ("location", "outfit", "outfit_detail", "time_of_day", "activity", "setting")
+
+
+def action_keywords(
+    scene_spec: Optional[dict] = None,
+    *,
+    extra_texts: Iterable[Optional[str]] = (),
+) -> List[str]:
+    """
+    Chat-matching keywords for a quick action: tokenized from the photo's RAW
+    scene_spec jsonb dict (location/outfit/outfit_detail/time_of_day/activity/
+    setting), plus any extra_texts (e.g. a beat description, motion, or label).
+
+    Never parses scene_spec with SceneSpec — a malformed/legacy dict, or None,
+    just yields fewer tokens instead of raising. Tokens are lowercased, split on
+    underscores/punctuation, deduped (first-seen order), and capped at
+    _MAX_KEYWORDS.
+    """
+    texts: List[str] = []
+    if isinstance(scene_spec, dict):
+        for key in _SCENE_KEYWORD_FIELDS:
+            value = scene_spec.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+    for text in extra_texts:
+        if text:
+            texts.append(text)
+
+    keywords: List[str] = []
+    seen = set()
+    for text in texts:
+        for token in _KEYWORD_SPLIT_RE.split(text):
+            token = token.lower()
+            if len(token) < _MIN_KEYWORD_LEN or token in _KEYWORD_STOPWORDS:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            keywords.append(token)
+            if len(keywords) >= _MAX_KEYWORDS:
+                return keywords
+    return keywords
 
 
 class CharacterImageStore:
@@ -100,11 +161,13 @@ class CharacterImageStore:
         sort_order: int = 0,
         media_type: str = "image",
         is_active: bool = True,
+        trigger_keywords: Optional[List[str]] = None,
     ) -> str:
         """Insert one quick action pointing at a gallery image; returns its id.
 
         For video reels pass ``media_type="video"`` and ``is_active=False`` so the
         clip lands as a draft the admin publishes later (flip via set_action_active).
+        ``trigger_keywords`` (see ``action_keywords``) defaults to an empty list.
         """
         record = {
             "character_id": character_id,
@@ -116,6 +179,7 @@ class CharacterImageStore:
             "trigger_type": "manual",
             "sort_order": sort_order,
             "is_active": is_active,
+            "trigger_keywords": trigger_keywords or [],
         }
 
         def _insert():

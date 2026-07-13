@@ -278,6 +278,7 @@ def test_image_store_payloads():
         label="Morning coffee",
         suggested_prompt="Morning coffee in bed",
         sort_order=3,
+        trigger_keywords=["home", "bedroom"],
     ))
     assert action_id == "act-1"
     act_payload = client.calls_for("chat_persona_actions")[0]["payload"]
@@ -286,6 +287,17 @@ def test_image_store_payloads():
     assert act_payload["trigger_type"] == "manual"
     assert act_payload["sort_order"] == 3
     assert act_payload["is_active"] is True
+    assert act_payload["trigger_keywords"] == ["home", "bedroom"]
+
+    # Omitted trigger_keywords persists as an empty list, not None.
+    asyncio.run(store.create_action(
+        "c1",
+        character_image_id=image_id,
+        media_url="https://x/batch_edits/j1.png",
+        label="No keywords",
+    ))
+    no_kw_payload = client.calls_for("chat_persona_actions")[1]["payload"]
+    assert no_kw_payload["trigger_keywords"] == []
 
 
 def test_action_label_fallbacks_and_truncation():
