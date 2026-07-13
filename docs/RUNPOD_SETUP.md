@@ -174,6 +174,36 @@ SOURCE_IMAGE_ALLOWED_HOSTS=<project-ref>.supabase.co
 
 ---
 
+## 5a. Dedicated video (reels) endpoint (optional)
+
+Image-to-video (reel) jobs run WAN 2.2 14B two-stage (20+20 steps, 81 frames), which
+takes far longer per job than a character-gen or edit call. The main endpoint built in
+§4 above runs on an all-**A40** fleet — WAN 2.2 cannot finish a reel there inside
+`RUNPOD_VIDEO_EXECUTION_TIMEOUT_MS` (30 min default), so every reel dies with
+`executionTimeout exceeded`. Reels need an fp8-capable fast GPU instead, so give them
+their own endpoint rather than raising the timeout further.
+
+Create a **second** Serverless endpoint (RunPod console → Serverless → New Endpoint):
+- **Network volume:** attach the SAME volume as the main endpoint (`loli-comfy-models`,
+  `EU-SE-1`) — this pins the new endpoint to the same datacenter so it can mount the
+  volume, and reuses the already-populated models with no extra download.
+- **Worker image:** the same image/template as the main endpoint (§2) — no separate
+  build needed.
+- **GPU:** priority order **L40S → RTX 6000 Ada → H100** (fp8-capable; A40 is not
+  sufficient for this workload).
+- **Active workers:** `0` (scale to zero when idle — reels are bursty/admin-triggered,
+  not constant traffic like character-gen, so a cold start is an acceptable tradeoff).
+- Add the same S3 env vars from §3.
+
+Copy the new endpoint's ID and set it in loli-api's `.env`:
+```
+RUNPOD_VIDEO_ENDPOINT_ID=<the new endpoint id>
+```
+Leaving it unset (default) keeps today's behavior: reels share `RUNPOD_ENDPOINT_ID`
+with every other job type.
+
+---
+
 ## 6. Quality / identity follow-ups (need ComfyUI to validate)
 
 These improve identity preservation and reduce deformities but change the ComfyUI workflow

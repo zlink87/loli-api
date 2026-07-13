@@ -90,10 +90,21 @@ class JobManager:
         self._creation_max_queue_size = _creation_max
         # Optional RunPod client, attached at startup, used to cancel in-flight jobs.
         self._runpod_client = None
+        # Optional dedicated RunPod client for VIDEO jobs (RUNPOD_VIDEO_ENDPOINT_ID).
+        # None -> cancel_job falls back to _runpod_client, same as before this existed.
+        self._video_runpod_client = None
 
     def attach_runpod_client(self, runpod_client) -> None:
         """Attach the RunPod client so cancel_job can stop in-flight RunPod jobs."""
         self._runpod_client = runpod_client
+
+    def attach_video_runpod_client(self, runpod_client) -> None:
+        """
+        Attach the dedicated video-endpoint RunPod client, so cancel_job can stop
+        in-flight VIDEO jobs on the endpoint they were actually submitted to
+        (RUNPOD_VIDEO_ENDPOINT_ID) instead of the main one.
+        """
+        self._video_runpod_client = runpod_client
 
     async def set_runpod_id(self, job_id: str, runpod_id: str) -> None:
         """Associate a RunPod job id with a local job."""
@@ -502,10 +513,18 @@ class JobManager:
         if job.status in (JobStatus.SUCCEEDED, JobStatus.FAILED):
             return False  # terminal jobs cannot be cancelled
 
-        # If it's already running on RunPod, ask RunPod to stop it.
-        if job.runpod_id and self._runpod_client is not None:
+        # If it's already running on RunPod, ask RunPod to stop it. VIDEO jobs may
+        # have been submitted to the dedicated video endpoint (RUNPOD_VIDEO_ENDPOINT_ID)
+        # instead of the main one, so pick the client that matches where it landed;
+        # fall back to the main client when no dedicated video client is attached.
+        is_video_job = isinstance(job.request, VideoGenerateRequest)
+        runpod_client = (
+            self._video_runpod_client if is_video_job and self._video_runpod_client is not None
+            else self._runpod_client
+        )
+        if job.runpod_id and runpod_client is not None:
             try:
-                await self._runpod_client.cancel(job.runpod_id)
+                await runpod_client.cancel(job.runpod_id)
             except Exception:  # noqa: BLE001 - cancellation is best-effort
                 pass
 
