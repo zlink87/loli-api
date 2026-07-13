@@ -18,6 +18,7 @@ from supabase import Client
 
 from models.requests import PersonaOptions
 from models.character import CharacterCreate, CharacterUpdate, CharacterRead
+from models.enums import CultureType
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,21 @@ _TABLE = "characters"
 # Status a batch-created character starts in; the admin flips it to the
 # chat-visible status from the admin UI after reviewing the generated photos.
 DRAFT_STATUS = "draft"
+
+
+def _valid_culture(value) -> Optional[str]:
+    """
+    Return the stored culture string only if it's a currently-valid CultureType
+    value, else None. Read-tolerant so a garbage or future/unknown stored value
+    degrades to None (no culture) instead of blowing up PersonaOptions on GET —
+    the append-only-enum degrade-safe contract (models/enums.py CultureType).
+    """
+    if value is None:
+        return None
+    try:
+        return CultureType(value).value
+    except (ValueError, TypeError):
+        return None
 
 
 def _persona_to_columns(persona: PersonaOptions) -> dict:
@@ -45,6 +61,7 @@ def _persona_to_columns(persona: PersonaOptions) -> dict:
         "occupation": dump.get("occupation"),
         "kinks": dump.get("kinks") or [],
         "voice": dump.get("voice"),
+        "culture": dump.get("culture"),
     }
 
 
@@ -65,6 +82,7 @@ def _row_to_persona(row: dict) -> PersonaOptions:
         occupation=row.get("occupation"),
         kinks=row.get("kinks") or None,
         voice=row.get("voice"),
+        culture=_valid_culture(row.get("culture")),
     )
 
 

@@ -530,3 +530,34 @@ class PaletteType(str, Enum):
     EARTHY_GREEN = "earthy_green"
     CRISP_WHITE = "crisp_white"
     JEWEL_TONES = "jewel_tones"
+
+
+class CultureType(str, Enum):
+    """
+    Character culture / subculture — an optional persona dimension.
+
+    APPEND-ONLY, DEGRADE-SAFE contract (mirrors EthnicityType): members and their
+    string values are never renamed or removed, only appended, so stored text
+    columns keep parsing and every consumer degrades safely on a value it doesn't
+    recognize (unknown/None -> no culture).
+
+    Optional persona field — None means no culture and every consumer renders
+    byte-identically to a culture-less character. All per-culture content lives in
+    services/culture_vocab.py (coverage-tested).
+    """
+    GOTH = "goth"
+    PUNK = "punk"
+    E_GIRL = "e_girl"
+    GRUNGE = "grunge"
+    Y2K = "y2k"
+    COTTAGECORE = "cottagecore"
+    DARK_ACADEMIA = "dark_academia"
+    OLD_MONEY = "old_money"
+    STREETWEAR_BADDIE = "streetwear_baddie"
+    KAWAII_HARAJUKU = "kawaii_harajuku"
+    GYARU = "gyaru"
+    BOHO_HIPPIE = "boho_hippie"
+    PINUP_ROCKABILLY = "pinup_rockabilly"
+    ROCKER_BIKER = "rocker_biker"
+    RAVE_FESTIVAL = "rave_festival"
+    SPORTY_GYM = "sporty_gym"

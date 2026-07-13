@@ -23,6 +23,7 @@ from services import attribute_phrases as ap
 from services import camera_vocab as cv
 from services import prompt_constants as pc
 from services import outfit_vocab as ov
+from services import culture_vocab as cvoc
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,8 @@ def assemble_generation_prompt(
     Deterministically assemble a character-generation prompt.
 
     Assembly order: scaffold, shot block (framing+angle+expression), locked
-    identity, clothing clause, body-position phrase, scene/free text, persona
-    flavor, quality suffix.
+    identity, culture styling clause, clothing clause, body-position phrase,
+    scene/free text, persona flavor, quality suffix.
 
     Variety (WS3) is controlled entirely by ``variety_seed``:
       * None -> the legacy behavior exactly: the plain hero-default shot
@@ -111,6 +112,15 @@ def assemble_generation_prompt(
     path). Both default None and are then byte-identical to the pre-WS-B behavior —
     they never change the rng draw order/count, so seeded tests are unaffected.
 
+    ``persona.culture`` (optional subculture) rides ON the persona. It does two
+    fill-only things, both draw-count-invariant: (1) when the caller left
+    ``wardrobe_styles``/``demeanor`` unset it derives them from the culture (an
+    explicit value always wins), so the seeded pools shift CONTENTS only, never the
+    rng order/count; and (2) its makeup/styling render phrase is inserted right after
+    the locked identity block and before the clothing clause. It never enters
+    ``locked``/``identity_block`` — the locked return value and verify contract stay
+    byte-identical. A None/unknown culture is a full no-op (byte-identical output).
+
     The scene clause (the admin's raw text, used verbatim) sits after the
     clothing/body-position clauses and BEFORE persona flavor deliberately: the
     generation model is a fast turbo model that weights earlier tokens heavily,
@@ -129,6 +139,22 @@ def assemble_generation_prompt(
     """
     rng = random.Random(variety_seed) if variety_seed is not None else None
     pose_override = bool(pose_text and pose_text.strip())
+
+    # Culture (an optional persona dimension) FILLS wardrobe_styles / demeanor only
+    # when the caller left them unset — an explicit value always wins. This runs
+    # BEFORE the shot synthesis below so the derived demeanor steers the seeded
+    # expression pool. Draw-count-invariant: varied_shot_fields / _wardrobe_filter_pool
+    # only shift POOL CONTENTS (never the rng draw order/count), so a None/unknown
+    # culture leaves both derivations empty and the output byte-identical.
+    culture = getattr(persona, "culture", None)
+    if not wardrobe_styles:
+        derived_ws = list(cvoc.culture_wardrobe_styles(culture))
+        if derived_ws:
+            wardrobe_styles = derived_ws
+    if demeanor is None:
+        derived_demeanor = cvoc.culture_demeanor(culture)
+        if derived_demeanor:
+            demeanor = derived_demeanor[0]
 
     # Shot: an explicit client shot always wins. With variety on and no pose_text
     # override, synthesize a seeded varied shot; otherwise the plain hero default.
@@ -160,7 +186,14 @@ def assemble_generation_prompt(
     else:
         pose_segment = ""
 
+    # Culture styling (makeup/jewelry render phrase) sits right after the locked
+    # identity block and before the clothing clause — NEVER inside locked_tokens()/
+    # identity_block(), so the `locked` return value + verify contract stay identical.
+    culture_styling = cvoc.culture_render_phrase(culture)
+
     parts = [scaffold, shot_block, locked]
+    if culture_styling:
+        parts.append(culture_styling)
     if clothing:
         parts.append(clothing)
     if pose_segment:

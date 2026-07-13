@@ -43,6 +43,7 @@ from models.enums import (
     ZodiacType,
     InteriorStyleType,
     PaletteType,
+    CultureType,
 )
 from models.requests import VIDEO_ALLOWED_LENGTHS, VIDEO_ALLOWED_RESOLUTIONS
 from services.output_presets import ASPECT_RATIO_DIMS, ALLOWED_RESOLUTIONS
@@ -101,6 +102,7 @@ async def get_options(user: Dict[str, Any] = Depends(require_admin)):
         "persona": {
             "style": _opts(StyleType),
             "ethnicity": _ethnicity_opts(),
+            "culture": _opts(CultureType),
             "hair_style": _opts(HairStyleType),
             "hair_color": _opts(HairColorType),
             "eye_color": _opts(EyeColorType),

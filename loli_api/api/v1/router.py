@@ -166,6 +166,11 @@ def configure_services(
     # Supabase-backed trait store exists; degrades gracefully when absent.
     if trait_profile_store is not None:
         generate.set_trait_profile_store(trait_profile_store)
+    # Culture-aware generation (Stage 3): the same endpoints adopt a character's stored
+    # persona.culture (then fall back to it for wardrobeStyles/demeanor). Wired only when
+    # the Supabase-backed character store exists; degrades gracefully when absent.
+    if character_store is not None:
+        generate.set_character_store(character_store)
     # POST /v1/characters can optionally generate the trait profile in the same call
     # (CharacterCreate.generate_traits) — reuses these same already-built instances.
     if trait_profile_writer is not None:

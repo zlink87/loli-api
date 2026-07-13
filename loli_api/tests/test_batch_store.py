@@ -10,10 +10,11 @@ Runs under pytest or directly: python loli_api/tests/test_batch_store.py
 """
 import asyncio
 
-from services.character_store import CharacterStore
+from services.character_store import CharacterStore, _persona_to_columns, _row_to_persona
 from services.character_image_store import CharacterImageStore, action_label
 from services.batch_store import BatchStore
 from models.batch import BatchControls
+from models.requests import PersonaOptions
 
 
 class _FakeResp:
@@ -160,6 +161,40 @@ def test_character_row_round_trips_to_persona():
     assert char.hero_image_url == "https://x.supabase.co/img.png"
     assert char.bio == "A night-shift nurse."
     assert char.status == "draft"
+
+
+# --- culture persona column (optional, degrade-safe) ---
+def _persona(**overrides):
+    fields = dict(
+        ethnicity="caucasian", age=28, hairStyle="straight", hairColor="blonde",
+        eyeColor="green", bodyType="curvy", breastSize="medium", name="Estella",
+    )
+    fields.update(overrides)
+    return PersonaOptions(**fields)
+
+
+def test_persona_to_columns_emits_culture():
+    # set -> the enum value; absent -> None (byte-identical to a culture-less persona)
+    assert _persona_to_columns(_persona(culture="goth"))["culture"] == "goth"
+    assert _persona_to_columns(_persona())["culture"] is None
+
+
+def test_character_row_round_trips_culture():
+    row = dict(_CHARACTER_ROW, culture="e_girl")
+    persona = _row_to_persona(row)
+    assert persona.culture is not None and persona.culture.value == "e_girl"
+
+
+def test_character_row_missing_culture_key_reads_none():
+    # An old row (pre-migration payload) simply has no culture key -> None, never raises.
+    assert "culture" not in _CHARACTER_ROW
+    assert _row_to_persona(_CHARACTER_ROW).culture is None
+
+
+def test_character_row_garbage_culture_degrades_to_none():
+    # A garbage/future stored value must not brick GET /v1/characters.
+    for bad in ("not_a_culture", "GOTH!!", 123, ""):
+        assert _row_to_persona(dict(_CHARACTER_ROW, culture=bad)).culture is None
 
 
 def test_character_delete_is_fk_safe_ordered():

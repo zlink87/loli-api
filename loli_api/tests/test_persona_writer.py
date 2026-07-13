@@ -127,6 +127,22 @@ def test_enabled_flag():
     assert _writer("k").enabled is True
 
 
+# --- culture / subculture (Stage 2) ---
+def test_facts_include_culture_when_set_and_unspecified_when_not():
+    w = _writer()
+    p_c = PersonaOptions(
+        ethnicity="latina", age=24, hairStyle="straight", hairColor="black",
+        eyeColor="brown", bodyType="curvy", breastSize="medium", name="Nora",
+        occupation="stripper", personality="nympho", relationship="sugar_baby",
+        kinks=["oral_play", "punishment"], culture="goth",
+    )
+    with_c = w._build_user_prompt(p_c, ["bio"], {}, "Nora")
+    assert "culture/subculture:" in with_c
+    assert "Goth" in with_c  # culture_hint label leads the fact line
+    without_c = w._build_user_prompt(_persona(), ["bio"], {}, "Nora")
+    assert "culture/subculture: unspecified" in without_c
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

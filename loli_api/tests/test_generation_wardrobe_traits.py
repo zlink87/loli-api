@@ -15,10 +15,12 @@ Three slices:
 Runs under pytest or directly: python loli_api/tests/test_generation_wardrobe_traits.py
 """
 import asyncio
+from types import SimpleNamespace
 
-from models.enums import NudityLevel, WardrobeStyleType, DemeanorType
+from models.enums import NudityLevel, OutfitType, WardrobeStyleType, DemeanorType, CultureType
 from models.requests import GenerateImageRequest, PersonaOptions
 from services import camera_vocab as cv
+from services import culture_vocab as cvoc
 from services import outfit_vocab as ov
 from services import prompt_generator as pg
 
@@ -27,6 +29,13 @@ def _persona():
     return PersonaOptions(
         name="Nova", ethnicity="asian", age=26, hairStyle="ponytail", hairColor="black",
         eyeColor="brown", bodyType="average", breastSize="medium",
+    )
+
+
+def _persona_goth():
+    return PersonaOptions(
+        name="Nova", ethnicity="asian", age=26, hairStyle="ponytail", hairColor="black",
+        eyeColor="brown", bodyType="average", breastSize="medium", culture="goth",
     )
 
 
@@ -243,6 +252,164 @@ def test_populate_wardrobe_traits_graceful_degrade():
     req4 = GenerateImageRequest(persona=persona, characterId="c1")
     asyncio.run(populate_wardrobe_traits(_Boom(), req4))
     assert req4.wardrobeStyles is None and req4.demeanor is None
+
+
+# ---------------------------------------------------------------------------
+# Culture (Stage 2) — styling render phrase injection + fill-only trait derivation
+# ---------------------------------------------------------------------------
+def test_culture_render_phrase_after_locked_before_clothing_and_not_in_locked():
+    persona = _persona_goth()
+    phrase = cvoc.culture_render_phrase("goth")
+    assert phrase  # sanity: goth has a render phrase
+
+    positive, _negative, locked = pg.assemble_generation_prompt(
+        persona, outfit=OutfitType.LITTLE_BLACK_DRESS, nudity_level=NudityLevel.LOW,
+    )
+    clothing = ov.generation_outfit_clause(OutfitType.LITTLE_BLACK_DRESS, NudityLevel.LOW)
+
+    # Styling phrase is in the positive prompt but NEVER in the locked identity block.
+    assert phrase in positive
+    assert phrase not in locked
+    # Positioned AFTER the locked identity block and BEFORE the clothing clause.
+    assert positive.index(locked) < positive.index(phrase) < positive.index(clothing)
+
+
+def test_culture_none_and_absent_are_byte_identical_seeded():
+    # A persona with no culture (field absent -> default None) vs an explicit
+    # culture=None must be byte-identical across positive/negative/locked, at the
+    # kill-switch path (seed None) AND on seeded variety paths.
+    absent = _persona()
+    explicit_none = PersonaOptions(**{**absent.model_dump(), "culture": None})
+    for seed in (None, 1, 7, 42, 100):
+        a = pg.assemble_generation_prompt(absent, nudity_level=NudityLevel.MEDIUM, variety_seed=seed)
+        b = pg.assemble_generation_prompt(explicit_none, nudity_level=NudityLevel.MEDIUM, variety_seed=seed)
+        assert a == b, seed
+
+
+def test_culture_derived_demeanor_biases_expression_pool():
+    # goth -> demeanor MYSTERIOUS: the seeded expression only ever comes from the
+    # mysterious pool (fill-only demeanor derivation reached varied_shot_fields).
+    persona = _persona_goth()
+    myst = {cv.EXPRESSION_PHRASES[v] for v in cv.DEMEANOR_EXPRESSION_POOLS[DemeanorType.MYSTERIOUS]}
+    off_pool = set(cv.EXPRESSION_PHRASES.values()) - myst
+    for seed in range(80):
+        pos = pg.assemble_generation_prompt(
+            persona, nudity_level=NudityLevel.LOW, variety_seed=seed,
+        )[0]
+        assert not [ph for ph in off_pool if ph in pos], seed
+
+
+def test_explicit_demeanor_wins_over_culture_demeanor():
+    # An explicit demeanor suppresses the culture's derived one: under CONFIDENT no
+    # expression outside the confident pool (e.g. mysterious's "neutral") may leak.
+    persona = _persona_goth()
+    conf = {cv.EXPRESSION_PHRASES[v] for v in cv.DEMEANOR_EXPRESSION_POOLS[DemeanorType.CONFIDENT]}
+    off_pool = set(cv.EXPRESSION_PHRASES.values()) - conf
+    for seed in range(80):
+        pos = pg.assemble_generation_prompt(
+            persona, nudity_level=NudityLevel.LOW, variety_seed=seed,
+            demeanor=DemeanorType.CONFIDENT,
+        )[0]
+        assert not [ph for ph in off_pool if ph in pos], seed
+
+
+def test_culture_fills_wardrobe_when_unset_and_explicit_wins():
+    # (a) With no explicit wardrobe, the seeded clothing draw is the culture-styles-
+    #     narrowed draw; (b) an explicit wardrobe suppresses the culture derivation.
+    persona = _persona_goth()
+    goth_styles = list(cvoc.culture_wardrobe_styles("goth"))  # {edgy, glamorous}
+    assert goth_styles
+    for seed in range(60):
+        expected_culture = ov.generation_outfit_clause(
+            None, NudityLevel.MEDIUM, variety_seed=seed, wardrobe_styles=goth_styles,
+        )
+        pos_culture = pg.assemble_generation_prompt(
+            persona, nudity_level=NudityLevel.MEDIUM, variety_seed=seed,
+        )[0]
+        assert expected_culture in pos_culture, (seed, expected_culture)
+
+        expected_explicit = ov.generation_outfit_clause(
+            None, NudityLevel.MEDIUM, variety_seed=seed,
+            wardrobe_styles=[WardrobeStyleType.SPORTY],
+        )
+        pos_explicit = pg.assemble_generation_prompt(
+            persona, nudity_level=NudityLevel.MEDIUM, variety_seed=seed,
+            wardrobe_styles=[WardrobeStyleType.SPORTY],
+        )[0]
+        assert expected_explicit in pos_explicit, (seed, expected_explicit)
+
+
+# ---------------------------------------------------------------------------
+# Culture (Stage 3) — populate_wardrobe_traits adopts the character's stored culture
+# and falls back to it for wardrobeStyles/demeanor (explicit > profile > culture).
+# ---------------------------------------------------------------------------
+class _FakeCharStore:
+    def __init__(self, culture=None, raises=False):
+        self._culture = culture
+        self._raises = raises
+        self.calls = 0
+
+    async def get(self, character_id):
+        self.calls += 1
+        if self._raises:
+            raise RuntimeError("db down")
+        return SimpleNamespace(persona=SimpleNamespace(culture=self._culture))
+
+
+def test_culture_adopted_from_character_row_fills_wardrobe_and_demeanor():
+    from api.v1.endpoints.generate import populate_wardrobe_traits
+    char_store = _FakeCharStore(culture=CultureType.GOTH)
+    req = GenerateImageRequest(persona=_persona(), characterId="c1")  # persona.culture absent
+    asyncio.run(populate_wardrobe_traits(None, req, char_store))       # no trait store
+    assert req.persona.culture == CultureType.GOTH                      # adopted onto the request
+    assert set(req.wardrobeStyles) == set(cvoc.culture_wardrobe_styles(CultureType.GOTH))
+    assert req.demeanor == cvoc.culture_demeanor(CultureType.GOTH)[0]
+    assert char_store.calls == 1
+
+
+def test_explicit_persona_culture_never_overridden_by_character_row():
+    from api.v1.endpoints.generate import populate_wardrobe_traits
+    char_store = _FakeCharStore(culture=CultureType.GOTH)
+    persona = _persona()
+    persona.culture = CultureType.SPORTY_GYM                            # explicit payload culture
+    req = GenerateImageRequest(persona=persona, characterId="c1")
+    asyncio.run(populate_wardrobe_traits(None, req, char_store))
+    assert req.persona.culture == CultureType.SPORTY_GYM                # explicit kept
+    assert char_store.calls == 0                                        # store never even queried
+    # ...and the fallback uses the EXPLICIT culture, not the row's goth.
+    assert set(req.wardrobeStyles) == set(cvoc.culture_wardrobe_styles(CultureType.SPORTY_GYM))
+
+
+def test_profile_beats_culture_for_wardrobe_and_demeanor():
+    from api.v1.endpoints.generate import populate_wardrobe_traits
+    char_store = _FakeCharStore(culture=CultureType.GOTH)
+    trait_store = _FakeTraitStore({"profile": {"wardrobe_styles": ["sporty"], "demeanor": ["playful"]}})
+    req = GenerateImageRequest(persona=_persona(), characterId="c1")
+    asyncio.run(populate_wardrobe_traits(trait_store, req, char_store))
+    assert req.persona.culture == CultureType.GOTH                      # culture still adopted
+    assert req.wardrobeStyles == [WardrobeStyleType.SPORTY]             # profile wins over culture
+    assert req.demeanor == DemeanorType.PLAYFUL
+
+
+def test_culture_wardrobe_styles_capped_at_three():
+    from api.v1.endpoints.generate import populate_wardrobe_traits
+    # rave_festival carries 3 wardrobe styles (the vocab max) — the fill must respect the
+    # field's max_length=3 and never overflow it.
+    char_store = _FakeCharStore(culture=CultureType.RAVE_FESTIVAL)
+    req = GenerateImageRequest(persona=_persona(), characterId="c1")
+    asyncio.run(populate_wardrobe_traits(None, req, char_store))
+    assert req.wardrobeStyles is not None
+    assert len(req.wardrobeStyles) <= 3
+    assert set(req.wardrobeStyles) <= set(cvoc.culture_wardrobe_styles(CultureType.RAVE_FESTIVAL))
+
+
+def test_culture_store_error_degrades_gracefully():
+    from api.v1.endpoints.generate import populate_wardrobe_traits
+    char_store = _FakeCharStore(raises=True)
+    req = GenerateImageRequest(persona=_persona(), characterId="c1")
+    asyncio.run(populate_wardrobe_traits(None, req, char_store))        # must never raise
+    assert req.persona.culture is None                                 # nothing adopted
+    assert req.wardrobeStyles is None and req.demeanor is None         # nothing filled
 
 
 if __name__ == "__main__":

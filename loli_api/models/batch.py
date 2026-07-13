@@ -167,6 +167,12 @@ class BatchControls(BaseModel):
             "Profile-derived at launch; explicit admin values win."
         ),
     )
+    favored_poses: Optional[List[PoseType]] = Field(
+        default=None,
+        description=("Soft favourite-pose bias: weighted up (~3x) in pose picks, always WITHIN "
+                     "each beat's own authored pose pool (never adds a pose a beat didn't author). "
+                     "Culture-derived at launch; explicit admin values win."),
+    )
     demeanor: Optional[List[DemeanorType]] = Field(
         default=None,
         description=(

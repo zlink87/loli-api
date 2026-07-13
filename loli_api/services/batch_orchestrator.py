@@ -105,11 +105,13 @@ class BatchOrchestrator:
         likes = body.likes
         dislikes = body.dislikes
 
-        # Trait-profile bias (WS-B): fold the character's saved profile into the effective
-        # controls/likes/dislikes BEFORE persisting the batch, so the stored row carries the
-        # effective values and the reconciler re-derives the same Character with no changes.
-        # Best-effort: a load/merge failure NEVER blocks a launch (falls back to the raw body).
-        if body.use_trait_profile and self.trait_profile_store is not None:
+        # Trait-profile + culture bias (WS-B): fold the character's saved profile AND its
+        # culture into the effective controls/likes/dislikes BEFORE persisting the batch, so
+        # the stored row carries the effective values and the reconciler re-derives the same
+        # Character with no changes. Best-effort: a load/merge failure NEVER blocks a launch
+        # (falls back to the raw body). Gated only on use_trait_profile — the trait store may
+        # be absent yet the character still carry a culture, so the merge runs regardless.
+        if body.use_trait_profile:
             controls, likes, dislikes = await self._apply_trait_profile(
                 character_id, character, controls, likes, dislikes
             )
@@ -169,20 +171,28 @@ class BatchOrchestrator:
         likes: List[str], dislikes: List[str],
     ) -> Tuple[BatchControls, List[str], List[str]]:
         """
-        Best-effort: load the character's saved TraitProfile and fold it into the batch
-        controls/likes/dislikes (services.trait_profile_merge.apply_trait_profile). NEVER
-        raises — a missing profile row, an un-migrated table, or any store error logs a
-        warning and returns the inputs unchanged, so a trait-profile problem can never
-        block a batch launch. The occupation (for the work-location protection rule) comes
-        from the character's persona.
+        Best-effort: load the character's saved TraitProfile (when a store is wired) and
+        fold it — together with the character's culture — into the batch controls/likes/
+        dislikes (services.trait_profile_merge.apply_trait_profile). NEVER raises: a missing
+        profile row, an un-migrated table, or any store error logs a warning and merges with
+        profile=None (so a lone culture still biases the batch), and a merge failure returns
+        the inputs unchanged — a trait-profile problem can never block a batch launch. The
+        occupation (work-location protection) and culture both come from the character's
+        persona. A character with neither a profile nor a culture yields byte-identical
+        controls, since apply_trait_profile no-ops when both are absent.
         """
+        persona = getattr(character, "persona", None)
+        culture = getattr(persona, "culture", None)
+        occupation = getattr(persona, "occupation", None)
         try:
-            row = await self.trait_profile_store.get(character_id)
-            if not row:
-                return controls, likes, dislikes
-            profile = TraitProfile.coerce(row.get("profile"))
-            occupation = getattr(getattr(character, "persona", None), "occupation", None)
-            return apply_trait_profile(controls, likes, dislikes, profile, occupation)
+            profile = None
+            if self.trait_profile_store is not None:
+                row = await self.trait_profile_store.get(character_id)
+                if row:
+                    profile = TraitProfile.coerce(row.get("profile"))
+            return apply_trait_profile(
+                controls, likes, dislikes, profile, occupation, culture=culture
+            )
         except Exception as e:  # noqa: BLE001 — trait profile is a soft bias, never a gate
             logger.warning(
                 f"[BATCH] trait-profile merge skipped for character {character_id}: {e}"

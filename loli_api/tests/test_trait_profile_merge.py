@@ -11,11 +11,12 @@ Runs under pytest or directly: python loli_api/tests/test_trait_profile_merge.py
 from models.batch import BatchControls
 from models.enums import (
     OutfitType as O, LocationType as L, DemeanorType, InteriorStyleType, PaletteType,
-    WardrobeStyleType as W,
+    WardrobeStyleType as W, PoseType as P,
 )
 from models.trait_profile import TraitProfile
 from services.trait_profile_merge import apply_trait_profile
 from services import outfit_vocab as ov
+from services import culture_vocab as cv
 
 
 # Fields that make up the nudity envelope — apply_trait_profile must NEVER touch them.
@@ -168,6 +169,143 @@ def test_purity_inputs_not_mutated():
     # The caller's controls + lists are untouched (a fresh object/list is returned).
     assert c0.blocked_outfits == blocked_before
     assert c0.wardrobe_outfits is None
+    assert likes_in == ["x"] and dislikes_in == ["y"]
+
+
+# ---------------------------------------------------------------------------
+# Culture (Stage 3) — an additive, lowest-priority soft bias
+# ---------------------------------------------------------------------------
+def test_both_none_is_still_a_noop_echo():
+    # No profile AND no culture spec -> the controls object is echoed unchanged.
+    c0 = BatchControls(max_nudity="medium", base_seed=3)
+    c1, likes, dislikes = apply_trait_profile(c0, ["a"], ["b"], None, "nurse", culture=None)
+    assert c1 is c0
+    assert likes == ["a"] and dislikes == ["b"]
+    # An unknown/garbage culture also maps to no spec -> still a no-op echo.
+    c2, _, _ = apply_trait_profile(c0, [], [], None, "nurse", culture="not-a-real-culture")
+    assert c2 is c0
+
+
+def test_culture_only_merge_populates_bias_fields():
+    # profile=None, culture set -> every profile-derived piece is empty and the culture
+    # vocabulary drives the bias fields.
+    c0 = BatchControls(max_nudity="medium", base_seed=1)
+    c1, likes, dislikes = apply_trait_profile(c0, [], [], None, "model", culture="goth")
+    # wardrobe = culture style-mapped ∪ culture favors, − NAKED/blocked; OutfitType order.
+    assert c1.wardrobe_outfits and O.NAKED not in c1.wardrobe_outfits
+    for o in cv.culture_favored_outfits("goth"):
+        assert o in c1.wardrobe_outfits
+    # favored_outfits = culture favors (no profile favs), in OutfitType declaration order.
+    assert c1.favored_outfits == [o for o in O if o in cv.culture_favored_outfits("goth")]
+    # favored_locations = culture favors, in LocationType declaration order.
+    assert set(c1.favored_locations) == cv.culture_favored_locations("goth")
+    assert c1.favored_locations == [l for l in L if l in cv.culture_favored_locations("goth")]
+    # demeanor / interior / palette filled from culture.
+    assert c1.demeanor == cv.culture_demeanor("goth")
+    assert c1.interior_style == cv.culture_interior_style("goth")
+    assert c1.color_palette == cv.culture_color_palette("goth")
+    # goth authors NO favored poses -> the field stays unset.
+    assert c1.favored_poses is None
+    # Culture likes are NOT sourced here (they ride in via the trait profile).
+    assert likes == [] and dislikes == []
+
+
+def test_culture_favored_poses_filled_in_declaration_order():
+    # A culture WITH poses (sporty_gym) fills favored_poses in PoseType declaration order.
+    c0 = BatchControls(base_seed=1)
+    c1, _, _ = apply_trait_profile(c0, [], [], None, "model", culture="sporty_gym")
+    assert set(c1.favored_poses) == cv.culture_favored_poses("sporty_gym")
+    assert c1.favored_poses == [p for p in P if p in cv.culture_favored_poses("sporty_gym")]
+
+
+def test_nudity_envelope_byte_identical_with_culture():
+    for kw in (dict(max_nudity="high", escalation="building"), dict(max_nudity="low", sfw_only=True)):
+        c0 = BatchControls(base_seed=1, **kw)
+        before = _envelope(c0)
+        # Culture-only.
+        c1, _, _ = apply_trait_profile(c0, [], [], None, "model", culture="goth")
+        assert _envelope(c1) == before, f"culture-only changed the envelope for {kw}"
+        # Profile + culture together.
+        c2, _, _ = apply_trait_profile(c0, [], [], _profile(), "model", culture="sporty_gym")
+        assert _envelope(c2) == before, f"profile+culture changed the envelope for {kw}"
+
+
+def test_admin_allowed_outfits_skips_culture_outfit_expansion():
+    c0 = BatchControls(base_seed=1, allowed_outfits=[O.COCKTAIL_DRESS, O.SATIN_SLIP_DRESS])
+    c1, _, _ = apply_trait_profile(c0, [], [], None, "model", culture="goth")
+    assert c1.allowed_outfits == [O.COCKTAIL_DRESS, O.SATIN_SLIP_DRESS]
+    assert c1.wardrobe_outfits is None and c1.favored_outfits is None
+    # Location + taste still applied from the culture.
+    assert set(c1.favored_locations) == cv.culture_favored_locations("goth")
+    assert c1.interior_style == cv.culture_interior_style("goth")
+
+
+def test_admin_allowed_locations_skips_culture_location_expansion():
+    c0 = BatchControls(base_seed=1, allowed_locations=[L.OFFICE, L.HOME_OFFICE])
+    c1, _, _ = apply_trait_profile(c0, [], [], None, "model", culture="goth")
+    assert c1.allowed_locations == [L.OFFICE, L.HOME_OFFICE]
+    assert c1.favored_locations is None
+    # Outfit + taste still applied from the culture.
+    assert c1.wardrobe_outfits
+
+
+def test_explicit_admin_fields_win_over_culture():
+    c0 = BatchControls(
+        base_seed=1,
+        demeanor=[DemeanorType.SULTRY],
+        interior_style=InteriorStyleType.INDUSTRIAL_LOFT,
+        color_palette=PaletteType.BOLD_DARK,
+        favored_poses=[P.LYING_BACK],  # a pose NOT in sporty_gym's culture set
+    )
+    c1, _, _ = apply_trait_profile(c0, [], [], None, "model", culture="sporty_gym")
+    assert c1.demeanor == [DemeanorType.SULTRY]
+    assert c1.interior_style == InteriorStyleType.INDUSTRIAL_LOFT
+    assert c1.color_palette == PaletteType.BOLD_DARK
+    assert c1.favored_poses == [P.LYING_BACK]
+
+
+def test_profile_beats_culture_for_taste_fields():
+    # With BOTH a profile and a culture, the profile's demeanor/interior/palette win.
+    c0 = BatchControls(base_seed=1)
+    c1, _, _ = apply_trait_profile(c0, [], [], _profile(), "model", culture="sporty_gym")
+    assert c1.demeanor == [DemeanorType.ELEGANT]                 # profile, not sporty_gym
+    assert c1.interior_style == InteriorStyleType.LUXURY_GLAM
+    assert c1.color_palette == PaletteType.JEWEL_TONES
+    # favored_poses has no profile source -> the culture still fills it.
+    assert set(c1.favored_poses) == cv.culture_favored_poses("sporty_gym")
+
+
+def test_profile_avoided_location_beats_culture_favor():
+    # goth favors NIGHTCLUB; a profile that AVOIDS it must keep it BLOCKED and OUT of
+    # favored (explicit dislike beats a subculture default). NIGHTCLUB is not a model
+    # workplace, so the avoid is honored.
+    prof = _profile(avoided_locations=["nightclub"], favorite_locations=[])
+    c0 = BatchControls(base_seed=1)
+    c1, _, _ = apply_trait_profile(c0, [], [], prof, "model", culture="goth")
+    assert L.NIGHTCLUB in c1.blocked_locations
+    assert L.NIGHTCLUB not in (c1.favored_locations or [])
+    assert L.BAR in c1.favored_locations                        # other goth favors survive
+
+
+def test_culture_favors_extend_profile_favorites_in_order():
+    # favored_outfits = profile favorites FIRST (order preserved), then culture favors not
+    # already present in OutfitType declaration order.
+    prof = _profile(favorite_outfits=["little_black_dress"], never_wears=[])
+    c0 = BatchControls(base_seed=1)
+    c1, _, _ = apply_trait_profile(c0, [], [], prof, "model", culture="goth")
+    assert c1.favored_outfits[0] == O.LITTLE_BLACK_DRESS         # profile favorite leads
+    culture_tail = [o for o in O if o in cv.culture_favored_outfits("goth")
+                    and o != O.LITTLE_BLACK_DRESS]
+    assert c1.favored_outfits[1:] == culture_tail                # culture favors, deduped, in order
+
+
+def test_culture_merge_purity_inputs_not_mutated():
+    c0 = BatchControls(base_seed=1)
+    blocked_before = list(c0.blocked_outfits)
+    likes_in, dislikes_in = ["x"], ["y"]
+    apply_trait_profile(c0, likes_in, dislikes_in, None, "model", culture="goth")
+    assert c0.blocked_outfits == blocked_before
+    assert c0.wardrobe_outfits is None and c0.favored_poses is None
     assert likes_in == ["x"] and dislikes_in == ["y"]
 
 

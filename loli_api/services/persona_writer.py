@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 from models.requests import PersonaOptions
 from services import attribute_phrases as ap
+from services.culture_vocab import culture_hint
 from services.venice_client import VeniceClient
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,7 @@ def _character_facts(persona: PersonaOptions, enrichment: Optional[dict], name: 
         f", {ap.hair_phrase(persona.hairStyle, persona.hairColor)}, "
         f"{ap.phrase(ap.EYE_COLOR_PHRASES, persona.eyeColor)}",
         f"ethnicity word: {_ETH_WORD.get(eth_val, 'woman')}",
+        f"culture/subculture: {culture_hint(persona.culture) or 'unspecified'}",
         f"personality: {_label(persona.personality) or 'unspecified'}",
         f"relationship to the user: {_label(persona.relationship) or 'unspecified'}",
         f"occupation: {_label(persona.occupation) or 'unspecified'}",

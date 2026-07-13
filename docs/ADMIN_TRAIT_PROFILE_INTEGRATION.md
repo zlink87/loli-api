@@ -131,6 +131,13 @@ repaired (fuzzy) or dropped — the panel can submit user input as-is.
   scenes regardless of style tags.
 - **Nudity is untouchable from the profile** — batch controls alone govern it.
   Don't present profile fields as affecting explicitness.
+- **`culture` (subculture) is a persona-level INPUT, not a profile field** — it lives on
+  the character (`persona.culture`, set at creation or via `PATCH /v1/characters/{id}`;
+  see `docs/ADMIN_OPTIONS_ENDPOINT_WORKORDER.md`), not inside `TraitProfile`. It has no
+  key in the §3 table and no control in the trait-profile panel. Regenerating a profile
+  (§5.2) simply *respects* whatever `culture` is currently set on the character — it leans
+  the writer's wardrobe/location/interior/likes/bio choices toward that subculture — but
+  there is nothing to edit here directly.
 - **Batch launch overrides**: anything set explicitly in the launch form beats
   the profile for that batch. `use_trait_profile: false` ignores the profile
   entirely for that batch.

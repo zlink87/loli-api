@@ -23,6 +23,15 @@ def _persona():
     )
 
 
+def _persona_culture(culture):
+    return PersonaOptions(
+        ethnicity="latina", age=24, hairStyle="straight", hairColor="black",
+        eyeColor="brown", bodyType="curvy", breastSize="medium", name="Nora",
+        occupation="dancer", personality="temptress", relationship="sugar_baby",
+        kinks=["playful_teasing", "cuddling"], culture=culture,
+    )
+
+
 def _writer(api_key=""):
     return TraitProfileWriter(api_key=api_key)
 
@@ -273,6 +282,50 @@ def test_heritage_hint_degrades_for_unknown_value():
     assert _heritage_hint(None) == ""
     assert _heritage_hint("klingon") == "klingon"  # humanized fallback
     assert _heritage_hint("mixed_heritage") == "of mixed heritage"
+
+
+# --- culture / subculture (Stage 2) ---
+def test_facts_include_culture_when_set_and_unspecified_when_not():
+    w = _writer()
+    with_c = w._build_user_prompt(_persona_culture("goth"), ["backstory"], {}, None)
+    assert "culture/subculture:" in with_c
+    assert "Goth" in with_c  # culture_hint label leads the fact line
+    without_c = w._build_user_prompt(_persona(), ["backstory"], {}, None)
+    assert "culture/subculture: unspecified" in without_c
+
+
+def test_system_prompt_has_culture_fixed_input_rule():
+    from services.trait_profile_writer import TRAIT_SYSTEM_PROMPT
+    assert "culture/subculture" in TRAIT_SYSTEM_PROMPT
+    assert "FIXED" in TRAIT_SYSTEM_PROMPT
+    assert "NEVER contradict" in TRAIT_SYSTEM_PROMPT
+
+
+def test_deterministic_dump_culture_goth_overrides_taste():
+    w = _writer()
+    v, provider = asyncio.run(w.write(_persona_culture("goth"), None, {}, character_id="c1"))
+    assert provider == "deterministic"
+    # goth CultureSpec drives the taste fields (over personality/occupation tables).
+    assert v["demeanor"][0] == "mysterious"          # demeanor=(MYSTERIOUS, SULTRY), mysterious-first
+    assert v["interior_style"] == "industrial_loft"
+    assert v["color_palette"] == "bold_dark"
+    assert "edgy" in v["wardrobe_styles"]
+    # favorite_outfits / favorite_locations are now filled from the spec (were empty).
+    assert v["favorite_outfits"] and v["favorite_locations"]
+    assert "naked" not in v["favorite_outfits"]
+    assert len(v["favorite_outfits"]) <= 5 and len(v["favorite_locations"]) <= 5
+    # culture likes LEAD the likes list.
+    assert v["likes"][0] == "gothic rock"
+
+
+def test_deterministic_dump_culture_none_matches_no_culture_field():
+    # Passing culture=None must be byte-identical to a persona with no culture field.
+    w = _writer()
+    a, pa = asyncio.run(w.write(_persona(), None, {}, character_id="c1"))
+    b, pb = asyncio.run(w.write(_persona_culture(None), None, {}, character_id="c1"))
+    assert a == b and pa == pb
+    # And the no-culture path still emits empty favorite_outfits/locations (unchanged).
+    assert a["favorite_outfits"] == [] and a["favorite_locations"] == []
 
 
 if __name__ == "__main__":

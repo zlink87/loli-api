@@ -375,6 +375,15 @@ Show a per-row ✓ / ✗ and offer retry on the failed rows only. (Only include 
 The batch item body is **exactly** `GenerateImageRequest` — no new fields. If your single
 "generate character" form already builds this, reuse it. Summary of the parts:
 
+> **New field — `culture` (subculture), and existing-characters note.** `persona.culture`
+> is a new **optional** field (see enum list below). It's the *same* `PersonaOptions` used
+> by `POST /v1/characters` / `POST /v1/characters/bulk`, so this applies there too, not
+> just to generation. Every character created **before** this feature has `culture = NULL`
+> — zero behavior change for her. `culture` set at creation only steers *this and future*
+> generations for that character; changing it later on an already-saved character happens
+> via `PATCH /v1/characters/{id}` (outside this batch-create flow) and only affects
+> *future* batches — it never retroactively touches her existing hero photo.
+
 `persona` (`PersonaOptions`) — required core identity:
 
 ```jsonc
@@ -392,6 +401,7 @@ The batch item body is **exactly** `GenerateImageRequest` — no new fields. If 
   "relationship": "girlfriend",// optional
   "occupation": "nurse",       // optional
   "kinks": ["playful_teasing", "slow_sensual"], // optional, max 3
+  "culture": "goth",           // optional, 16 values — omit for "None (no subculture)"
   "voice": null                // optional
 }
 ```
@@ -412,6 +422,13 @@ Enum value lists (canonical source = `/openapi.json`):
 
 - **style:** `realistic`, `anime`
 - **ethnicity:** `caucasian`, `asian`, `black_afro`, `latina`, `arab`
+- **culture (subculture, optional):** 16 values — `goth`, `punk`, `e_girl`, `grunge`,
+  `y2k`, `cottagecore`, `dark_academia`, `old_money`, `streetwear_baddie`,
+  `kawaii_harajuku`, `gyaru`, `boho_hippie`, `pinup_rockabilly`, `rocker_biker`,
+  `rave_festival`, `sporty_gym`. Default `None`. Build the create-form dropdown with a
+  pre-selected **"None (no subculture)"** entry that **omits** `culture` from the payload
+  entirely (don't send `""` or a placeholder value) — this is the only field on the form
+  designed to be skippable that way.
 - **hairStyle:** `straight`, `bangs`, `curly`, `bun`, `short`, `ponytail`
 - **hairColor:** `brunette`, `blonde`, `black`, `redhead`, `pink`
 - **eyeColor:** `brown`, `blue`, `green`

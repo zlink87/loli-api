@@ -36,6 +36,7 @@ from .enums import (
     DemeanorType,
     InteriorStyleType,
     PaletteType,
+    CultureType,
 )
 
 
@@ -109,6 +110,10 @@ class PersonaOptions(BaseModel):
         default=None,
         max_length=50,
         description="Voice identifier (e.g., voice_4)"
+    )
+    culture: Optional[CultureType] = Field(
+        default=None,
+        description="Optional culture/subculture (goth, punk, e_girl, ...). Steers styling, wardrobe and scenery strongly but never exclusively; omitted/None = no culture.",
     )
 
     @field_validator("kinks")

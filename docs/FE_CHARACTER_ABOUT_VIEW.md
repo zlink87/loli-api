@@ -11,7 +11,7 @@ loli-api deploy + one backfill call; the FE can build against real data.
 
 | Table | What the About view uses |
 |---|---|
-| `characters` | `name`, `age`, `ethnicity`, `body_type`, `relationship`, `occupation` (fallback only), `context` (FULL bio — the "Read more" target), `chat_avatar_url` / `profile_image_url`, `welcome_message`, `status` |
+| `characters` | `name`, `age`, `ethnicity`, `culture` (nullable — subculture/aesthetic), `body_type`, `relationship`, `occupation` (fallback only), `context` (FULL bio — the "Read more" target), `chat_avatar_url` / `profile_image_url`, `welcome_message`, `status` |
 | `character_profile_cards` (NEW — public SELECT policy `character_profile_cards_public_read`, verified in prod) | `short_description`, `display_occupation`, `display_personality[]`, `display_hobbies[]`, `language`, `zodiac` |
 | `character_images` | gallery photos (already in use) |
 
@@ -44,6 +44,7 @@ the current version; values change source):
 | AGE | `characters.age` | as-is |
 | BODY | `characters.body_type` | humanize enum: `snake_case` → Title Case ("curvy" → "Curvy") |
 | ETHNICITY | `characters.ethnicity` | humanized label map — see **Ethnicity labels** below (the enum now has 25 regional values, not 5) |
+| CULTURE (new tile) | `characters.culture` | humanized label map — see **Culture labels** below; nullable — **hide the tile when null** |
 | LANGUAGE | `card.language` | default "English" when card null; keep the flag icon |
 | RELATIONSHIP | `characters.relationship` | humanize enum; "None" when null |
 | OCCUPATION | `card.display_occupation` | **prefer the card** ("Heiress and Socialite"); fallback: humanized `characters.occupation` enum |
@@ -77,6 +78,22 @@ const ETHNICITY_LABELS = {
   brazilian: 'Brazilian',
   // Mixed
   mixed_heritage: 'Mixed',
+};
+```
+
+**Culture labels** — `characters.culture` is a new **nullable** subculture/aesthetic
+column (16 values). Unlike ethnicity, there is no legacy/forward-compat fallback: a
+`null` culture (most characters, and everyone created before this feature) and any
+value not in the map both render as **no chip / no row** — never show a raw enum string
+or a generic Title-Cased guess:
+
+```js
+const CULTURE_LABELS = {
+  goth: 'Goth', punk: 'Punk', e_girl: 'E-girl', grunge: 'Grunge', y2k: 'Y2K',
+  cottagecore: 'Cottagecore', dark_academia: 'Dark Academia', old_money: 'Old Money',
+  streetwear_baddie: 'Streetwear Baddie', kawaii_harajuku: 'Kawaii / Harajuku',
+  gyaru: 'Gyaru', boho_hippie: 'Boho / Hippie', pinup_rockabilly: 'Pin-up / Rockabilly',
+  rocker_biker: 'Rocker / Biker', rave_festival: 'Rave / Festival', sporty_gym: 'Sporty / Gym',
 };
 ```
 

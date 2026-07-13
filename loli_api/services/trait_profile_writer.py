@@ -38,6 +38,7 @@ from models.enums import (
 )
 from models.requests import PersonaOptions
 from models.trait_profile import ALL_TRAIT_FIELDS, TraitProfile
+from services.culture_vocab import culture_hint, spec_for
 from services.venice_client import VeniceClient
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,9 @@ TRAIT_SYSTEM_PROMPT = (
     "- Never include 'naked' in any outfit list — nudity is controlled elsewhere.\n"
     "- Keep likes/dislikes consistent with her chosen taste (interior_style, "
     "color_palette, wardrobe_styles).\n"
+    "- When a culture/subculture is given in the CHARACTER facts it is a FIXED input "
+    "fact: derive her wardrobe styles, favorite locations, interior style, palette and "
+    "likes/dislikes to be consistent with it, and NEVER contradict or replace it.\n"
     "- The card fields (short_description, display_occupation, display_personality, "
     "display_hobbies) are HUMAN-FACING display copy for her public profile: natural, "
     "enticing, NO AI-speak, and NEVER the raw enum words verbatim."
@@ -570,6 +574,7 @@ class TraitProfileWriter:
             f"name: {persona.name or 'she'}",
             f"age: {persona.age}",
             f"heritage: {_heritage_hint(persona.ethnicity) or 'unspecified'}",
+            f"culture/subculture: {culture_hint(persona.culture) or 'unspecified'}",
             f"personality: {_label(persona.personality) or 'unspecified'}",
             f"relationship to the user: {_label(persona.relationship) or 'unspecified'}",
             f"occupation: {_label(persona.occupation) or 'unspecified'}",
@@ -597,10 +602,30 @@ class TraitProfileWriter:
         kinks = [_val(k) for k in (persona.kinks or [])]
         name = persona.name or "She"
 
-        demeanor = _PERSONALITY_DEMEANOR.get(personality, _DEFAULT_DEMEANOR)
-        interior_style = _PERSONALITY_INTERIOR_STYLE.get(personality, _DEFAULT_INTERIOR_STYLE)
-        color_palette = _INTERIOR_STYLE_PALETTE.get(interior_style, _DEFAULT_PALETTE)
-        wardrobe_styles = _OCCUPATION_WARDROBE.get(occupation, _DEFAULT_WARDROBE)
+        # Culture-first fallbacks: when the persona has a culture, its CultureSpec
+        # supplies demeanor / interior_style / palette / wardrobe (declaration-order
+        # for stable output); else the existing personality/occupation tables. A
+        # None/unknown culture leaves this branch untaken -> byte-identical to today.
+        spec = spec_for(persona.culture)
+        if spec is not None:
+            demeanor = [d.value for d in spec.demeanor]
+            interior_style = spec.interior_style.value
+            color_palette = spec.color_palette.value
+            wardrobe_styles = [w.value for w in WardrobeStyleType if w in spec.wardrobe_styles]
+        else:
+            demeanor = _PERSONALITY_DEMEANOR.get(personality, _DEFAULT_DEMEANOR)
+            interior_style = _PERSONALITY_INTERIOR_STYLE.get(personality, _DEFAULT_INTERIOR_STYLE)
+            color_palette = _INTERIOR_STYLE_PALETTE.get(interior_style, _DEFAULT_PALETTE)
+            wardrobe_styles = _OCCUPATION_WARDROBE.get(occupation, _DEFAULT_WARDROBE)
+
+        # favorite outfits / locations: filled from the culture spec (sorted by enum
+        # declaration order for stable output, emitted <=5); empty without a culture
+        # (outside the culture path the writer emits STYLE tags, not garments).
+        favorite_outfits: List[str] = []
+        favorite_locations: List[str] = []
+        if spec is not None:
+            favorite_outfits = [o.value for o in OutfitType if o in spec.favored_outfits][:5]
+            favorite_locations = [l.value for l in LocationType if l in spec.favored_locations][:5]
 
         likes = list(e.get("likes") or [])
         likes += _INTERIOR_STYLE_LIKES.get(interior_style, [])
@@ -610,6 +635,12 @@ class TraitProfileWriter:
 
         dislikes = list(e.get("dislikes") or [])
         dislikes += _INTERIOR_STYLE_DISLIKES.get(interior_style, [])
+
+        # Culture likes/dislikes LEAD (prepended) so its taste is primary; coerce
+        # dedupes + caps below. No culture -> the chains above are unchanged.
+        if spec is not None:
+            likes = list(spec.likes) + likes
+            dislikes = list(spec.dislikes) + dislikes
 
         zodiac = _zodiac_for(character_id or name)
 
@@ -653,9 +684,9 @@ class TraitProfileWriter:
 
         raw: Dict[str, Any] = {
             "wardrobe_styles": wardrobe_styles,
-            "favorite_outfits": [],
+            "favorite_outfits": favorite_outfits,
             "never_wears": [],
-            "favorite_locations": [],
+            "favorite_locations": favorite_locations,
             "avoided_locations": [],
             "demeanor": demeanor,
             "interior_style": interior_style,

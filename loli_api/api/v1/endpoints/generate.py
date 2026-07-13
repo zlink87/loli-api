@@ -13,6 +13,7 @@ from models.trait_profile import TraitProfile
 from auth.dependencies import get_current_user
 from auth.admin import require_admin
 from services.notification_service import NotificationService
+from services.culture_vocab import culture_wardrobe_styles, culture_demeanor
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,9 @@ _notification_service: Optional[NotificationService] = None
 # Optional (Supabase-gated). Used only to auto-fill wardrobeStyles/demeanor from a
 # GenerateImageRequest.characterId; None (store not configured) degrades gracefully.
 _trait_profile_store = None
+# Optional (Supabase-gated). Used only to adopt a character's stored persona.culture onto
+# a GenerateImageRequest.characterId when the payload didn't set one; None degrades gracefully.
+_character_store = None
 
 
 def set_job_manager(job_manager):
@@ -44,51 +48,96 @@ def set_trait_profile_store(store) -> None:
     _trait_profile_store = store
 
 
-async def populate_wardrobe_traits(trait_store, request) -> None:
-    """
-    If ``request.characterId`` is set and ``wardrobeStyles``/``demeanor`` are absent,
-    load the character's trait profile via ``trait_store`` and auto-fill them (her
-    wardrobe styles + first demeanor) so a themed generation biases toward her taste.
+def set_character_store(store) -> None:
+    """Set the (optional) character store used to adopt a character's stored culture."""
+    global _character_store
+    _character_store = store
 
-    No-ops (leaving the request untouched) when:
-      * the request carries no characterId, or already has BOTH fields set (an
-        explicit caller value is never overridden — each field is filled independently);
-      * ``trait_store`` is None (trait store not configured / Supabase not wired);
-      * the character has no profile row, or an empty profile;
-      * the store raises for any reason (logged, swallowed).
-    Never raises and NEVER touches nudity/identity — wardrobe/expression bias only.
+
+async def populate_wardrobe_traits(trait_store, request, character_store=None) -> None:
     """
+    Auto-fill ``wardrobeStyles``/``demeanor`` for a themed generation, with priority
+    explicit-payload > trait profile > culture. Runs in three best-effort steps:
+
+    1. CULTURE ADOPTION: when ``request.characterId`` is set, ``request.persona.culture``
+       is absent, and ``character_store`` is wired, load the character and adopt its stored
+       persona.culture onto the request (an explicit payload culture is NEVER overridden).
+    2. TRAIT PROFILE FILL: when a characterId + ``trait_store`` exist, load her trait profile
+       and fill any still-missing wardrobeStyles (her wardrobe_styles) / demeanor (first
+       demeanor) — the profile beats culture.
+    3. CULTURE FALLBACK: any field STILL unset is filled from ``request.persona.culture``
+       (wardrobe_styles capped at 3; first culture demeanor) — the last resort.
+
+    No-ops (leaving the request untouched) when there is nothing to derive: no characterId
+    for steps 1-2, both fields already explicit, no configured stores, no profile row / empty
+    profile, no culture, or a store error (logged, swallowed). Never raises and NEVER touches
+    nudity/identity — wardrobe/expression bias only.
+    """
+    persona = getattr(request, "persona", None)
     character_id = getattr(request, "characterId", None)
-    if not character_id:
-        return
+
+    # --- Step 1: adopt the character's stored culture (explicit payload culture wins) ---
+    if (
+        character_id
+        and character_store is not None
+        and persona is not None
+        and getattr(persona, "culture", None) is None
+    ):
+        try:
+            character = await character_store.get(character_id)
+        except Exception as e:  # noqa: BLE001 — culture adoption is best-effort
+            logger.warning(
+                "Failed to load character %s for culture: %s; proceeding without",
+                character_id, e,
+            )
+            character = None
+        char_culture = getattr(getattr(character, "persona", None), "culture", None)
+        if char_culture is not None:
+            persona.culture = char_culture
+
     have_styles = bool(getattr(request, "wardrobeStyles", None))
     have_demeanor = getattr(request, "demeanor", None) is not None
     if have_styles and have_demeanor:
         return  # both explicit — nothing to derive
-    if trait_store is None:
+
+    # --- Step 2: trait-profile fill (profile beats culture) ---
+    if character_id and trait_store is not None:
+        try:
+            row = await trait_store.get(character_id)
+        except Exception as e:  # noqa: BLE001 — wardrobe bias is protective, not critical
+            logger.warning(
+                "Failed to load trait profile for character %s: %s; proceeding without",
+                character_id, e,
+            )
+            row = None
+        if row:
+            profile = TraitProfile.coerce(row.get("profile") or {})
+            if not have_styles and profile.wardrobe_styles:
+                request.wardrobeStyles = list(profile.wardrobe_styles)
+                have_styles = True
+            if not have_demeanor and profile.demeanor:
+                request.demeanor = profile.demeanor[0]
+                have_demeanor = True
+    elif character_id and trait_store is None:
         logger.warning(
             "characterId=%s provided but trait profile store not configured; "
-            "proceeding without wardrobe traits",
+            "proceeding without trait-profile wardrobe traits",
             character_id,
         )
-        return
 
-    try:
-        row = await trait_store.get(character_id)
-    except Exception as e:  # noqa: BLE001 — wardrobe bias is protective, not critical
-        logger.warning(
-            "Failed to load trait profile for character %s: %s; proceeding without",
-            character_id, e,
-        )
-        return
-
-    if not row:
-        return
-    profile = TraitProfile.coerce(row.get("profile") or {})
-    if not have_styles and profile.wardrobe_styles:
-        request.wardrobeStyles = list(profile.wardrobe_styles)
-    if not have_demeanor and profile.demeanor:
-        request.demeanor = profile.demeanor[0]
+    # --- Step 3: culture fallback for any field still unset (explicit > profile > culture) ---
+    culture = getattr(persona, "culture", None) if persona is not None else None
+    if culture is not None:
+        if not have_styles:
+            styles = list(culture_wardrobe_styles(culture))[:3]  # field max_length=3
+            if styles:
+                request.wardrobeStyles = styles
+                have_styles = True
+        if not have_demeanor:
+            dem = culture_demeanor(culture)
+            if dem:
+                request.demeanor = dem[0]
+                have_demeanor = True
 
 
 def get_job_manager():
@@ -180,8 +229,9 @@ async def create_generate_job(
             )
 
         # Trait-aware generation: resolve wardrobeStyles/demeanor from characterId
-        # when the caller left them unset (best-effort; never fails the request).
-        await populate_wardrobe_traits(_trait_profile_store, request)
+        # (culture + trait profile) when the caller left them unset (best-effort; never
+        # fails the request).
+        await populate_wardrobe_traits(_trait_profile_store, request, _character_store)
 
         # Send payload to Google Chat webhook for logging
         notification_service = get_notification_service()
@@ -268,7 +318,7 @@ async def create_batch_generate_jobs(
     results = []
     for index, item in enumerate(items):
         # Trait-aware theming per item (no-op unless the item carries a characterId).
-        await populate_wardrobe_traits(_trait_profile_store, item)
+        await populate_wardrobe_traits(_trait_profile_store, item, _character_store)
         # queue="creation" isolates batch traffic while keeping job_type="text_to_image"
         # so GET /v1/jobs/{jobId} is byte-identical to single-generate.
         job = await job_manager.create_job(item, user_id, queue="creation")

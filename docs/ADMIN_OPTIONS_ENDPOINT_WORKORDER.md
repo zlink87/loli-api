@@ -24,6 +24,7 @@ Two enum-level requests are already reflected there: **age max is now 50** (was 
 | **Teacher occupation** | `OccupationType` (now 44 values) | Appears automatically in `/v1/options` and `/openapi.json`. No hardcoded list to edit if you adopt WI-1. **WI-3.** |
 | **New `poseText`** (optional, `≤200` chars) | `GenerateImageRequest` (image generation) | Optional freeform pose override field. **WI-4.** |
 | **Persona `system_prompt` / `welcome_message` voice** | AI-generated persona fields | Generated text now reads as third-person description *about* the character (not "You are…"). Display/label nudge only. **WI-5.** |
+| **New `persona.culture` (subculture)** | `PersonaOptions.culture`, optional | New dropdown, 16 values. Optional, default `None`. **WI-6.** |
 
 Everything else (nudity handling, pose/outfit variety, Venice scene literalness) is **backend-internal behavior** — better images/scenes with **no panel change required** (see §5).
 
@@ -49,6 +50,7 @@ Everything else (nudity handling, pose/outfit variety, Venice scene literalness)
     "relationship": [ … ],           // 19
     "occupation":   [ … ],           // 44  (includes { "value": "teacher", "label": "Teacher" })
     "kinks":        [ … ],           // 23  (max 3 selectable — see constraints)
+    "culture":      [ … ],           // 16  (new — subculture/aesthetic, optional)
     "constraints": {
       "age":            { "min": 18, "max": 50 },
       "kinks_max":      3,
@@ -107,6 +109,25 @@ AI-generated persona fields changed voice:
 
 The panel needs no functional change — it still displays/edits whatever the backend generates. Optional polish: relabel the "System Prompt (Required)" field to something like **"Character Description"** so the third-person copy reads correctly to admins; the field key on the wire is unchanged.
 
+### WI-6 — `persona.culture` (subculture) dropdown (optional; new)
+`GET /v1/options → persona.culture` returns 16 `{value, label}` entries — a subculture/
+aesthetic pick (Goth, Punk, E-girl, Grunge, Y2K, Cottagecore, Dark Academia, Old Money,
+Streetwear Baddie, Kawaii / Harajuku, Gyaru, Boho / Hippie, Pin-up / Rockabilly, Rocker /
+Biker, Rave / Festival, Sporty / Gym). Render the dropdown in **response order** — that
+order is the intended UI order, don't re-sort alphabetically.
+
+- **Optional, no default value.** It is not listed under `constraints`, has no required
+  minimum — the field is entirely skippable. The dropdown should default to a **"None (no
+  subculture)"** entry.
+- **Create form:** selecting "None" means **omit `culture` from the payload** — don't send
+  `""` or a placeholder value.
+- **Edit form:** selecting "None" on a character that already has a `culture` set should
+  send `culture: null` in the `PATCH /v1/characters/{id}` body to clear it; leaving it
+  untouched (not sending the key at all) leaves the existing value unchanged.
+- Steers generation (clothing/scenes/poses/interior) and feeds the AI trait-profile/persona
+  writers — no panel logic needed beyond collecting and sending the value; see
+  `docs/ADMIN_TRAIT_PROFILE_INTEGRATION.md` for the trait-profile interaction.
+
 ---
 
 ## 4. Guardrails (do NOT change these)
@@ -126,3 +147,4 @@ These improve output with no contract change: character-generation now reflects 
 - [ ] Teacher selectable as an occupation (WI-3).
 - [ ] Optional freeform pose field wired to `poseText`, omitted when blank (WI-4).
 - [ ] Persona System Prompt field renders third-person copy correctly (optionally relabeled) (WI-5).
+- [ ] `culture` dropdown built from `persona.culture` (16 entries, response order), defaults to "None (no subculture)"; "None" omits the field on create and sends `null` on edit (WI-6).

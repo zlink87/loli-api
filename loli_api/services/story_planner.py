@@ -482,10 +482,14 @@ class DeterministicScenePlanner(StoryPlanner):
         pool = _allowed_pose_pool(tmpl, controls)
         if not pool:
             return None
-        # Real pose phrase map (likes match pose words now) + demeanor-favored poses (2.0).
+        # Real pose phrase map (likes match pose words now) + demeanor-favored poses (2.0)
+        # + culture favored_poses (3.0, via favored_strong). Culture only RE-WEIGHTS poses
+        # already inside the beat's authored pool — it never adds a pose the beat didn't
+        # author (the candidate pool stays _allowed_pose_pool output).
         return _weighted_pick(
             pool, rng, like_kw, dislike_kw, _POSE_PHRASE_MAP,
             favored=_demeanor_pose_favor(controls), favored_weight=2.0,
+            favored_strong=set(getattr(controls, "favored_poses", None) or []),
         )
 
     def _pick_outfit(self, tmpl, rng, like_kw, dislike_kw, controls):
@@ -768,17 +772,20 @@ def _vary_beat_description(desc: str, cycle: int) -> str:
 def _weighted_pick(
     pool, rng, like_kw: set, dislike_kw: set, phrase_map: dict,
     favored: Optional[set] = None, favored_weight: float = 3.0,
+    favored_strong: Optional[set] = None, favored_strong_weight: float = 3.0,
 ):
     """
     Seeded weighted pick from `pool`, soft-excluding dislikes and boosting likes/favorites.
 
     A candidate's weight is the MAX of its like-match weight (3.0 when its keywords hit a
-    like, else 1.0) and its favored weight (``favored_weight`` when it is in ``favored``,
-    else 1.0) — MAX, not a product, so a like-and-favored candidate is 3.0, not 9.0 (a
-    strong-but-bounded bias). ``favored`` is a set of enum members (WS-B: favored_outfits /
-    favored_locations at 3.0, demeanor-favored poses at 2.0). Both default to the pre-B2
-    behavior when unset (favored None + empty like/dislike -> all weights 1.0), so a
-    no-likes/no-profile pick is byte-identical.
+    like, else 1.0), its favored weight (``favored_weight`` when it is in ``favored``, else
+    1.0), and its strong-favored weight (``favored_strong_weight`` when in ``favored_strong``,
+    else 1.0) — MAX, never a product, so a candidate that is liked AND favored AND
+    strong-favored is 3.0, not compounded (a strong-but-bounded bias). ``favored`` /
+    ``favored_strong`` are sets of enum members (WS-B: favored_outfits / favored_locations at
+    3.0, demeanor-favored poses at 2.0; culture favored_poses at 3.0 via favored_strong).
+    All default to the pre-B2 behavior when unset (favored/favored_strong None + empty
+    like/dislike -> all weights 1.0), so a no-likes/no-profile/no-culture pick is byte-identical.
     """
     candidates = list(pool)
     if not candidates:
@@ -791,7 +798,8 @@ def _weighted_pick(
     for c in kept:
         like_w = 3.0 if (_enum_keywords(c, phrase_map) & like_kw) else 1.0
         fav_w = favored_weight if (favored and c in favored) else 1.0
-        weights.append(max(like_w, fav_w))
+        strong_w = favored_strong_weight if (favored_strong and c in favored_strong) else 1.0
+        weights.append(max(like_w, fav_w, strong_w))
     return rng.choices(kept, weights=weights, k=1)[0]
 
 

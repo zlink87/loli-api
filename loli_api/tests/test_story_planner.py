@@ -1254,6 +1254,94 @@ def test_demeanor_pose_favor_biases_pose_pick():
     assert counts[PoseType.LYING_BACK] > counts[PoseType.STANDING_LEANING]
 
 
+# --- culture favored_poses (Stage 3): favored_strong at 3.0 ---
+def test_weighted_pick_favored_strong_none_is_byte_identical():
+    # favored_strong defaulting/explicit-None must leave the seeded draw unchanged.
+    pool = [OutfitType.COCKTAIL_DRESS, OutfitType.BUSINESS_SUIT, OutfitType.GYM_SET]
+    for seed in range(60):
+        a = _weighted_pick(
+            pool, _random.Random(seed), {"gown"}, set(), _OUTFIT_PHRASE_MAP,
+            favored={OutfitType.COCKTAIL_DRESS})
+        b = _weighted_pick(
+            pool, _random.Random(seed), {"gown"}, set(), _OUTFIT_PHRASE_MAP,
+            favored={OutfitType.COCKTAIL_DRESS}, favored_strong=None)
+        assert a == b, seed
+
+
+def test_favored_strong_alone_is_about_3x():
+    pool = [OutfitType.COCKTAIL_DRESS, OutfitType.BUSINESS_SUIT]
+    counts = {o: 0 for o in pool}
+    rng = _random.Random(0)
+    for _ in range(6000):
+        counts[_weighted_pick(pool, rng, set(), set(), {},
+                              favored_strong={OutfitType.COCKTAIL_DRESS})] += 1
+    ratio = counts[OutfitType.COCKTAIL_DRESS] / counts[OutfitType.BUSINESS_SUIT]
+    assert 2.5 < ratio < 3.6, f"favored_strong ratio {ratio:.2f} not ~3x"
+
+
+def test_like_favored_and_strong_are_maxed_not_compounded():
+    # A candidate that is liked AND favored AND strong-favored is 3.0, never compounded.
+    pool = [OutfitType.RED_EVENING_GOWN, OutfitType.BUSINESS_SUIT]
+    counts = {o: 0 for o in pool}
+    rng = _random.Random(0)
+    for _ in range(6000):
+        counts[_weighted_pick(
+            pool, rng, {"gown"}, set(), _OUTFIT_PHRASE_MAP,
+            favored={OutfitType.RED_EVENING_GOWN},
+            favored_strong={OutfitType.RED_EVENING_GOWN},
+        )] += 1
+    ratio = counts[OutfitType.RED_EVENING_GOWN] / counts[OutfitType.BUSINESS_SUIT]
+    assert 2.5 < ratio < 3.6, f"like+favored+strong ratio {ratio:.2f} should be ~3x (maxed)"
+
+
+def test_favored_poses_bias_pick_pose_within_beat_pool():
+    # controls.favored_poses (culture-derived) biases _pick_pose ~3x, but the candidate pool
+    # stays the beat's authored pose pool — a favored pose is only ever re-weighted, and a
+    # non-authored favored pose is never introduced.
+    planner = DeterministicScenePlanner()
+    pool = [PoseType.LYING_BACK, PoseType.STANDING_LEANING]  # neither is athletic
+    tmpl = SimpleNamespace(pose_pool=list(pool))
+    controls = BatchControls(base_seed=1, favored_poses=[PoseType.LYING_BACK])
+    counts = {p: 0 for p in pool}
+    rng = _random.Random(0)
+    for _ in range(6000):
+        p = planner._pick_pose(tmpl, rng, set(), set(), controls)
+        assert p in pool  # never outside the beat's authored pool
+        counts[p] += 1
+    ratio = counts[PoseType.LYING_BACK] / counts[PoseType.STANDING_LEANING]
+    assert 2.5 < ratio < 3.6, f"favored-pose ratio {ratio:.2f} not ~3x"
+
+
+def test_favored_pose_outside_beat_pool_is_never_introduced():
+    planner = DeterministicScenePlanner()
+    pool = [PoseType.LYING_BACK, PoseType.STANDING_LEANING]
+    tmpl = SimpleNamespace(pose_pool=list(pool))
+    # KNEELING is a valid pose but NOT in this beat's pool — culture must never add it.
+    controls = BatchControls(base_seed=1, favored_poses=[PoseType.KNEELING])
+    rng = _random.Random(0)
+    for _ in range(500):
+        assert planner._pick_pose(tmpl, rng, set(), set(), controls) in pool
+
+
+def test_plan_with_culture_merged_controls_passes_invariants():
+    # Merge a culture (no profile) into controls, then run the real batch path and assert
+    # count guarantee + nudity ceiling + no NAKED + seeded reproducibility hold.
+    from services import trait_profile_merge as tpm
+    base = _character(occupation="model")
+    c0 = BatchControls(max_nudity=NudityLevel.MEDIUM, escalation="building", base_seed=7)
+    controls, likes, dislikes = tpm.apply_trait_profile(c0, [], [], None, "model", culture="sporty_gym")
+    assert controls.favored_poses  # culture actually populated the pose bias
+    char = Character(persona=base.persona, likes=likes, dislikes=dislikes)
+    scenes = _planned(char, 24, controls)
+    assert len(scenes) == 24
+    for s in scenes:
+        assert s.outfit != OutfitType.NAKED
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(NudityLevel.MEDIUM)
+        assert _nudity_index(s.nudityLevel) <= _nudity_index(_location_ceiling(s.location))
+    scenes_b = _planned(char, 24, controls)
+    assert [s.pose for s in scenes] == [s.pose for s in scenes_b]
+
+
 def test_every_demeanor_has_pose_and_expression_favor():
     for d in DemeanorType:
         assert DEMEANOR_POSE_FAVOR.get(d), f"no pose favor for {d}"

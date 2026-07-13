@@ -13,14 +13,14 @@ from fastapi import HTTPException
 
 from config import settings
 from auth.admin import require_admin
-from models.enums import EthnicityType
+from models.enums import EthnicityType, CultureType
 from api.v1.endpoints import options as ep
 
 # Only the sub-keys built via ep._opts() are {value,label} pairs; the others
 # (aspect_ratios/resolutions/lengths) are raw value lists by design.
 _ENUM_KEYS = {
     "persona": [
-        "style", "ethnicity", "hair_style", "hair_color", "eye_color",
+        "style", "ethnicity", "culture", "hair_style", "hair_color", "eye_color",
         "body_type", "breast_size", "personality", "relationship",
         "occupation", "kinks",
     ],
@@ -82,6 +82,17 @@ def test_ethnicity_options_are_exhaustive_and_unique():
     values = [e["value"] for e in body["persona"]["ethnicity"]]
     assert len(values) == len(set(values)), "duplicate ethnicity option"
     assert set(values) == {e.value for e in EthnicityType}
+
+
+def test_culture_options_are_exhaustive_and_unique():
+    # The culture dropdown must contain EVERY CultureType member exactly once.
+    body = asyncio.run(ep.get_options(user={"sub": "admin-1"}))
+    values = [e["value"] for e in body["persona"]["culture"]]
+    assert len(values) == len(set(values)), "duplicate culture option"
+    assert set(values) == {c.value for c in CultureType}
+    # a couple of representative labels are humanized
+    assert {"value": "goth", "label": "Goth"} in body["persona"]["culture"]
+    assert {"value": "e_girl", "label": "E Girl"} in body["persona"]["culture"]
 
 
 def test_ethnicity_options_include_new_values_with_labels():

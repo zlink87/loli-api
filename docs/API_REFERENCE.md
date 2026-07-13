@@ -101,6 +101,7 @@ Generate a new character image from persona attributes. **202** on accept.
 | `relationship` | enum | No | 19 types |
 | `occupation` | enum | No | **43 types** — see enums note below |
 | `kinks` | list[enum] | No | ≤3 of 23 types |
+| `culture` | enum \| null | No | **16 types** (subculture/aesthetic) — optional, default `None`. Canonical list: `GET /v1/options → persona.culture` (`{value,label}` pairs). Steers batches/generation and the trait-profile/persona writers; never touches nudity. |
 | `voice` | string | No | |
 
 **202 response** (all create endpoints share this shape):
@@ -231,6 +232,25 @@ the API values, not the short forms:
 
 Outfit (47), pose (16), nudity (`low`/`medium`/`high`), and all persona enums must match
 `loli_api/models/enums.py` exactly — a mismatch is a **422**.
+
+---
+
+## Enums note — `culture` (new, optional)
+`PersonaOptions.culture` (`CultureType`) is a new **optional, nullable** field — a
+subculture/aesthetic pick, distinct from `ethnicity`. Omit or send `null` for no
+subculture (default). It flows through `GenerateImageRequest`, `CharacterCreate`,
+`BulkCharacterCreate`, and `PATCH /v1/characters/{id}` (sending `culture: null` clears a
+previously-set value). 16 values:
+
+`goth`, `punk`, `e_girl`, `grunge`, `y2k`, `cottagecore`, `dark_academia`, `old_money`,
+`streetwear_baddie`, `kawaii_harajuku`, `gyaru`, `boho_hippie`, `pinup_rockabilly`,
+`rocker_biker`, `rave_festival`, `sporty_gym`.
+
+Human labels (for display) are available pre-built at `GET /v1/options` →
+`persona.culture` as `{value, label}` pairs, in the same order as above (e.g.
+`kawaii_harajuku` → "Kawaii / Harajuku"). `culture` steers batch/generation wardrobe,
+locations, poses, home interior + makeup styling, and feeds the trait-profile/persona
+writers — it never affects nudity settings.
 
 ---
 
