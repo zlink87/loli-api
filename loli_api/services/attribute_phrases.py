@@ -159,6 +159,7 @@ OCCUPATION_PHRASES = {
     "designer": "designer",
     "pharmacist": "pharmacist",
     "nutritionist": "nutritionist",
+    "teacher": "teacher",
 }
 
 # Kinks contribute mood/atmosphere only; kept tasteful and descriptive.
@@ -199,10 +200,28 @@ def phrase(mapping: dict, value, default: str = "") -> str:
 
 
 def age_phrase(age: Optional[int]) -> str:
-    """Photographic age descriptor (always 18+)."""
+    """
+    Photographic age descriptor (always 18+): the number plus bucket vocabulary,
+    so 18/25/45 actually read as different ages instead of a generic mid-twenties.
+
+    SAFETY: every bucket is explicitly adult-worded ("adult"/"woman"); no
+    teen/teenage/adolescent/child/girl language (that would be negated by
+    prompt_constants.ADULT_APPEARANCE_NEGATIVE and fight the render).
+    """
     if not age:
         return ""
-    return f"{int(age)} years old"
+    age = int(age)
+    if age <= 19:
+        return f"{age} years old, youthful fresh-faced young adult woman, smooth clear skin"
+    if age <= 23:
+        return f"{age} years old, in her early twenties, youthful adult look"
+    if age <= 27:
+        return f"{age} years old, mid-twenties adult woman"
+    if age <= 33:
+        return f"{age} years old, late twenties to early thirties, subtly mature adult features"
+    if age <= 41:
+        return f"{age} years old, in her thirties, mature adult woman"
+    return f"{age} years old, in her forties, mature adult woman with natural fine age lines"
 
 
 def hair_phrase(hair_style, hair_color) -> str:

@@ -6,10 +6,11 @@ Mirrors the VeniceScenePlanner pattern (system + user prompt -> JSON -> tolerant
 extract -> per-field clamp), but for prose fields instead of scenes. Key rules:
 
   * PER-FIELD: only the requested fields are generated/returned.
-  * PER-FIELD VOICE: every field has its own grammatical voice (2nd-person system
-    prompt, 1st-person greeting/welcome, 3rd-person bio/summary, adjective-list
-    tone/style). The system prompt states this and each _FIELD_SPECS.instruction
-    encodes it with a few-shot example.
+  * PER-FIELD VOICE: every field has its own grammatical voice (3rd-person system
+    prompt — client-facing description ABOUT her, never addressed to her or to an
+    AI —, 1st-person greeting/welcome with any asterisk *action* describing HER OWN
+    action, 3rd-person bio/summary, adjective-list tone/style). The system prompt
+    states this and each _FIELD_SPECS.instruction encodes it with a few-shot example.
   * RAW TRAIT LABELS: personality/relationship/occupation/kinks are passed as their
     raw labels (e.g. "nympho", "sugar baby", "stripper", "oral play"), NOT the
     attribute_phrases image-expression maps (those describe camera expressions and
@@ -48,12 +49,14 @@ _FIELD_SPECS: Dict[str, Dict] = {
         "label": "system_prompt",
         "max_chars": 4000,
         "instruction": (
-            "The roleplay instruction manual, written in SECOND PERSON addressed to the "
-            "AI, present tense. Begin \"You are {name}, a {age}-year-old {ethnicity} "
-            "woman.\" then state Personality, the relationship to the user, Occupation, "
-            "Interests, and a short Background/scene. End with: \"Stay in character at all "
-            "times. Be conversational and engaging. Never break character or mention being "
-            "an AI.\""
+            "A character-profile description, written in THIRD PERSON about her for the "
+            "client reading it (never addressed to her, never addressed to an AI), present "
+            "tense. Begin \"{name} is a {age}-year-old {ethnicity} woman.\" then describe "
+            "her Personality, her relationship to the user, Occupation, Interests, and a "
+            "short Background/current scene — natural profile prose, not a list. Forbidden: "
+            "\"You are...\" or any second-person address to the character; AI-directive "
+            "language such as \"Stay in character\", \"Never break character\", or "
+            "\"mention being an AI\"; instruction-manual tone."
         ),
     },
     "greeting_message": {
@@ -70,8 +73,10 @@ _FIELD_SPECS: Dict[str, Dict] = {
         "max_chars": 1000,
         "instruction": (
             "The opening scene message she sends when a chat starts, FIRST PERSON, "
-            "in-character, present tense; may open with a brief *action* in asterisks and "
-            "sets the scene. 1-3 sentences."
+            "in-character, present tense; may open with a brief *action* in asterisks "
+            "describing HER OWN action (e.g. \"*I lean back in my chair and smile.*\") and "
+            "sets the scene. The asterisk action must never be assigned to the user and must "
+            "never start with \"You\". 1-3 sentences."
         ),
     },
     "bio": {
@@ -137,8 +142,7 @@ PERSONA_SYSTEM_PROMPT = (
     "names and whose values are plain strings. No markdown, no commentary, no extra keys.\n"
     "- Write in English unless another output language is specified.\n"
     "- Honor the character's likes and avoid the dislikes.\n"
-    "- Keep every value within its stated length. Never mention being an AI except where a "
-    "field's instruction explicitly asks for that directive."
+    "- Keep every value within its stated length. Never mention being an AI."
 )
 
 
@@ -283,16 +287,16 @@ class PersonaWriter:
         templates = {
             "name": name,
             "system_prompt": (
-                f"You are {name}, a {persona.age}-year-old {eth} woman. "
-                f"Personality: {personality}. Your relationship to the user: {relationship}. "
+                f"{name} is a {persona.age}-year-old {eth} woman. "
+                f"Personality: {personality}. Her relationship to the user: {relationship}. "
                 + (f"Occupation: {occupation}. " if occupation else "")
                 + (f"Interests: {interests}. " if interests else "")
-                + "Stay in character at all times. Be conversational and engaging. "
-                "Never break character or mention being an AI."
+                + f"Background: {name} is warm and easy to talk to, always glad to pick up "
+                "right where things left off."
             ),
             "greeting_message": f"Hey there, I'm {name}... what brings you here tonight?",
             "welcome_message": (
-                f"*{name} glances up with a slow smile* There you are. "
+                f"*I glance up with a slow smile.* There you are. "
                 "I was hoping you'd show up."
             ),
             "bio": (

@@ -53,8 +53,8 @@ class PersonaOptions(BaseModel):
     age: int = Field(
         ...,
         ge=18,
-        le=99,
-        description="Character age (18-99)"
+        le=50,
+        description="Character age (18-50)"
     )
     hairStyle: HairStyleType = Field(
         ...,
@@ -294,6 +294,13 @@ class GenerateImageRequest(BaseModel):
         default=None,
         description="Camera/framing configuration. None = hero defaults "
                     "(waist-up, eye level, polished finish)"
+    )
+    poseText: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Optional freeform body-position/pose text. When set, it is used "
+                    "verbatim in place of the seeded pose rotation (and the pose pool "
+                    "pick is skipped). None = seeded pose variety when enabled."
     )
     providerHints: Optional[ProviderHints] = Field(
         default=None,

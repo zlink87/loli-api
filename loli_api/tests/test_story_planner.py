@@ -237,6 +237,41 @@ def test_provider_override_claude_on_nsfw_falls_back():
     assert len(scenes) == 8
 
 
+# --- WS2: story-planner temperature is settings-driven (was a hardcoded 0.7) ---
+def test_venice_planner_temperature_comes_from_settings():
+    from services.story_planner import build_planner, VeniceScenePlanner
+    settings = _fake_settings(venice="k")
+    settings.STORY_PLANNER_TEMPERATURE = 0.42
+    planner = build_planner("venice", settings=settings)
+    assert isinstance(planner, VeniceScenePlanner)
+    assert planner.temperature == 0.42
+    # …and _call_venice forwards exactly that to the Venice client (no hardcoded value).
+    captured: dict = {}
+
+    async def fake_chat(messages, **kwargs):
+        captured.update(kwargs)
+        return None, {}
+
+    planner._client.chat = fake_chat
+    asyncio.run(planner._call_venice("hi", story_mode=True, count=4))
+    assert captured["temperature"] == 0.42
+
+
+def test_venice_planner_temperature_defaults_when_settings_lacks_attr():
+    # A legacy/fake settings object without STORY_PLANNER_TEMPERATURE still builds (0.6 default).
+    from services.story_planner import build_planner
+    settings = _fake_settings(venice="k")  # no STORY_PLANNER_TEMPERATURE attribute
+    planner = build_planner("venice", settings=settings)
+    assert planner.temperature == 0.6
+
+
+def test_planner_system_prompt_asks_for_literal_beat_description():
+    from services.story_planner import PLANNER_SYSTEM_PROMPT
+    low = PLANNER_SYSTEM_PROMPT.lower()
+    assert "literal" in low
+    assert "avoid metaphor" in low
+
+
 def test_manual_provider_uses_supplied_scenes():
     char = _character()
     settings = _fake_settings()

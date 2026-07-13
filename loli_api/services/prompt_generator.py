@@ -13,6 +13,7 @@ would sometimes come back as a generic studio-portrait scene), which is exactly
 the kind of unpredictability the deterministic assembler exists to avoid.
 """
 import logging
+import random
 import re
 from typing import List, Optional, Tuple
 
@@ -48,15 +49,27 @@ def identity_block(persona: PersonaOptions) -> str:
     return ", ".join(locked_tokens(persona))
 
 
-def _persona_flavor(persona: PersonaOptions, suppress_expression: bool = False) -> str:
+def _persona_flavor(
+    persona: PersonaOptions,
+    suppress_expression: bool = False,
+    nudity_level: NudityLevel = NudityLevel.LOW,
+) -> str:
     """Persona flavor phrases. suppress_expression drops the personality's
     expression phrase when an explicit shot expression override is set (avoids
-    two conflicting expression clauses)."""
+    two conflicting expression clauses).
+
+    At modest nudity (LOW/SUGGESTIVE) the kink mood phrase is dropped: those
+    heated, undress-pulling moods fight the graded clothing with nothing to
+    oppose them at cfg=1 (the negative is inert), so on a clothed card they only
+    muddy the aesthetic. Personality/occupation/relationship still express. At
+    MEDIUM+ the kink mood stays (today's behavior)."""
+    key = getattr(nudity_level, "value", nudity_level)
+    drop_kinks = key in ("low", "suggestive")
     parts = [
         "" if suppress_expression else ap.phrase(ap.PERSONALITY_PHRASES, persona.personality),
         ap.phrase(ap.OCCUPATION_PHRASES, persona.occupation),
         ap.phrase(ap.RELATIONSHIP_PHRASES, persona.relationship),
-        ap.kinks_phrase(persona.kinks),
+        "" if drop_kinks else ap.kinks_phrase(persona.kinks),
     ]
     return ", ".join(p for p in parts if p)
 
@@ -68,39 +81,80 @@ def assemble_generation_prompt(
     outfit: Optional[OutfitType] = None,
     nudity_level: NudityLevel = NudityLevel.LOW,
     accessories: Optional[List[AccessoryType]] = None,
+    variety_seed: Optional[int] = None,
+    pose_text: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     """
     Deterministically assemble a character-generation prompt.
 
     Assembly order: scaffold, shot block (framing+angle+expression), locked
-    identity, clothing clause, scene/free text, persona flavor, quality suffix.
-    shot=None falls back to hero defaults (waist-up, eye level) so every caller
-    gets a consistent crop.
+    identity, clothing clause, body-position phrase, scene/free text, persona
+    flavor, quality suffix.
 
-    The scene clause (the admin's raw text, used verbatim) sits right after
-    clothing and BEFORE persona flavor (personality/occupation/kinks phrases)
-    deliberately: the generation model is a fast turbo model that weights
-    earlier tokens heavily, and the requested scene (e.g. "school dance") must
-    not be buried behind flavor text or it gets diluted.
+    Variety (WS3) is controlled entirely by ``variety_seed``:
+      * None -> the legacy behavior exactly: the plain hero-default shot
+        (waist-up, eye level) when no explicit shot is given, the single default
+        clothing string, and no body-position phrase. This is the kill-switch path.
+      * set  -> a LOCAL random.Random(variety_seed) drives a seeded varied shot
+        (only when no explicit shot AND no pose_text override), a seeded default
+        clothing pick, and a seeded body-position phrase — so batch items (distinct
+        seeds) differ while each seed stays reproducible.
+    ``pose_text``, when given, is used verbatim as the body-position phrase in
+    place of any pool pick (and suppresses the seeded shot rotation).
 
-    The clothing clause is injected early (right after locked identity, ahead of
-    the flavor/free-text) because the generation base model is NSFW-tuned and
-    weights early tokens heavily; paired with the nudity-graded negative it makes
-    the requested nudity level actually stick instead of defaulting to nude.
+    The scene clause (the admin's raw text, used verbatim) sits after the
+    clothing/body-position clauses and BEFORE persona flavor deliberately: the
+    generation model is a fast turbo model that weights earlier tokens heavily,
+    and the requested scene (e.g. "school dance") must not be buried behind flavor
+    text or it gets diluted.
+
+    Nudity level is enforced entirely by POSITIVE tokens — the graded clothing
+    clause, the LOW/SUGGESTIVE coverage guard, and the flavor gating that drops
+    kink moods at modest levels — because the generation graph samples at cfg=1,
+    where the negative prompt is mathematically inert (it is retained for
+    provenance/parity but subtracts nothing). The clothing clause is injected
+    early (right after locked identity) because the NSFW-tuned base weights early
+    tokens heavily.
 
     Returns (positive, negative, locked_block).
     """
+    rng = random.Random(variety_seed) if variety_seed is not None else None
+    pose_override = bool(pose_text and pose_text.strip())
+
+    # Shot: an explicit client shot always wins. With variety on and no pose_text
+    # override, synthesize a seeded varied shot; otherwise the plain hero default.
     if shot is None:
-        shot = ShotOptions()
+        if rng is not None and not pose_override:
+            shot = ShotOptions(**cv.varied_shot_fields(rng))
+        else:
+            shot = ShotOptions()
+
     scaffold = ap.phrase(ap.STYLE_PHRASES, persona.style, ap.STYLE_PHRASES["realistic"])
     shot_block = cv.compose_shot_block(shot, personality=persona.personality)
     locked = identity_block(persona)
-    clothing = ov.generation_outfit_clause(outfit, nudity_level, accessories)
-    flavor = _persona_flavor(persona, suppress_expression=shot.expression is not None)
+    clothing = ov.generation_outfit_clause(
+        outfit, nudity_level, accessories, variety_seed=variety_seed
+    )
+    flavor = _persona_flavor(
+        persona,
+        suppress_expression=shot.expression is not None,
+        nudity_level=nudity_level,
+    )
+
+    # Body-position segment: explicit pose_text wins (verbatim); else a seeded
+    # pool pick when variety is on; else nothing (legacy).
+    if pose_override:
+        pose_segment = pose_text.strip()
+    elif rng is not None:
+        pose_segment = cv.pose_variety_phrase(rng)
+    else:
+        pose_segment = ""
 
     parts = [scaffold, shot_block, locked]
     if clothing:
         parts.append(clothing)
+    if pose_segment:
+        parts.append(pose_segment)
     if free_text and free_text.strip():
         parts.append(free_text.strip())  # admin free-text, always verbatim
     if flavor:
@@ -141,17 +195,21 @@ class PromptGenerator:
         outfit: Optional[OutfitType] = None,
         nudity_level: NudityLevel = NudityLevel.LOW,
         accessories: Optional[List[AccessoryType]] = None,
+        variety_seed: Optional[int] = None,
+        pose_text: Optional[str] = None,
     ) -> Tuple[str, str, str]:
         """
         Full character-generation prompt builder.
 
         Identity + framing + clothing are assembled deterministically (always
-        present); `context` (the admin's scene hint) is used verbatim.
-        Returns (positive, negative, locked_block).
+        present); `context` (the admin's scene hint) is used verbatim. The RAW
+        `shot` (may be None) is threaded straight through so assembly owns the
+        fallback — never defaulted here, or the seeded shot rotation could never
+        engage. `variety_seed`/`pose_text` drive WS3 variety (see
+        assemble_generation_prompt). Returns (positive, negative, locked_block).
         """
-        if shot is None:
-            shot = ShotOptions()
         return assemble_generation_prompt(
             persona, context, shot=shot,
             outfit=outfit, nudity_level=nudity_level, accessories=accessories,
+            variety_seed=variety_seed, pose_text=pose_text,
         )

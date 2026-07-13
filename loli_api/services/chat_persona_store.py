@@ -41,8 +41,8 @@ _CHARACTER_FIELD_TO_COL = {
 # The endpoint is expected to generate a real system_prompt when creating a persona;
 # this only guards against a caller reaching the store without one.
 _DEFAULT_SYSTEM_PROMPT = (
-    "Stay in character at all times. Be conversational and engaging. "
-    "Never break character or mention being an AI."
+    "She is a warm, engaging companion who loves easy, playful conversation "
+    "and enjoys getting to know the person she is talking to."
 )
 
 

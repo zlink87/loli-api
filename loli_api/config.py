@@ -150,8 +150,14 @@ class Settings(BaseSettings):
     # Uses Venice above. Empty SCENE_WRITER_MODEL -> VENICE_MODEL. Works keyless
     # (deterministic curated fallback varied by input; never breaks the flow).
     SCENE_WRITER_MODEL: str = ""
-    SCENE_WRITER_TEMPERATURE: float = 0.9
+    SCENE_WRITER_TEMPERATURE: float = 0.6  # low: literal, camera-sees scene text (not flowery)
     SCENE_WRITER_MAX_TOKENS: int = 160
+
+    # Story planner (batch story-director): lower temperature keeps Venice's
+    # render-bound scene fields (setting/activity/pose_detail/outfit_detail/expression)
+    # literal and directional — physically concrete, camera-instruction language a
+    # diffusion model can render — instead of flowery narrative prose.
+    STORY_PLANNER_TEMPERATURE: float = 0.6
 
     # Character generation: run the second detail-refine pass by default
     # (upscale-model round trip + refine steps; same output resolution,
@@ -159,6 +165,13 @@ class Settings(BaseSettings):
     # in upscale_models/ on the RunPod volume — set false until it's uploaded.
     # Per-request override: output.hires.
     GENERATION_HIRES_DEFAULT: bool = True
+
+    # WS3 kill-switch for all character-generation prompt variety (default-outfit
+    # pools + seeded shot/pose rotation, so batch cards stop looking identical).
+    # True -> the worker passes a per-job variety_seed into prompt assembly; False
+    # -> variety_seed=None everywhere, i.e. byte-identical legacy prompts. Age
+    # accuracy and nudity flavor-gating are NOT gated by this (they always apply).
+    GENERATION_VARIETY_ENABLED: bool = True
 
     # Anthropic Claude (story planner — SFW-only fallback provider).
     # Claude refuses explicit adult content, so it is never routed NSFW batches;

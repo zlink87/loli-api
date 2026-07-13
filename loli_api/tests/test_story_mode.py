@@ -6,6 +6,7 @@ narrative excluded from the render prompt, NSFW gating, and story assembly.
 Runs under pytest or directly: python loli_api/tests/test_story_mode.py
 """
 import asyncio
+import re
 from types import SimpleNamespace
 
 # The mapper SSRF-validates source_image; these tests exercise narrative/mapping,
@@ -293,6 +294,44 @@ def test_director_system_prompt_declares_pose_detail_and_setting_rules():
     assert "no other people, no facial-feature language" in p
     assert '"setting" (REQUIRED on every beat)' in p
     assert "LEADS the rendered background text" in p
+
+
+# --- WS2: render fields are literal camera instructions, not story prose ---
+def test_director_prompt_render_fields_are_literal_camera_instructions():
+    # WS2: the render-bound fields (setting/activity/pose_detail/outfit_detail/expression)
+    # must be governed by a literalness rule that frames them as camera instructions and
+    # bans metaphor / mood-prose — the owner's complaint was flowery, unrenderable output.
+    p = STORY_DIRECTOR_SYSTEM_PROMPT
+    # Whitespace-normalized copy so line-wrapped phrases still match.
+    flat = re.sub(r"\s+", " ", p)
+    low = flat.lower()
+    assert "CAMERA INSTRUCTIONS" in flat
+    assert "what a camera sees, not what a narrator feels" in flat
+    # the two registers are named and separated
+    assert "RENDER register" in flat and "STORY register" in flat
+    # metaphor + mood abstractions are explicitly banned in the render fields
+    assert "metaphor" in low
+    assert "mood abstractions" in low
+    # the exact flavor of the reported bad output is called out as forbidden
+    assert "tension easing" in low
+    # at least one concrete GOOD example per render field is present
+    assert "wooden desk with stacked papers" in flat        # setting GOOD
+    assert "pouring coffee from a steel kettle" in flat      # activity GOOD
+
+
+def test_director_prompt_keeps_display_prose_separate_from_render():
+    # narrative + beat_description are gallery-only (may keep the storytelling voice);
+    # the render fields must not — the prompt must state this split.
+    p = STORY_DIRECTOR_SYSTEM_PROMPT
+    assert "DISPLAY text shown only in the" in p
+    assert "NEVER fed to the image model" in p
+
+
+def test_director_prompt_examples_carry_no_banned_style_words():
+    # The GOOD examples inside the prompt must not contain any BANNED_STYLE_WORDS, or we'd
+    # teach the model to emit text scene_mapper._clean_scene_part drops wholesale.
+    from services.prompt_constants import has_banned_style_words
+    assert not has_banned_style_words(STORY_DIRECTOR_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

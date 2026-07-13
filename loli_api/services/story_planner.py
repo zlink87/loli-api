@@ -618,41 +618,12 @@ HARD RULES:
 - Output the SAME arcs and the SAME number of beats per arc, in the SAME order, as given in the user message.
 - For each beat, choose pose/outfit/location/time_of_day/lighting ONLY from THAT beat's own allowed lists in the user message. Never borrow a value from a different beat's list, never invent a value outside any list. If a beat's list is empty/"(none allowed)", output null for that field (pose/outfit only — location/time_of_day/lighting always have at least one option).
 - accessories/mood_kinks/mood_personality are chosen from the shared lists at the end of the user message (not beat-specific).
-- Write beat_description as a concrete, vivid sentence that matches the attributes YOU picked for that beat — freely rephrase the beat's "vibe" hint in your own words, but never contradict your own location/outfit/pose choice.
+- Write beat_description as a concrete, LITERAL scene sentence that matches the attributes YOU picked for that beat — freely rephrase the beat's "vibe" hint in your own words, but never contradict your own location/outfit/pose choice. Name the place, clothing and action a camera would see; avoid metaphor, mood-narration and atmosphere words with no physical referent. (It is a gallery caption, so a light, plain touch is enough.)
 - Do NOT describe the person's face, age, ethnicity, hair, eyes, body, or breasts anywhere. Only scene attributes.
 - Make the sequence feel organic for THIS character's personality, likes and dislikes within the given options.
 - Avoid anything matching the character's dislikes.
 - nudityLevel must never exceed the stated maximum.
 - Output the requested number of beats total across all arcs. No prose, no markdown, only the JSON object.
-"""
-
-
-# Story mode: same scene-selection rules, plus one continuous multi-part story.
-STORY_PLANNER_SYSTEM_PROMPT = """You are a story director for a photorealistic NSFW image series of ONE fixed character.
-You will write ONE continuous, coherent multi-part STORY told across the beats in the user
-message — each beat is ONE photo in the story. Each beat gives you a short "vibe" hint and that
-beat's OWN allowed pose/outfit/location/time_of_day/lighting options (hand-authored to be
-scene-coherent, differing per beat).
-
-You must output ONLY valid JSON of the form:
-{"story_title":"Short title","arcs":[{"arc_id":"snake_case_id","arc_title":"Chapter title","beats":[BEAT, ...]}, ...]}
-
-Each BEAT is:
-{"beat_description":"one short sentence","narrative":"1-3 sentences of story prose",
- "pose":<pose|null>,"outfit":<outfit|null>,"nudityLevel":"low|medium|high",
- "accessories":[<accessory>...]|null,"location":<location>,"time_of_day":<time>,
- "lighting":<lighting>,"mood_kinks":[<kink>...]|null,"mood_personality":<personality>|null}
-
-HARD RULES:
-- Output the SAME arcs and the SAME number of beats per arc, in the SAME order, as given in the user message. Treat each arc as a CHAPTER of the story.
-- For each beat, choose pose/outfit/location/time_of_day/lighting ONLY from THAT beat's own allowed lists in the user message. Never borrow from another beat's list, never invent a value. If a beat's list is empty/"(none allowed)", output null for that field (pose/outfit only).
-- accessories/mood_kinks/mood_personality are chosen from the shared lists at the end of the user message.
-- "story_title": a short, evocative title (title case), a few words, no quotes inside.
-- "narrative": 1-3 sentences (max ~55 words) of THIRD-PERSON, PRESENT-TENSE prose about the character BY NAME. It must continue directly from the previous beat so the whole set reads as one story, reflect the character's personality/likes/persona-context, and avoid the dislikes. Keep the EXACT SAME third-person present voice for EVERY beat — never switch person or tense.
-- Describe actions, feelings and setting only. NEVER describe the person's face, age, ethnicity, hair, eyes, body, breasts or skin anywhere (identity is pixel-protected). Using her first name is fine.
-- "beat_description" stays a short concrete scene caption matching the attributes YOU picked for that beat.
-- nudityLevel must never exceed the stated maximum.
-- Output the requested number of beats total across all arcs. No prose outside JSON, no markdown, only the JSON object.
 """
 
 
@@ -666,6 +637,12 @@ Invent ONE cohesive "day in her life": a real narrative with a beginning, middle
 distinct settings, changing activities, shifting moods, and a natural progression of
 time-of-day. YOU choose everything from the allowed lists in the user message — you are
 NOT filling a fixed template.
+
+Each beat carries TWO registers, and they must NOT sound alike. The STORY register — the
+"narrative" field and the gallery caption "beat_description" — is prose for a human reader;
+keep it as vivid as you like. The RENDER register — "setting", "activity", "pose_detail",
+"outfit_detail" and "expression" — is a set of CAMERA INSTRUCTIONS for a diffusion model:
+plain, literal, physically concrete. NEVER let the story voice leak into the render fields.
 
 Output ONLY valid JSON of the form:
 {"story_title":"Short evocative title","arcs":[{"arc_id":"snake_case_id","arc_title":"Chapter title","beats":[BEAT, ...]}, ...]}
@@ -683,6 +660,26 @@ Each BEAT is:
  "lighting":<lighting>,"mood_kinks":[<kink>...]|null,"mood_personality":<personality>|null}
 
 HARD RULES:
+- RENDER FIELDS ARE CAMERA INSTRUCTIONS, NOT PROSE (this governs "setting", "activity",
+  "pose_detail", "outfit_detail" and "expression"): write ONLY what a camera can see — objects,
+  surfaces, materials, furniture, light sources, body positions, and garment names/colors/
+  fabrics. Write what a camera sees, not what a narrator feels. BANNED in these fields:
+  metaphors and similes ("like...", "as if..."), emotional or mood abstractions ("tension
+  easing", "a rare moment of calm", "lost in thought", "melting into the evening"), story-
+  narration voice, and atmosphere words with no physical referent. GOOD vs BAD, per field:
+    - setting       BAD: "a cozy nook where the evening melts away"
+                    GOOD: "small home office, wooden desk with stacked papers, warm desk lamp, dark window behind"
+    - activity      BAD: "savoring a quiet moment to herself"
+                    GOOD: "pouring coffee from a steel kettle into a white mug"
+    - pose_detail   BAD: "relaxing, at peace with the world"
+                    GOOD: "sitting on the desk edge, one foot on the chair, both hands around a mug"
+    - outfit_detail BAD: "something comfortable that feels like home"
+                    GOOD: "grey cotton sweatshirt, sleeves pushed up, black leggings"
+    - expression    BAD: "radiating serene inner contentment"
+                    GOOD: "soft sleepy smile" (<=6 words, one plain visible expression)
+- DISPLAY vs RENDER: "narrative" and "beat_description" are DISPLAY text shown only in the
+  gallery — they are NEVER fed to the image model, so they may keep the storytelling voice.
+  Every RENDER field above must stay literal; do not blur the two.
 - THE DAY IS HERS: build the whole day around WHO SHE IS — her occupation, relationship,
   personality and kinks. SHE chooses where the day goes; the locations, activities and outfits
   are the ones THIS character would pick, following the DAY SHAPE in the user message.
@@ -741,8 +738,13 @@ class VeniceScenePlanner(StoryPlanner):
     supports_nsfw = True
 
     def __init__(self, api_key: str, base_url: str = "https://api.venice.ai/api/v1",
-                 model: str = "venice-uncensored", timeout: float = 100.0):
+                 model: str = "venice-uncensored", timeout: float = 100.0,
+                 temperature: float = 0.6):
         self.api_key = api_key
+        # Lower temperature keeps the render-bound fields literal/directional (see
+        # STORY_DIRECTOR_SYSTEM_PROMPT); injected from settings.STORY_PLANNER_TEMPERATURE
+        # by build_planner, mirroring how SceneWriter takes SCENE_WRITER_TEMPERATURE.
+        self.temperature = temperature
         self._client = VeniceClient(api_key, base_url=base_url, model=model, timeout=timeout)
 
     async def plan_scenes(
@@ -1002,7 +1004,7 @@ class VeniceScenePlanner(StoryPlanner):
                 },
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.7,
+            temperature=self.temperature,
             # Story-director beats each carry setting + activity + narrative, so scale token
             # headroom with beat count rather than a flat cap.
             max_tokens=min(16000, 300 * count + 2000) if story_mode else 4000,
@@ -1990,6 +1992,7 @@ def build_planner(name: str, *, settings) -> StoryPlanner:
             api_key=settings.VENICE_API_KEY,
             base_url=settings.VENICE_BASE_URL,
             model=settings.VENICE_MODEL,
+            temperature=getattr(settings, "STORY_PLANNER_TEMPERATURE", 0.6),
         )
     if name == "claude":
         return ClaudeScenePlanner(api_key=settings.ANTHROPIC_API_KEY, model=settings.ANTHROPIC_MODEL)

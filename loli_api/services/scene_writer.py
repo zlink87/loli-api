@@ -34,53 +34,58 @@ logger = logging.getLogger(__name__)
 _MAX_SCENE_LEN = 400
 
 SCENE_SYSTEM_PROMPT = (
-    "You write ONE short scene/environment sentence for a character photo. Describe "
-    "ONLY the environment, the activity she is doing, the mood, and the time of day. "
+    "You write ONE literal scene/environment sentence for a character photo — a CAMERA "
+    "INSTRUCTION for an image model, NOT a story. Name a concrete PLACE, ONE visible "
+    "ACTIVITY she is doing, and the LIGHT or time of day, using only what a camera can "
+    "see: objects, surfaces, furniture, light sources. NO metaphors or similes (no "
+    "'like...', 'as if...'), NO mood-prose or feelings (no 'cozy', 'serene', 'lost in "
+    "thought', 'tension easing into calm'), NO narration — physical detail only. "
     "It must be strictly IDENTITY-FREE: never mention appearance or identity — no hair, "
     "eyes, skin, body, figure, breasts, ethnicity, age, or words like woman/girl/blonde. "
-    "Keep it to a single vivid sentence, at most about 20 words.\n\n"
+    "Keep it to a single sentence, at most about 20 words.\n\n"
     "Output ONLY valid JSON: {\"scene\": \"...\"}. No markdown, no commentary, no extra keys."
 )
 
-# Deterministic, identity-free fallbacks (environment + activity + mood + time-of-day).
-# A generous, generic pool used when Venice is disabled/unavailable; the choice is
-# varied by the request so repeated clicks don't always return the same scene.
+# Deterministic, identity-free fallbacks — literal (place + visible activity + light/
+# time-of-day), no mood-prose, since each lands VERBATIM in the image prompt. A generous,
+# generic pool used when Venice is disabled/unavailable; the choice is varied by the
+# request so repeated clicks don't always return the same scene.
 _FALLBACK_SCENES = [
-    "relaxing on a sunlit apartment balcony in the warm late afternoon",
-    "curled up on a cozy sofa with a hot drink while rain taps the window",
-    "strolling through a quiet leafy park at golden hour",
-    "sitting by a cafe window on a bright, calm morning",
-    "unwinding in a softly lit bedroom late at night",
-    "leaning on a rooftop railing as the city lights flicker on at dusk",
-    "reading in a warm library nook on a lazy afternoon",
-    "walking barefoot along a quiet beach as the sun sets",
-    "cooking in a bright modern kitchen on a slow Sunday morning",
-    "browsing a bustling street market under strings of evening lights",
-    "watching the rain from a snug window seat with a blanket",
-    "sipping wine on a candlelit terrace on a mild summer evening",
+    "standing at an apartment balcony railing with a coffee mug in late afternoon sun",
+    "sitting on a sofa with a hot mug, rain running down the window",
+    "walking a tree-lined park path at golden hour",
+    "sitting at a cafe window table with a coffee cup in morning light",
+    "sitting on a bed in a lamp-lit bedroom late at night",
+    "leaning on a rooftop railing as city lights switch on at dusk",
+    "reading a book at a library table in afternoon light",
+    "walking barefoot along the shoreline as the sun sets",
+    "cooking at a stove in a bright kitchen on a Sunday morning",
+    "browsing stalls at a street market under strings of evening lights",
+    "sitting on a window seat under a blanket, watching rain on the glass",
+    "sitting at a candlelit terrace table with a wine glass on a summer evening",
 ]
 
 # Small occupation-themed openers so the scene nods to persona.occupation when known.
-# Keys are real OccupationType values (models/enums.py). All strictly identity-free
-# (place/activity/mood only).
+# Keys are real OccupationType values (models/enums.py). All strictly identity-free and
+# literal (place + visible activity + light only), no mood-prose.
 _OCCUPATION_SCENES = {
-    "nurse": "unwinding at home after a long hospital shift under soft evening light",
-    "student": "studying at a cozy library table late into the quiet evening",
-    "cook": "plating a dish in a warm restaurant kitchen during the dinner rush",
-    "bartender": "wiping down the counter of a dim, moody cocktail bar at night",
-    "yoga_instructor": "stretching on a mat in a calm, sunlit studio at dawn",
-    "fitness_coach": "cooling down in a bright gym after an early-morning session",
-    "model": "resting backstage between shots under warm studio lighting",
-    "photographer": "reviewing shots by a wide window in a bright loft studio",
-    "librarian": "reshelving books in a quiet, sunlit library on a slow afternoon",
-    "artist": "painting at an easel in a light-filled studio on a lazy afternoon",
-    "dancer": "catching her breath in a mirrored studio after rehearsal at dusk",
-    "writer": "typing at a cluttered desk by a rainy window late at night",
-    "secretary": "tidying a bright office desk in the calm of early morning",
-    "florist": "arranging bouquets in a fragrant flower shop on a bright morning",
-    "singer_musician": "soundchecking on a small stage under warm amber lights",
-    "flight_attendant": "sipping coffee in a quiet airport lounge before a night flight",
-    "hairdresser": "sweeping up a cozy salon as the last light fades outside",
+    "nurse": "sitting on a sofa at home in soft evening light after a hospital shift",
+    "student": "studying at a library table stacked with books in the evening",
+    "cook": "plating a dish at a steel counter in a restaurant kitchen during dinner service",
+    "bartender": "wiping down the counter of a dim cocktail bar at night",
+    "yoga_instructor": "stretching on a mat by tall windows in soft dawn light",
+    "fitness_coach": "resting on a bench in a bright gym after an early-morning workout",
+    "model": "sitting backstage on a stool between shots under warm lights",
+    "photographer": "reviewing photos on a camera by a wide loft window in daylight",
+    "librarian": "reshelving books between tall library shelves in afternoon light",
+    "artist": "painting at an easel by a large window in afternoon light",
+    "dancer": "resting against a mirrored wall in a dance hall after rehearsal at dusk",
+    "writer": "typing at a cluttered desk by a rain-streaked window late at night",
+    "secretary": "tidying a bright office desk in the early morning",
+    "florist": "arranging bouquets on a workbench in a flower shop in morning light",
+    "singer_musician": "soundchecking with a microphone on a small stage under amber lights",
+    "flight_attendant": "sitting with a coffee cup in an airport lounge before a night flight",
+    "hairdresser": "sweeping the floor of a salon as daylight fades in the windows",
 }
 
 

@@ -71,6 +71,69 @@ LIGHTING_PHRASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# WS3 seeded shot/pose variety.
+#
+# When character-generation variety is ON (a variety_seed is threaded into the
+# assembler) and the caller sent no explicit shot, the assembler synthesizes a
+# varied shot and appends a body-position phrase from these pools instead of the
+# single hero default — so a batch of cards stops looking identical. Values reuse
+# the EXISTING phrase tables above; repetition in the framing/angle pools encodes
+# weighting (keep the rotation coherent: mostly waist_up/chest_up at eye level,
+# with occasional wider crops / turned angles). Phrases describe camera + stance
+# ONLY — never identity, outfit, or scene — so they compose with any locked block.
+# ---------------------------------------------------------------------------
+_FRAMING_VARIETY_POOL = [
+    "waist_up", "waist_up", "waist_up",
+    "chest_up", "chest_up",
+    "portrait_closeup",
+    "three_quarter",
+    "full_body",
+]
+_CAMERA_ANGLE_VARIETY_POOL = [
+    "eye_level", "eye_level", "eye_level", "eye_level",
+    "three_quarter_view", "three_quarter_view",
+    "side_profile",
+    "high_angle",
+    "low_angle",
+]
+_EXPRESSION_VARIETY_POOL = [
+    "soft_smile", "neutral", "playful", "seductive", "confident", "laughing",
+]
+
+POSE_VARIETY_PHRASES = [
+    "standing with her weight on one hip, one hand in her pocket",
+    "seated, leaning slightly toward the camera",
+    "glancing back over her shoulder",
+    "leaning against a wall, arms loosely crossed",
+    "one hand resting at the nape of her neck",
+    "standing with arms relaxed at her sides, chin slightly lifted",
+    "perched on the edge of a seat, leaning forward on one elbow",
+    "turning at the waist to glance toward the camera",
+    "one hand tucked into her waistband, weight shifted onto one leg",
+    "gently tucking a strand of hair back, head tilted",
+]
+
+
+def varied_shot_fields(rng) -> dict:
+    """
+    Seeded weighted pick of framing/angle/expression enum VALUES (WS3). Consumes
+    the rng in a fixed order (framing, angle, expression) so it stays reproducible.
+    The returned dict feeds ShotOptions(**fields); repetition in the pools weights
+    the rotation toward coherent hero crops.
+    """
+    return {
+        "framing": rng.choice(_FRAMING_VARIETY_POOL),
+        "angle": rng.choice(_CAMERA_ANGLE_VARIETY_POOL),
+        "expression": rng.choice(_EXPRESSION_VARIETY_POOL),
+    }
+
+
+def pose_variety_phrase(rng) -> str:
+    """Seeded pick of a scene-neutral, identity-free body-position phrase (WS3)."""
+    return rng.choice(POSE_VARIETY_PHRASES)
+
+
 def framing_tokens(shot) -> List[str]:
     """
     The deterministic shot phrases that MUST survive prompt polish: framing +

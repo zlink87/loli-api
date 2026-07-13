@@ -963,6 +963,186 @@ def test_outfit_prompt_identity_anchors_appended():
 
 
 # ---------------------------------------------------------------------------
+# c34 (WS3) — age_phrase buckets: each carries its number + distinct adult
+# vocabulary; no youth/underage words anywhere across the 18-50 range.
+# ---------------------------------------------------------------------------
+def test_age_phrase_buckets():
+    a18, a25, a45 = ap.age_phrase(18), ap.age_phrase(25), ap.age_phrase(45)
+    # Number present + three distinct bucket strings (18/25/45 no longer all mid-20s).
+    assert "18" in a18 and "25" in a25 and "45" in a45
+    assert len({a18, a25, a45}) == 3
+    assert "fresh-faced" in a18
+    assert "mid-twenties" in a25
+    assert "forties" in a45
+    # SAFETY: every age is adult-worded, and no youth/underage word ever appears.
+    banned = ("teen", "teenage", "adolescent", "child", "girl")
+    for age in range(18, 51):
+        text = ap.age_phrase(age).lower()
+        assert "adult" in text or "woman" in text, f"age {age} not adult-worded: {text!r}"
+        for w in banned:
+            assert w not in text, f"age {age} contains banned youth word {w!r}: {text!r}"
+    # None/0 -> "" (unchanged).
+    assert ap.age_phrase(None) == "" and ap.age_phrase(0) == ""
+    print("c34 OK: age buckets carry number + distinct adult vocab; no youth words 18-50")
+
+
+# ---------------------------------------------------------------------------
+# c35 (WS3) — default-clothing pool: seeded variety + LOW/SUGGESTIVE coverage
+# guard; variety_seed=None returns the legacy single string (kill-switch).
+# ---------------------------------------------------------------------------
+def test_generation_default_clothing_pool_and_coverage_guard():
+    from services.outfit_vocab import (
+        generation_outfit_clause,
+        _GENERATION_DEFAULT_CLOTHING,
+        OUTFIT_DESCRIPTIONS,
+    )
+
+    # variety_seed=None -> the legacy single string, byte-identical, for every level.
+    for level in NudityLevel:
+        assert generation_outfit_clause(None, level) == _GENERATION_DEFAULT_CLOTHING[level]
+
+    # A variety_seed yields >1 distinct default outfit at LOW across a sample of seeds.
+    low_variants = {generation_outfit_clause(None, NudityLevel.LOW, variety_seed=s) for s in range(30)}
+    assert len(low_variants) > 1, low_variants
+
+    # Coverage guard present at LOW and SUGGESTIVE on the varied default path.
+    low_v = generation_outfit_clause(None, NudityLevel.LOW, variety_seed=1)
+    sug_v = generation_outfit_clause(None, NudityLevel.SUGGESTIVE, variety_seed=1)
+    assert "modest neckline, shoulders and midriff covered" in low_v
+    assert "covered except a hint of cleavage" in sug_v
+    # MEDIUM+ get NO coverage guard (they are meant to expose).
+    med_v = generation_outfit_clause(None, NudityLevel.MEDIUM, variety_seed=1)
+    assert "shoulders and midriff covered" not in med_v
+    assert "covered except a hint of cleavage" not in med_v
+
+    # Same seed reproducible.
+    assert generation_outfit_clause(None, NudityLevel.LOW, variety_seed=7) == \
+        generation_outfit_clause(None, NudityLevel.LOW, variety_seed=7)
+
+    # A specific outfit ignores variety_seed (unchanged OUTFIT_DESCRIPTIONS path).
+    assert generation_outfit_clause(OutfitType.BUSINESS_SUIT, NudityLevel.LOW, variety_seed=3) == \
+        generation_outfit_clause(OutfitType.BUSINESS_SUIT, NudityLevel.LOW)
+    assert OUTFIT_DESCRIPTIONS[OutfitType.BUSINESS_SUIT][NudityLevel.LOW] in \
+        generation_outfit_clause(OutfitType.BUSINESS_SUIT, NudityLevel.LOW, variety_seed=3)
+    print("c35 OK: default-clothing pool varies by seed; coverage guard at LOW/SUGGESTIVE; None=legacy")
+
+
+# ---------------------------------------------------------------------------
+# c36 (WS3) — seeded shot variety: different seeds vary framing; same seed is
+# reproducible; variety_seed=None reproduces the waist-up/eye-level hero default
+# (kill-switch invariant); an explicit client shot still wins.
+# ---------------------------------------------------------------------------
+def test_generation_shot_variety_seeded():
+    from models.requests import ShotOptions
+    from models.enums import ShotFramingType
+    from services import camera_vocab as cv
+
+    persona = PersonaOptions(
+        name="Nova", ethnicity="asian", age=26, hairStyle="ponytail", hairColor="black",
+        eyeColor="brown", bodyType="average", breastSize="medium",
+    )
+    # Kill-switch: variety_seed=None -> hero default waist-up / eye-level, no pose phrase.
+    base = pg.assemble_generation_prompt(persona, nudity_level=NudityLevel.LOW)[0]
+    assert "waist-up portrait" in base
+    assert "shot at eye level, facing the camera, centered composition" in base
+    assert not any(ph in base for ph in cv.POSE_VARIETY_PHRASES)
+
+    # Different seeds vary the framing across a sample.
+    framings = set()
+    for s in range(40):
+        pos = pg.assemble_generation_prompt(persona, nudity_level=NudityLevel.LOW, variety_seed=s)[0]
+        framings.add(frozenset(fp for fp in cv.FRAMING_PHRASES.values() if fp in pos))
+    assert len(framings) > 1, framings
+
+    # Same seed reproducible.
+    assert pg.assemble_generation_prompt(persona, nudity_level=NudityLevel.LOW, variety_seed=13)[0] == \
+        pg.assemble_generation_prompt(persona, nudity_level=NudityLevel.LOW, variety_seed=13)[0]
+
+    # An explicit client shot wins even with variety on.
+    forced = pg.assemble_generation_prompt(
+        persona, shot=ShotOptions(framing=ShotFramingType.FULL_BODY),
+        nudity_level=NudityLevel.LOW, variety_seed=13,
+    )[0]
+    assert "full-body shot, whole figure in frame" in forced
+    print("c36 OK: seeded shot variety; None=waist-up/eye-level kill-switch; explicit shot wins")
+
+
+# ---------------------------------------------------------------------------
+# c37 (WS3) — pose_text used verbatim and suppresses the seeded pool pick;
+# blank/whitespace pose_text falls back to the pool.
+# ---------------------------------------------------------------------------
+def test_generation_pose_text_verbatim_suppresses_pool():
+    from services import camera_vocab as cv
+
+    persona = PersonaOptions(
+        name="Nova", ethnicity="asian", age=26, hairStyle="ponytail", hairColor="black",
+        eyeColor="brown", bodyType="average", breastSize="medium",
+    )
+    marker = "balancing a book on her head, arms held out"
+    pos = pg.assemble_generation_prompt(
+        persona, nudity_level=NudityLevel.LOW, variety_seed=42, pose_text=marker,
+    )[0]
+    assert marker in pos
+    assert not any(ph in pos for ph in cv.POSE_VARIETY_PHRASES)  # pool pick suppressed
+
+    # Whitespace-only pose_text is NOT an override -> pool pick still applied.
+    pos_blank = pg.assemble_generation_prompt(
+        persona, nudity_level=NudityLevel.LOW, variety_seed=42, pose_text="   ",
+    )[0]
+    assert any(ph in pos_blank for ph in cv.POSE_VARIETY_PHRASES)
+    print("c37 OK: pose_text used verbatim and suppresses the pool pick; blank falls back to pool")
+
+
+# ---------------------------------------------------------------------------
+# c38 (WS3) — flavor gating: kink moods dropped at LOW/SUGGESTIVE, kept at
+# MEDIUM+; personality/occupation still express at every level.
+# ---------------------------------------------------------------------------
+def test_generation_flavor_gating_by_nudity():
+    persona = PersonaOptions(
+        name="Ivy", ethnicity="latina", age=27, hairStyle="curly", hairColor="black",
+        eyeColor="brown", bodyType="curvy", breastSize="large",
+        personality="temptress", occupation="dancer", kinks=["bondage", "spanking"],
+    )
+    kink0 = ap.phrase(ap.KINK_PHRASES, "bondage")
+    persona_expr = ap.phrase(ap.PERSONALITY_PHRASES, "temptress")
+    occ = ap.phrase(ap.OCCUPATION_PHRASES, "dancer")
+
+    for level in (NudityLevel.LOW, NudityLevel.SUGGESTIVE):
+        pos = pg.assemble_generation_prompt(persona, nudity_level=level)[0]
+        assert kink0 not in pos, f"{level}: kink mood should be dropped"
+        assert persona_expr in pos and occ in pos, f"{level}: personality/occupation dropped"
+
+    for level in (NudityLevel.MEDIUM, NudityLevel.REVEALING, NudityLevel.HIGH):
+        pos = pg.assemble_generation_prompt(persona, nudity_level=level)[0]
+        assert kink0 in pos, f"{level}: kink mood should be retained (today's behavior)"
+    print("c38 OK: kink moods dropped at LOW/SUGGESTIVE, kept at MEDIUM+; personality/occupation always kept")
+
+
+# ---------------------------------------------------------------------------
+# c39 (WS3) — the locked identity block (age + ethnicity/hair/eyes/body/breasts)
+# is byte-identical whether or not variety is on, and always present verbatim.
+# ---------------------------------------------------------------------------
+def test_variety_preserves_locked_identity():
+    persona = PersonaOptions(
+        name="Mara", ethnicity="black_afro", age=31, hairStyle="bun", hairColor="black",
+        eyeColor="brown", bodyType="athletic", breastSize="small",
+    )
+    _pos_none, _neg, locked_none = pg.assemble_generation_prompt(persona, nudity_level=NudityLevel.LOW)
+    for s in (1, 2, 7, 100):
+        pos, _n, locked = pg.assemble_generation_prompt(
+            persona, nudity_level=NudityLevel.LOW, variety_seed=s
+        )
+        assert locked == locked_none, f"seed {s}: locked identity changed under variety"
+        assert locked in pos, f"seed {s}: locked block not present verbatim"
+    # The locked block carries the age bucket + every attribute.
+    assert "31 years old" in locked_none
+    assert "a Black woman with warm dark-brown skin" in locked_none
+    assert "black hair" in locked_none and "brown eyes" in locked_none
+    assert "toned athletic figure" in locked_none and "small breasts" in locked_none
+    print("c39 OK: locked identity (age + ethnicity/hair/eyes/body/breasts) unchanged by variety")
+
+
+# ---------------------------------------------------------------------------
 # Plain-script runner (pytest not required)
 # ---------------------------------------------------------------------------
 def _run_all():
@@ -998,6 +1178,12 @@ def _run_all():
         test_outfit_detail_dominant_renders_caption_alone,
         test_pose_prompt_identity_anchors_appended,
         test_outfit_prompt_identity_anchors_appended,
+        test_age_phrase_buckets,
+        test_generation_default_clothing_pool_and_coverage_guard,
+        test_generation_shot_variety_seeded,
+        test_generation_pose_text_verbatim_suppresses_pool,
+        test_generation_flavor_gating_by_nudity,
+        test_variety_preserves_locked_identity,
     ]
     failures = 0
     for fn in tests:

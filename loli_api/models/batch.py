@@ -107,7 +107,9 @@ class BatchControls(BaseModel):
         default=True,
         description=(
             "Emit one coherent multi-part story (a story title + per-beat narrative prose, "
-            "one scene per photo). Additive metadata only — never affects render fields."
+            "one scene per photo). The narrative/beat_description prose is gallery-only, but "
+            "the story director ALSO drives render fields: setting, activity, pose_detail, "
+            "outfit_detail and expression reach the image prompt via scene_mapper."
         ),
     )
     reactor_restore_visibility: Optional[float] = Field(

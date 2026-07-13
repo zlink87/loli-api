@@ -171,6 +171,7 @@ class OccupationType(str, Enum):
     DESIGNER = "designer"
     PHARMACIST = "pharmacist"
     NUTRITIONIST = "nutritionist"
+    TEACHER = "teacher"
 
 
 class KinkType(str, Enum):

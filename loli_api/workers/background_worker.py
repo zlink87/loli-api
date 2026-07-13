@@ -4,6 +4,7 @@ Based on queue_worker pattern from app.py lines 1915-2075.
 """
 import asyncio
 import base64
+import hashlib
 import json
 import random
 import traceback
@@ -218,9 +219,26 @@ class BackgroundWorker:
             token_usage = None
             negative_prompt = None
 
-            # Camera/framing options: hero defaults (waist-up, eye level,
-            # polished) when the client sends no shot block.
-            shot = getattr(job.request, "shot", None) or ShotOptions()
+            # Camera/framing options: thread the RAW shot (may be None) into prompt
+            # assembly so it owns the hero-default fallback (and, with variety on,
+            # seeded shot rotation). A separate defaulted `shot` drives the
+            # non-varied downstream workflow params (photo style / time of day / log).
+            raw_shot = getattr(job.request, "shot", None)
+            shot = raw_shot or ShotOptions()
+
+            # WS3 variety seed: OFF -> None (byte-identical legacy prompt). ON -> the
+            # explicit output.seed when the client set one, else a stable per-job hash
+            # so batch items (distinct job_ids) diverge while each job stays
+            # reproducible. Independent of the image sampling `seed` computed below.
+            variety_seed = None
+            if settings.GENERATION_VARIETY_ENABLED:
+                _out = getattr(job.request, "output", None)
+                _explicit_seed = getattr(_out, "seed", None) if _out else None
+                variety_seed = (
+                    _explicit_seed
+                    if _explicit_seed is not None
+                    else int(hashlib.sha1(job.job_id.encode()).hexdigest()[:8], 16)
+                )
 
             # Deterministic assembly from persona enums (identity + framing +
             # clothing always present) plus the raw scene hint, verbatim.
@@ -229,10 +247,12 @@ class BackgroundWorker:
                     await self.prompt_gen.generate_generation_prompt(
                         persona=job.request.persona,
                         context=context,
-                        shot=shot,
+                        shot=raw_shot,
                         outfit=getattr(job.request, "outfit", None),
                         nudity_level=getattr(job.request, "nudityLevel", NudityLevel.LOW),
                         accessories=getattr(job.request, "accessories", None),
+                        variety_seed=variety_seed,
+                        pose_text=getattr(job.request, "poseText", None),
                     )
                 )
             except Exception as e:

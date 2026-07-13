@@ -11,7 +11,10 @@ Runs under pytest or directly: python loli_api/tests/test_scene_writer.py
 import asyncio
 
 from models.requests import PersonaOptions, SceneRandomizeRequest
-from services.scene_writer import SceneWriter, _FALLBACK_SCENES, _OCCUPATION_SCENES
+from services.scene_writer import (
+    SceneWriter, SCENE_SYSTEM_PROMPT, _FALLBACK_SCENES, _OCCUPATION_SCENES,
+)
+from services.prompt_constants import has_banned_style_words
 from api.v1.endpoints import scenes as ep
 
 
@@ -123,6 +126,31 @@ def test_venice_scene_extracted_from_wrapping_text():
     scene, provider = asyncio.run(w.randomize())
     assert provider == "venice"
     assert "cafe" in scene.lower()
+
+
+# ---------------------------------------------------------------------------
+# WS2: the scene sentence must be literal (camera-sees), not flowery mood-prose.
+# ---------------------------------------------------------------------------
+def test_scene_system_prompt_demands_literal_no_metaphor():
+    low = SCENE_SYSTEM_PROMPT.lower()
+    assert "camera instruction" in low          # framed as a render instruction, not a story
+    assert "metaphor" in low                     # metaphors/similes explicitly banned
+    assert "identity-free" in low                # identity firewall preserved
+    assert '{"scene": "..."}' in SCENE_SYSTEM_PROMPT  # JSON contract the parser depends on
+
+
+def test_fallback_scenes_are_literal_no_moodprose_or_style_words():
+    # The fallback scene lands VERBATIM in the image prompt, so it must be concrete and must
+    # carry no BANNED_STYLE_WORDS (scene_mapper._clean_scene_part drops those wholesale) and
+    # no leftover mood-prose adjectives.
+    mood_words = ("cozy", "lazy", "serene", "unwinding", "moody", "snug",
+                  "tension easing", " calm")
+    for scene in list(_FALLBACK_SCENES) + list(_OCCUPATION_SCENES.values()):
+        low = scene.lower()
+        assert not has_banned_style_words(scene), f"banned style word in fallback: {scene!r}"
+        for w in mood_words:
+            assert w not in low, f"mood-prose {w!r} survived in fallback: {scene!r}"
+        _assert_identity_free(scene)             # still strictly identity-free
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 # Admin UI Work Order — Story Batches v2 (persona-driven stories, nudity arc, structured prompts)
 
 **Audience:** the agent/developer building the **admin panel frontend** (separate repo).
-**Backend status:** shipped and on `main` (latest: `73f4d79c`). API is additive and back-compatible — the current admin panel keeps working unchanged; this work order only *adds* controls that expose new capability.
+**Backend status:** shipped and on `main` (latest: `1e5ea55a`, 2026-07-10 quality overhaul — see §8 for WI-10…WI-14). API is additive and back-compatible — the current admin panel keeps working unchanged; this work order only *adds* controls that expose new capability.
 
 **Source of truth for the contract:** [`docs/ADMIN_STORY_BATCHES_INTEGRATION.md`](./ADMIN_STORY_BATCHES_INTEGRATION.md) — read §3 (endpoints), §4 (request/response shapes), §7 (enums), and the **dated addenda** at the bottom (currently five: 07-07 "photo management + time-of-day"; 07-09 "nudity arc, structured description channels, outfit strength"; 07-09 "5-level nudity scale + `period_days`"; 07-09 "auto-generate the full persona on character creation"; 07-09 "per-character nude base (additive dressing for batches)"). `/openapi.json` is canonical for enum option lists. This work order tells you *what UI to build*; that doc tells you *the exact field shapes*.
 
@@ -80,7 +80,7 @@ All additions live on `controls` (in `BatchCreate`), in each item's `scene_spec`
 - **`expression`** as a small mood tag when present.
 - **`nudityLevel`** as a small badge (Fully clothed / Suggestive / Partial nudity / Mostly nude / Full nudity) — this makes the arc *visible* as you scan the set.
 
-**Notes:** both new fields are `null` on the deterministic-fallback planner (only the Venice story director authors them) — render nothing when `null`, never show "null". Occasionally (~1 in 8) the LLM's `outfit_detail` may not perfectly match the `outfit` enum; the enum label is the reliable one, so prefer it if you only show one.
+**Notes:** both new fields are `null` on the deterministic-fallback planner (only the Venice story director authors them) — render nothing when `null`, never show "null". Occasionally (~1 in 8) the LLM's `outfit_detail` may not perfectly match the `outfit` enum; the enum label is the reliable one, so prefer it if you only show one. **⚠️ Superseded 2026-07-10:** since the caption-first render change (WI-12, §8), `outfit_detail` IS the rendered garment whenever present — prefer the caption over the enum, never the reverse.
 
 **Acceptance criteria:** a dry-run storyboard renders `outfit_detail`/`expression`/`nudityLevel` when present and degrades cleanly to the enum labels when absent.
 
@@ -208,6 +208,11 @@ Pull option lists from `/openapi.json → components.schemas`: `NudityLevel`, `O
 - [ ] Character creation sends `generate_persona: true` (WI-8); the created character's persona shows all 6+ generated fields populated, not just System Prompt; a typed `bio` is preserved.
 - [ ] Nude-base generate/status UI (WI-9) present on the character detail view; batches for that character visibly stop showing her original outfit ghosting through.
 - [ ] No appearance text ever enters a batch request; existing batches (no new fields) still work.
+- [x] Outdated nude-base warning (WI-10) on the batch launch screen and the WI-9 card when `createdAt` predates 2026-07-10. *(panel: 2026-07-10)*
+- [x] `outfit_prompt_mode` omitted unless explicitly chosen (WI-11, re-confirmed) + "auto-switches to dress on nude-base characters" hint. *(panel: 2026-07-10)*
+- [x] Cards show `pose_detail` and prefer `outfit_detail` over the enum (WI-12); legacy items fall back to enum labels. *(panel: 2026-07-10)*
+- [x] ReActor face-restore knobs (WI-13) in Advanced, empty by default, omitted when untouched. *(panel: 2026-07-10)*
+- [x] Appearance fields marked "recommended for photo consistency" on both character forms (WI-14). *(panel: 2026-07-10)*
 
 ---
 
@@ -271,3 +276,96 @@ and reuses the previewed batch's persisted `scene_spec` rows as-is. So the
 only path that renders exactly what was previewed. Consider making the UI's
 primary Generate action reuse an existing preview (`dry_run:true` first, then
 launch that) rather than exposing a plain "Generate" that silently re-plans.
+
+---
+
+## 8. Addendum (2026-07-10) — story-batch quality overhaul (WI-10…WI-14)
+
+**Backend status:** shipped on `main` (`12520d0a`..`1e5ea55a`, 2026-07-10). All
+changes additive and back-compatible — nothing in the panel breaks if it sends
+no new fields.
+**Panel status:** WI-10…WI-14 all implemented in the admin panel on 2026-07-10.
+
+New `controls` / `scene_spec` fields (delta, same table convention as §1):
+
+| New field | Where | Type / range | Purpose |
+|---|---|---|---|
+| `pose_detail` | item `scene_spec` | `string｜null` | Freeform body-position sentence (e.g. "curled up on the sofa, mug in both hands"). Pose label when present; the `pose` enum is the fallback for legacy items. **See WI-12.** |
+| `outfit_detail_dominant` | item `scene_spec` | `bool` | When `true`, `outfit_detail` IS the rendered garment and the `outfit` enum is internal bookkeeping. **See WI-12.** |
+| `reactor_restore_visibility` | `controls` | `float 0–1｜null` | ReActor face-restore visibility; `null`/omitted = server default. **See WI-13.** |
+| `reactor_codeformer_weight` | `controls` | `float 0–1｜null` | CodeFormer weight; lower = less face-beautification drift between photos. **See WI-13.** |
+
+### WI-10 — Nude-base regeneration nudge (**required**, small)
+
+**Why:** every existing character's stored nude base was rendered with the old
+glamour/oily prompt and a dirty background, and every batch reuses the stored
+base. The API now renders nude bases neutral-matte automatically — but only on
+(re)generation, so admins must regenerate once per character (the existing WI-9
+button → `POST /v1/characters/{id}/nude-base`). `GET /v1/characters/{id}/nude-base`
+returns `createdAt`/`status` to detect stale bases.
+
+**Build:** on the batch-create screen, when the character's nude base
+`createdAt` is before **2026-07-10**, show a warning chip "Nude base is
+outdated — regenerate before batching" next to the WI-9 control.
+
+**Panel implementation:** cutoff constant `NUDE_BASE_STYLE_CUTOFF`
+(`src/lib/constants.ts`); the batch launch dialog fetches nude-base status on
+open and shows the warning chip at the top; the WI-9 Nude base card also shows
+an "Outdated" badge + regenerate copy so the nudge sits next to the fix.
+
+**Acceptance criteria:** a character whose base succeeded before 2026-07-10
+shows the chip in the launch dialog and the badge on the card; regenerating
+clears both; characters with no base (or a fresh one) show nothing new.
+
+### WI-11 — Never send `outfit_prompt_mode` unless explicitly chosen (**required**, tiny)
+
+Re-confirmation of the WI-2 correction (an earlier panel version hardcoded
+`"standard"`, which weakens dressing): the panel omits
+`controls.outfit_prompt_mode` unless the admin picks a value in Advanced.
+**New server behavior to reflect in UI copy:** when the character has a nude
+base, the server auto-overrides this control to `"dress"` for garment scenes.
+
+**Panel implementation:** omission confirmed already in place
+(`outfitPromptModeTouched` guard). Hint added next to the control —
+"auto-switches to dress on nude-base characters" (phrased concretely when the
+dialog knows the character has a base).
+
+### WI-12 — Storyboard/result cards: per-photo `pose_detail` + caption-first garments (recommended; display-only; extends WI-3)
+
+`scene_spec` on batch items now carries `pose_detail` and
+`outfit_detail_dominant` (table above). Rules:
+
+- **Pose label** = `pose_detail` when present; fall back to the `pose` enum
+  name when `null` (legacy items).
+- **Garment label** = `outfit_detail || prettified(outfit)` — **never show the
+  enum name over a present caption.** This supersedes the WI-3 note that
+  preferred the enum: since the caption-first render change, `outfit_detail` IS
+  the rendered garment; the enum is bookkeeping.
+
+**Panel implementation:** storyboard cards render both captions as text lines
+and suppress the corresponding enum chips whenever the caption exists; result
+cells caption as `garment · pose` with the same fallbacks. Legacy items render
+unchanged.
+
+### WI-13 — Advanced: ReActor face-restore knobs (optional; extends WI-2)
+
+Two optional `controls` floats (table above), both 0–1, `null` = server
+default. Collapsed **Advanced** inputs, empty by default; omitted from the
+request when untouched (same rule as WI-2). Helper text: "Lower codeformer
+weight = less face beautification drift between photos."
+
+### WI-14 — Character form: appearance anchors nudge (ties into WI-4)
+
+The render now anchors identity with the character's `hair_style`,
+`hair_color`, `eye_color`, `body_type`, `breast_size`. Characters with these
+empty get weaker cross-photo consistency — mark them **"recommended for photo
+consistency"** on the character form(s).
+
+**Panel implementation:** both character forms (Generate page and Batch Create
+draft editor) mark all five fields with the hint + an explanatory tooltip.
+
+### Explicitly NOT panel scope
+
+`SOLO_BG_PERSON_THRESHOLD`, `COMFYUI_POSE_WORKFLOW_PATH_2511`, and the
+soft-LoRA outfit workflow variant are server `.env` A/B experiments (default
+OFF), handled on the API deployment side.

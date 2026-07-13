@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from .endpoints import (
     generate, jobs, preview, edit, outfit, pose, background, pipeline,
-    characters, batches, video, persona, nude_base, scenes,
+    characters, batches, video, persona, nude_base, scenes, options,
 )
 
 # Create main API router
@@ -26,6 +26,7 @@ api_router.include_router(video.router)
 api_router.include_router(persona.router)
 api_router.include_router(nude_base.router)
 api_router.include_router(scenes.router)
+api_router.include_router(options.router)
 
 
 def configure_services(

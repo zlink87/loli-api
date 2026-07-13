@@ -26,6 +26,7 @@ explicit — LOW < SUGGESTIVE < MEDIUM < REVEALING < HIGH:
 Exposure is strictly opt-in past LOW; a LOW-nudity request must never render
 a costume that is secretly half-undressed.
 """
+import random
 from typing import Dict, List, Optional
 
 from models.enums import OutfitType, AccessoryType, NudityLevel
@@ -407,12 +408,65 @@ ACCESSORY_DESCRIPTIONS: Dict[AccessoryType, str] = {
 
 # Neutral fallback clothing clauses when the admin picks a nudity level but no
 # specific outfit. Keeps generation dressed-by-default at LOW.
+# LEGACY single-string map: used verbatim when variety is OFF (variety_seed=None),
+# so the kill-switch path stays byte-identical to the pre-WS3 behavior.
 _GENERATION_DEFAULT_CLOTHING: Dict[NudityLevel, str] = {
     NudityLevel.LOW: "fully clothed in a stylish, well-fitted outfit",
     NudityLevel.SUGGESTIVE: "in a stylish, well-fitted outfit with a teasing hint of skin at the neckline or hem",
     NudityLevel.MEDIUM: "in a revealing, partially-exposed outfit that bares some skin",
     NudityLevel.REVEALING: "in a scarcely-there outfit, mostly undone and barely covering, most of her body exposed",
     NudityLevel.HIGH: "nude, bare skin on display",
+}
+
+# WS3 default-outfit POOLS: when variety is ON and no specific outfit is chosen, a
+# seeded pick from the level's pool dresses each (batch) card in a different
+# concrete, everyday-real garment (garment + color + fabric) instead of the vague
+# legacy single string, so a batch stops rendering the same outfit N times. No
+# studio/glamour/editorial/photoshoot language (that claims its own look). HIGH is
+# a single "bare" entry (kept as today — a nude request has nothing to vary).
+_GENERATION_DEFAULT_CLOTHING_POOL: Dict[NudityLevel, List[str]] = {
+    NudityLevel.LOW: [
+        "wearing a rust-orange ribbed knit sweater and high-waisted blue jeans",
+        "in a white linen button-up shirt tucked into tailored black trousers",
+        "wearing a forest-green wrap blouse and beige slacks",
+        "in a soft grey oversized cardigan over a fitted cream tee and dark jeans",
+        "wearing a burgundy turtleneck and a pleated camel midi skirt",
+        "in a chambray denim shirt dress belted at the waist, hem at the knee",
+    ],
+    NudityLevel.SUGGESTIVE: [
+        "wearing a fitted black ribbed top with a scooped neckline and high-waisted jeans",
+        "in a silky mauve wrap blouse loosely knotted at the waist and slim tailored trousers",
+        "wearing a soft off-the-shoulder oatmeal knit sweater and a short denim skirt",
+        "in a cropped fitted white tee baring a sliver of midriff and low-rise jeans",
+        "wearing a snug rust henley with the top buttons undone and skinny jeans",
+        "in a clingy ribbed olive midi dress with a modest side slit at the hem",
+    ],
+    NudityLevel.MEDIUM: [
+        "in an unbuttoned oversized chambray shirt over a lace bralette, midriff bare",
+        "wearing a deep-cut satin cami with no bra and low-slung cotton shorts",
+        "in a sheer black mesh long-sleeve top over a bralette, midriff bare",
+        "wearing a loosely tied short robe slipping to show cleavage and thigh",
+        "in a cropped tank pushed up under the bust with unbuttoned denim shorts",
+    ],
+    NudityLevel.REVEALING: [
+        "in a barely-tied silk robe hanging open over bare skin, mostly exposed",
+        "wearing only an unbuttoned oversized shirt slipping off one shoulder, little underneath",
+        "in a sheer slip pushed off both shoulders, clinging and see-through",
+        "wearing only a thong and an open shirt that covers almost nothing",
+        "in a loosely draped sheet slipping low off the body, most of her skin bare",
+    ],
+    NudityLevel.HIGH: [
+        "nude, bare skin on display",
+    ],
+}
+
+# WS3 positive coverage guard, appended to the default clothing clause at modest
+# levels only. Negatives are inert at cfg=1, so coverage has to be asserted with
+# POSITIVE tokens or a "low" request drifts toward exposure on the NSFW base.
+# LOW/SUGGESTIVE only; MEDIUM+ are meant to expose, so no guard there.
+_GENERATION_COVERAGE_GUARD: Dict[NudityLevel, str] = {
+    NudityLevel.LOW: ", modest neckline, shoulders and midriff covered",
+    NudityLevel.SUGGESTIVE: ", covered except a hint of cleavage",
 }
 
 
@@ -430,6 +484,7 @@ def generation_outfit_clause(
     outfit: Optional[OutfitType] = None,
     nudity_level: NudityLevel = NudityLevel.LOW,
     accessories: Optional[List[AccessoryType]] = None,
+    variety_seed: Optional[int] = None,
 ) -> str:
     """
     Declarative clothing clause for a character-generation prompt.
@@ -438,7 +493,11 @@ def generation_outfit_clause(
     * OutfitType.NAKED   -> the graded NAKED description verbatim (no "wearing").
     * No outfit          -> a neutral clothed/partly-clothed/nude fallback so the
                             character is never silently left for the model to
-                            default to nudity.
+                            default to nudity. With ``variety_seed`` set, a seeded
+                            pick from the level's pool (concrete garment, so batch
+                            cards differ) plus a positive coverage guard at
+                            LOW/SUGGESTIVE; with ``variety_seed`` None, the legacy
+                            single string (byte-identical to pre-WS3).
     Accessories are appended when present.
     """
     if outfit == OutfitType.NAKED:
@@ -451,6 +510,12 @@ def generation_outfit_clause(
         else:
             desc = str(getattr(outfit, "value", outfit)).replace("_", " ")
         clause = f"wearing {desc}"
+    elif variety_seed is not None:
+        pool = _GENERATION_DEFAULT_CLOTHING_POOL.get(
+            nudity_level, _GENERATION_DEFAULT_CLOTHING_POOL[NudityLevel.LOW]
+        )
+        clause = random.Random(variety_seed).choice(pool)
+        clause += _GENERATION_COVERAGE_GUARD.get(nudity_level, "")
     else:
         clause = _GENERATION_DEFAULT_CLOTHING.get(
             nudity_level, _GENERATION_DEFAULT_CLOTHING[NudityLevel.LOW]

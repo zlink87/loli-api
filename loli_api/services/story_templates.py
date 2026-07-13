@@ -538,6 +538,7 @@ OCCUPATION_WORK_LOCATIONS: Dict[str, Tuple[L, ...]] = {
     "designer": (L.HOME_OFFICE, L.OFFICE),
     "pharmacist": (L.LAB, L.HOSPITAL_WARD),
     "nutritionist": (L.OFFICE, L.GYM),
+    "teacher": (L.CLASSROOM, L.LIBRARY),
 }
 
 # Fallback for occupations not in the map above (or None).
