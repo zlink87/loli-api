@@ -43,6 +43,7 @@ from api.v1.endpoints.background import build_background_prompt, prepare_backgro
 
 from services import head_mask as head_mask_service
 from services import pose_assets
+from services import attribute_phrases as ap
 from services.prompt_constants import apply_edit_photo_style
 from services.workflow_meta import describe_template
 
@@ -77,6 +78,26 @@ def _stage_image(image_bytes: bytes, prefix: str) -> tuple:
     name = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
     b64 = base64.b64encode(image_bytes).decode("ascii")
     return name, [{"name": name, "image": f"data:image/png;base64,{b64}"}]
+
+
+def _maybe_crop_face_donor(face_bytes: bytes, job_id: str = "") -> bytes:
+    """Return the donor bytes to stage for node 210. When ``settings.FACE_REF_CROP`` is on,
+    crop to the primary face region (so the hero's own scenery never enters the pose graph's
+    image3 reference latents); otherwise, or on a detector miss / tiny crop / crop error,
+    return the FULL image unchanged. Never raises — ReActor re-detects the donor itself, so a
+    full-image fallback is always swap-safe. Flag off -> byte-identical to legacy staging."""
+    if not settings.FACE_REF_CROP:
+        return face_bytes
+    try:
+        cropped, did_crop = head_mask_service.crop_face_donor(face_bytes)
+    except Exception as e:  # noqa: BLE001 — protective, a crop error must never fail the job
+        logger.warning(f"[PIPELINE] {job_id} | Face ref crop failed, staging full image: {e}")
+        return face_bytes
+    if did_crop:
+        logger.info(f"[PIPELINE] {job_id} | pose | Face ref cropped to face region")
+        return cropped
+    logger.info(f"[PIPELINE] {job_id} | pose | Face ref crop fell back to full image (no face / tiny crop)")
+    return face_bytes
 
 
 def _select_primary_output(
@@ -431,6 +452,15 @@ class PipelineBackgroundWorker:
         if step_name == "background" and (request.outfit is not None or request.pose is not None):
             photo_style = None
 
+        # Pubic grooming (WS pubic-hair): the scene mapper sets request.pubicHair (the
+        # grooming enum value) ONLY for a NAKED-class outfit at HIGH nudity. Resolve it to
+        # its phrase once here so the outfit step (build_prompt) and the pose step's
+        # continuity text (outfit_continuity_text) carry the SAME descriptor, appended to
+        # the NAKED tier prose. None (every dressed / sub-HIGH item, and interactive
+        # callers) -> None -> both builders append nothing, byte-identical to before.
+        pubic_hair_value = getattr(request, "pubicHair", None)
+        grooming_phrase = ap.pubic_hair_phrase(pubic_hair_value) if pubic_hair_value else None
+
         if step_name == "pose":
             logger.info(f"[PIPELINE] {job_id} | pose | Reference: {pose_ref_name}")
             # Single-pass batch collapse: this one pose step dresses + re-scenes from the
@@ -468,6 +498,10 @@ class PipelineBackgroundWorker:
                             request.outfit,
                             request.nudityLevel,
                             getattr(request, "outfitDetail", None),
+                            # Pubic-grooming descriptor (NAKED+HIGH only) — APPENDED after
+                            # the tier prose so a NAKED tier keeps its leading state-of-undress
+                            # word. None for every other item (appends nothing).
+                            grooming=grooming_phrase,
                         )
                         if request.outfit is not None
                         else None
@@ -558,6 +592,12 @@ class PipelineBackgroundWorker:
                 # never nulls it — only background does). No-op on a graph without those
                 # LoRA nodes (v1 Rapid pose graph).
                 lora_scales=_natural_lora_scales(photo_style),
+                # Turbo finishing pass (07-14, ships DARK): low-denoise Z-Image-Turbo
+                # re-skin strength (node 407 on the turbofinish pose graph only). The
+                # -1.0 sentinel (default, until ops flips POSE_TURBO_FINISH_DENOISE)
+                # leaves the graph's baked 0.32; prepare_pose_workflow no-ops on any pose
+                # graph without node 407.
+                turbo_finish_denoise=settings.POSE_TURBO_FINISH_DENOISE,
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(
@@ -581,6 +621,9 @@ class PipelineBackgroundWorker:
                     # the outfit step re-diffuses the body region too, so it benefits
                     # from the same anchor as the pose step. None = unchanged.
                     identity_anchors=getattr(request, "identityAnchors", None),
+                    # Pubic-grooming descriptor (NAKED+HIGH only) — appended to the NAKED
+                    # branch's prose. None for every dressed / sub-HIGH item (unchanged).
+                    grooming=grooming_phrase,
                 ),
                 photo_style,
             )
@@ -677,6 +720,12 @@ class PipelineBackgroundWorker:
             if face_ref_url:
                 try:
                     face_bytes = await asyncio.to_thread(_download_image, face_ref_url)
+                    # WS-FRC: crop the donor to the face region BEFORE staging so the hero
+                    # photo's own scenery never enters node 210's image3 conditioning (which
+                    # was diluting the scene text). Flag-gated + fallback-safe; no-op when off.
+                    face_bytes = await asyncio.to_thread(
+                        _maybe_crop_face_donor, face_bytes, job_id
+                    )
                     face_ref_name = f"faceref_{uuid.uuid4().hex[:12]}.png"
                     images.append({
                         "name": face_ref_name,

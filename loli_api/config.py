@@ -107,12 +107,37 @@ class Settings(BaseSettings):
     # docs/RUNPOD_SETUP.md "Dark quality assets") — otherwise the worker fails to
     # load the model.
     POSE_REACTOR_FACE_RESTORE_MODEL: str = ""
+    # Face-ref donor crop (WS-FRC, 07-14; ships ON). On the faceref pose graph the hero
+    # donor (node 210) feeds BOTH the ReActor swap source (node 200) AND the diffusion
+    # conditioning (image3 on encoders 114/115), so the FULL hero photo — its own scenery
+    # included — otherwise enters the reference latents and competes with the scene text,
+    # weakening scenery and softening overall synthesis (the regression that followed the
+    # faceref flip). When True the batch/pipeline staging crops that donor to the primary
+    # face/head region (YuNet — the SAME detector services.head_mask uses) with a generous
+    # margin BEFORE staging, so only the face — never the hero's background — reaches node
+    # 210; a detector miss or a too-small crop falls back to the full image (logged). ReActor
+    # still face-detects the cropped donor itself, so the swap is unaffected. False stages
+    # the full hero exactly as before (byte-identical). No-op for the interactive pose path
+    # (it stages no donor) and harmless on plain-ReActor templates (no image3 encoder input).
+    FACE_REF_CROP: bool = True
     # Pose output resolution (node 93, ImageScaleToTotalPixels.megapixels). 0.0
     # (default) keeps the pose template's baked 1.0 MP canvas; a value > 0 scales
     # the pose-reference-derived latent to that many megapixels before the full
     # re-diffusion, so the single-pass batch path can render at a higher output
     # resolution (prod sets 1.74 ~ 1080x1620). No-op when the graph lacks node 93.
     POSE_OUTPUT_MEGAPIXELS: float = 0.0
+
+    # Turbo finishing pass (07-14, ships DARK). On the turbofinish pose graph
+    # (pose_2511_skinlora_faceref_turbofinish_API.json) a LOW-denoise Z-Image-Turbo
+    # img2img refine (nodes 401-410) re-skins the Qwen pose render with Turbo's natural
+    # prior BEFORE the ReActor swap — Qwen still owns composition (pose/outfit/scene),
+    # Turbo only re-textures. This knob overrides node 407 (BasicScheduler.denoise), the
+    # single scalar carrying the refine strength; the graph bakes 0.32. The -1.0 sentinel
+    # means "leave the graph's baked 0.32 alone" (same convention as the POSE_REACTOR_* /
+    # NATURAL_LORA_* knobs — 0.0 is itself a valid denoise, so None/-1.0 is the no-override
+    # marker). Threaded through prepare_pose_workflow(turbo_finish_denoise=...) by
+    # pipeline_worker; a true no-op on every pose graph that lacks node 407.
+    POSE_TURBO_FINISH_DENOISE: float = -1.0
 
     # WS-N2 (Natural de-synthetic): per-style LoRA strengths for the pose graph's LoRA
     # stack — node 304 (URP realism), 305 (NSFW), 306 (skin) on the skinlora tier. The

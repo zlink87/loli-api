@@ -54,6 +54,7 @@ from services.runpod_client import RunPodServerlessClient
 from services import runpod_runner
 from services import attribute_phrases as ap
 from services.prompt_generator import assemble_generation_prompt
+from services.prompt_constants import ANATOMY_REALISM_NEGATIVE
 from services.outfit_vocab import generation_outfit_clause
 from services.storage_service import StorageService
 from services.supabase_storage_service import SupabaseStorageService
@@ -97,6 +98,15 @@ ANTI_GLOSS_NEGATIVE = (
     "airbrushed skin, retouched, glossy plastic skin, oily shine, "
     "soft focus, blurry, waxy doll skin"
 )
+# Anatomy-realism POSITIVE clause (nude base — the genital area IS exposed here).
+# Appended right after the persona's pubic-grooming phrase to push the base toward
+# real, correctly-formed intimate anatomy instead of the smooth "doll crotch" the
+# NSFW base defaults to. Matte doctrine (no gloss vocabulary — same discipline as
+# ANTI_GLOSS_POSITIVE). The matching suppression terms live in the NEGATIVE via
+# prompt_constants.ANATOMY_REALISM_NEGATIVE (imported above), NOT here.
+ANATOMY_REALISM_POSITIVE = (
+    "realistic natural intimate anatomy, anatomically correct detail"
+)
 # Neutral reference-body clause. The shared NAKED/HIGH outfit clause is arousal-styled
 # ("hard nipples, swollen aroused pussy lips…") — wrong for a CALM base that every
 # downstream batch scene later dresses over. build_nude_base_prompt swaps that clause
@@ -105,48 +115,56 @@ ANTI_GLOSS_NEGATIVE = (
 NEUTRAL_BASE_OUTFIT_CLAUSE = (
     "completely nude, bare natural relaxed body, neutral reference posture, no arousal"
 )
-# Body-aesthetic clause (nude base v3 — "beauty bar" pass, 2026-07-14), keyed by
-# BodyType enum VALUES (models/enums.py). Admin verdict on v2: the body read as
-# "plain natural" rather than the clearly more model-like beauty bar the product
-# wants, so each clause below is a stronger, more specific model-like framing of
-# the persona's OWN body type — still weight-truthful, never a slimming rewrite
-# of it: curvy/bbw deliberately carry NO slimming vocabulary (that would fight
-# the admin's explicit body-type choice), and none of the five carry gloss
-# vocabulary (matte doctrine — see ANTI_GLOSS_POSITIVE/NEGATIVE above).
+# Body-aesthetic clause (nude base v4 — type-divergence pass, 2026-07-14), keyed
+# by BodyType enum VALUES (models/enums.py). Admin verdict on v3: the shared
+# "model-like" vocabulary (long legs / flat-toned stomachs on nearly every type)
+# CONVERGED all five silhouettes — curvy and athletic waists/legs read the same
+# as skinny. v4 separates the two jobs the clause was conflating:
+#   * each per-type clause below carries ONLY type-specific anatomy that
+#     AMPLIFIES that type (waist/belly/hips/legs truth — the persona's bodyType
+#     is the product's only weight signal, so this is where weight is honored);
+#   * the shared BODY_AESTHETIC_FINISH_TAIL carries the type-NEUTRAL "model
+#     material" quality the admin actually wants everywhere: skin finish
+#     (youthful, wrinkle/blemish-free, real texture kept) and posture.
+# curvy/bbw deliberately carry NO slimming vocabulary; athletic carries real
+# muscle (admin: "maybe more muscle"); none of the six strings carry gloss
+# vocabulary (matte doctrine — the banned-vocab test checks all of them).
 # build_nude_base_prompt looks a persona's body type up here and appends
-# whatever comes back plus the shared BODY_AESTHETIC_POSTURE_TAIL below (empty
-# string for an unknown/missing body type is a clean skip of BOTH — never a
-# stray comma).
+# whatever comes back plus the shared tail (empty string for an unknown/missing
+# body type is a clean skip of BOTH — never a stray comma).
 BODY_AESTHETIC_CLAUSES: Dict[str, str] = {
     "skinny": (
-        "elegant slender figure, smooth flat stomach, gently defined waist, "
-        "long graceful legs, refined model-like proportions"
+        "slender lean figure, slim narrow waist, delicate petite frame, "
+        "long slim legs"
     ),
     "athletic": (
-        "beautifully toned athletic figure, sculpted flat stomach, elegant "
-        "defined legs, poised model-like proportions"
+        "visibly toned athletic build, defined abdominal muscles, firm "
+        "sculpted thighs and calves, strong toned shoulders and arms"
     ),
     "average": (
-        "beautifully balanced feminine figure, smooth soft stomach, graceful "
-        "legs, harmonious model-like proportions"
+        "natural balanced feminine figure, soft gently curved waist, "
+        "natural soft thighs and hips"
     ),
     "curvy": (
-        "stunning hourglass figure, smooth toned stomach, full graceful curves, "
-        "long elegant legs, carried with model poise"
+        "pronounced hourglass figure, soft full bust, wide rounded hips, "
+        "softly curved belly, thick soft thighs"
     ),
     "bbw": (
-        "confidently full voluptuous figure, soft smooth curves, graceful "
-        "carriage, harmonious generous proportions"
+        "full heavy voluptuous curves, soft rounded belly, wide generous "
+        "hips, plush full thighs and arms"
     ),
 }
-# Shared posture tail (nude base v3), appended immediately after whichever
-# per-type clause above fires — one constant instead of duplicating the same
-# posture framing five times. Kept free of gloss/slimming vocabulary same as the
-# clauses themselves — the banned-vocab test in test_nude_base_t2i.py checks
-# this constant too, not just BODY_AESTHETIC_CLAUSES.
-BODY_AESTHETIC_POSTURE_TAIL = (
-    "graceful poised posture, shoulders back, elongated elegant lines"
+# Shared model-finish tail (nude base v4), appended immediately after whichever
+# per-type clause above fires. This is the type-neutral beauty bar: skin quality
+# and carriage, never silhouette — so it can no longer homogenize body shapes.
+# Kept free of gloss/slimming vocabulary same as the clauses themselves — the
+# banned-vocab test in test_nude_base_t2i.py checks this constant too.
+BODY_AESTHETIC_FINISH_TAIL = (
+    "youthful even-toned skin, fine natural skin texture, free of wrinkles "
+    "and blemishes, graceful poised posture, shoulders back"
 )
+# Back-compat alias (tests/imports may reference the v3 name).
+BODY_AESTHETIC_POSTURE_TAIL = BODY_AESTHETIC_FINISH_TAIL
 
 # ---------------------------------------------------------------------------
 # ReActor face-swap parameters — mirrored EXACTLY from the pose graphs' node 200
@@ -246,6 +264,10 @@ def build_nude_base_prompt(persona) -> tuple:
         accessories=None,
         variety_seed=None,       # deterministic: no pool variety on the base
         pose_text=NEUTRAL_POSE_TEXT,
+        # The base places its OWN grooming clause below (after the body-aesthetic
+        # clause, before ANTI_GLOSS_POSITIVE), so suppress the assembler's inline
+        # NAKED/HIGH copy — otherwise the grooming phrase would appear twice.
+        include_pubic_grooming=False,
     )
     # Swap the arousal-styled NAKED/HIGH clause for the calm neutral reference clause.
     # The clause the assembler injected is EXACTLY generation_outfit_clause(NAKED, HIGH)
@@ -264,8 +286,17 @@ def build_nude_base_prompt(persona) -> tuple:
     body_clause = ap.phrase(BODY_AESTHETIC_CLAUSES, getattr(persona, "bodyType", None))
     if body_clause:
         positive = f"{positive}, {body_clause}, {BODY_AESTHETIC_POSTURE_TAIL}"
+    # Pubic-grooming clause (ALWAYS on the base — the genital area is exposed) plus
+    # the anatomy-realism clause, inserted AFTER the body-aesthetic clause and BEFORE
+    # ANTI_GLOSS_POSITIVE. The persona's own grooming resolves via pubic_hair_phrase
+    # (None -> the SHAVED default), so a persona/row that predates the field still
+    # gets a definite groomed state instead of leaving the base to improvise anatomy.
+    groom = ap.pubic_hair_phrase(getattr(persona, "pubicHair", None))
+    positive = f"{positive}, {groom}, {ANATOMY_REALISM_POSITIVE}"
     positive = f"{positive}, {ANTI_GLOSS_POSITIVE}"
-    negative = f"{negative}, {ANTI_GLOSS_NEGATIVE}"
+    # Extend the anti-gloss negative with the anatomy-realism suppression terms
+    # (shared with the HIGH edit tier — prompt_constants.ANATOMY_REALISM_NEGATIVE).
+    negative = f"{negative}, {ANTI_GLOSS_NEGATIVE}, {ANATOMY_REALISM_NEGATIVE}"
     return positive, negative, locked
 
 

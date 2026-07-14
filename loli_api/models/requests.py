@@ -17,6 +17,7 @@ from .enums import (
     EyeColorType,
     BodyType,
     BreastSize,
+    PubicHairType,
     PersonalityType,
     RelationshipType,
     OccupationType,
@@ -80,6 +81,16 @@ class PersonaOptions(BaseModel):
     breastSize: BreastSize = Field(
         default=BreastSize.MEDIUM,
         description="Breast size"
+    )
+    pubicHair: Optional[PubicHairType] = Field(
+        default=None,
+        description=(
+            "Pubic-hair grooming (shaved, trimmed, landing_strip, natural, full). "
+            "Optional: None resolves to 'shaved' (the default) at phrase time, so "
+            "omitting it is fully back-compatible. Only affects rendering where the "
+            "genital area is exposed (a NAKED-class outfit at HIGH nudity, and the "
+            "character's nude base); dressed or sub-HIGH prompts never carry it."
+        ),
     )
     name: str = Field(
         ...,
@@ -956,6 +967,18 @@ class PipelineEditRequest(BaseModel):
             "Set by the planner when a director caption had no confident enum mapping or "
             "conflicted with the enum. No effect on the NAKED outfit or when outfitDetail is "
             "empty. Defaults False (unchanged tier-prose behavior)."
+        ),
+    )
+    pubicHair: Optional[str] = Field(
+        default=None,
+        description=(
+            "INTERNAL — set by the batch scene mapper only, never an admin/interactive "
+            "UI. The character's pubic-hair grooming ENUM VALUE (e.g. 'shaved'/'full'), "
+            "threaded here ONLY for a NAKED-class outfit at HIGH nudity (where the genital "
+            "area is exposed). The pose/outfit step builders phrase-ify it and append the "
+            "grooming descriptor to the NAKED tier prose so the re-diffused nude renders "
+            "the requested grooming. None (every dressed or sub-HIGH item, and every "
+            "interactive caller) appends nothing — byte-identical to before."
         ),
     )
     nudityLevel: NudityLevel = Field(

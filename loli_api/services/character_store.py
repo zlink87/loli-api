@@ -18,7 +18,7 @@ from supabase import Client
 
 from models.requests import PersonaOptions
 from models.character import CharacterCreate, CharacterUpdate, CharacterRead
-from models.enums import CultureType
+from models.enums import CultureType, PubicHairType
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,23 @@ def _valid_culture(value) -> Optional[str]:
         return None
 
 
+def _valid_pubic_hair(value) -> Optional[str]:
+    """
+    Return the stored pubic_hair string only if it's a currently-valid PubicHairType
+    value, else None. Read-tolerant so a garbage/future stored value — OR a
+    pre-migration row that has no such column at all — degrades to None (which
+    resolves to the SHAVED default at phrase time) instead of blowing up
+    PersonaOptions on GET. Mirrors _valid_culture; the migration adds the column
+    NOT NULL DEFAULT 'shaved', so a real read normally returns a valid value.
+    """
+    if value is None:
+        return None
+    try:
+        return PubicHairType(value).value
+    except (ValueError, TypeError):
+        return None
+
+
 def _persona_to_columns(persona: PersonaOptions) -> dict:
     """Flatten PersonaOptions into the characters table's typed columns."""
     dump = persona.model_dump(mode="json")
@@ -62,6 +79,10 @@ def _persona_to_columns(persona: PersonaOptions) -> dict:
         "kinks": dump.get("kinks") or [],
         "voice": dump.get("voice"),
         "culture": dump.get("culture"),
+        # The pubic_hair column is NOT NULL DEFAULT 'shaved' (migration 0007), so an
+        # unset persona value is written as the explicit 'shaved' default (never NULL,
+        # which would violate the constraint) — matching the None -> shaved doctrine.
+        "pubic_hair": dump.get("pubicHair") or "shaved",
     }
 
 
@@ -83,6 +104,9 @@ def _row_to_persona(row: dict) -> PersonaOptions:
         kinks=row.get("kinks") or None,
         voice=row.get("voice"),
         culture=_valid_culture(row.get("culture")),
+        # Tolerant read: a missing column (pre-migration) or garbage/future value ->
+        # None, which resolves to the SHAVED default at phrase time.
+        pubicHair=_valid_pubic_hair(row.get("pubic_hair")),
     )
 
 

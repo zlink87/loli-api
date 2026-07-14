@@ -600,3 +600,47 @@ spots). `bent_over_from_behind` is public-legal but never lands in a formal work
 only appears on activewear/streetwear/casual (never a formal dress) and only at a runnable
 venue (park/city street/beach/forest trail/gym). These are backend constraints — nothing to
 build.
+
+---
+
+## Addendum — 2026-07-14 · PUBIC HAIR grooming + genital-area realism
+
+**What shipped (backend).** A new **optional persona attribute `pubicHair`** grooms the
+genital area and, alongside an anatomy-realism prompt pass, fixes the "unrealistic /
+featureless crotch" the nude renders were showing.
+
+- **Field on create/update.** `pubicHair` is part of the persona object (`POST`/`PATCH
+  /v1/characters` → `persona.pubicHair`, and `POST /v1/generate/image` → `persona.pubicHair`),
+  exactly like `bodyType`/`breastSize`/`culture`. It also appears in `GET /v1/options →
+  persona.pubic_hair` with title-cased labels, so a panel that renders persona enums
+  dynamically surfaces it automatically — **no hardcoding.**
+- **Values + display labels:** `shaved` → "Shaved", `trimmed` → "Trimmed", `landing_strip`
+  → "Landing Strip", `natural` → "Natural", `full` → "Full" (least → most hair).
+- **Default is `shaved`.** The field is optional: **omitting it (or sending `null`) behaves
+  exactly like `shaved`**, so existing characters and any form that doesn't send the field
+  need no change. Stored rows without the value read back as the default.
+- **Where it shows (and where it never does).** The grooming descriptor only enters a render
+  **where the genital area is actually exposed**: the character's **nude base** (always), and
+  a **NAKED-class outfit at HIGH nudity** in generation and batches. A dressed outfit, or any
+  sub-HIGH nudity level, **never** carries it — so the field is invisible on normal profile
+  photos and clothed batches. It is **never shown on the public profile card** (persona/render
+  metadata only, not chat-facing copy).
+
+**Migration to run in Supabase BEFORE deploy.** Run **`0007_character_pubic_hair.sql`** in the
+Supabase SQL editor (or CLI) *before* deploying this code:
+
+```sql
+alter table public.characters
+  add column if not exists pubic_hair text not null default 'shaved';
+```
+
+It is idempotent and additive: the `NOT NULL DEFAULT 'shaved'` backfills every existing row to
+the same value the API renders by default. The API's **read path tolerates the column's
+absence** (a pre-migration row reads as `shaved`), so a code deploy that briefly races ahead of
+the migration degrades safely rather than erroring on `GET` — but the **write path needs the
+column**, so run the migration first (PostgREST rejects writes to an unknown column).
+
+**Next lever if anatomy still reads weak.** If the genital area still looks under-detailed at
+the HIGH/naked tiers after this ships, the next step is an **anatomy LoRA staged on the RunPod
+volume** (wired into the nude-base + pose graphs the same way the skin LoRA is) — the prompt
+pass here is the cheap first pass, not the ceiling.

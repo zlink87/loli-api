@@ -162,6 +162,7 @@ def outfit_continuity_text(
     outfit: Optional[OutfitType],
     nudity_level: NudityLevel,
     outfit_detail: Optional[str],
+    grooming: Optional[str] = None,
 ) -> Optional[str]:
     """
     The garment text the POSE step should preserve (state-of-dress continuity).
@@ -184,6 +185,13 @@ def outfit_continuity_text(
       * ``None`` when ``outfit`` is None — there was no outfit step, so there is no
         state of dress to assert.
 
+    ``grooming`` (the resolved pubic-grooming phrase, set by the batch mapper ONLY
+    for a NAKED-class outfit at HIGH nudity) is APPENDED after the tier prose — never
+    prepended like ``outfit_detail`` — so a NAKED tier keeps its leading state-of-
+    undress word ("completely naked, …, {grooming}") and build_pose_prompt phrases it
+    as "she is completely naked …" rather than "she is wearing …". None (every other
+    item / interactive caller) appends nothing, byte-identical to before.
+
     Deliberately dumb and side-effect-free: it only selects text, never phrases the
     continuity sentence (build_pose_prompt does that, because NAKED-tier prose needs
     different phrasing than a garment — see its ``outfit_text`` param).
@@ -197,10 +205,13 @@ def outfit_continuity_text(
         tier_prose = str(outfit.value)
     detail = outfit_detail.strip() if outfit_detail and outfit_detail.strip() else None
     if detail:
-        if detail == tier_prose:
-            return detail
-        return f"{detail}, {tier_prose}"
-    return tier_prose
+        text = detail if detail == tier_prose else f"{detail}, {tier_prose}"
+    else:
+        text = tier_prose
+    groom = grooming.strip() if grooming and grooming.strip() else None
+    if groom and groom not in text:
+        text = f"{text}, {groom}"
+    return text
 
 
 # Garment-NEUTRAL exposure clauses for the detail-dominant outfit path. When the freeform
@@ -261,6 +272,7 @@ def build_prompt(
     lighting: Optional[str] = None,
     detail_dominant: bool = False,
     identity_anchors: Optional[str] = None,
+    grooming: Optional[str] = None,
 ) -> str:
     """
     Build the positive prompt from outfit and accessories.
@@ -337,6 +349,13 @@ def build_prompt(
             exactly unchanged". None/empty (interactive /v1/edit/outfit and any
             caller without a character profile) appends nothing — unchanged
             behavior.
+        grooming: Optional resolved pubic-grooming phrase (e.g. "full natural
+            untrimmed pubic hair"), set by the batch mapper ONLY for a NAKED outfit
+            at HIGH nudity (where the genital area is exposed). Appended to the
+            NAKED-branch lead right after the tier prose / outfit_detail so the
+            re-diffused nude renders the requested grooming. IGNORED on the dressed
+            branch (grooming is only ever paired with NAKED) and None everywhere
+            else — byte-identical to before.
 
     Returns:
         Complete prompt string
@@ -370,6 +389,11 @@ def build_prompt(
             lead = f"Remove all clothing, the person should be {outfit_desc}"
         if outfit_detail and outfit_detail.strip():
             lead += f", {outfit_detail.strip()}"
+        # Pubic-grooming clause — NAKED-only (the genital area is exposed), appended
+        # after the tier prose / detail. Set by the batch mapper for NAKED+HIGH; None
+        # for every interactive/dressed caller (nothing appended). Deduped defensively.
+        if grooming and grooming.strip() and grooming.strip() not in lead:
+            lead += f", {grooming.strip()}"
         if lighting_text:
             lead += f", in {lighting_text}"
         prompt_parts = [

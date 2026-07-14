@@ -21,7 +21,7 @@ from api.v1.endpoints import options as ep
 _ENUM_KEYS = {
     "persona": [
         "style", "ethnicity", "culture", "hair_style", "hair_color", "eye_color",
-        "body_type", "breast_size", "personality", "relationship",
+        "body_type", "breast_size", "pubic_hair", "personality", "relationship",
         "occupation", "kinks",
     ],
     "generation": ["nudity_level", "outfit", "pose", "accessory", "photo_style"],

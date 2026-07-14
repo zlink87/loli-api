@@ -126,6 +126,26 @@ class BreastSize(str, Enum):
     EXTRA_LARGE = "extra_large"
 
 
+class PubicHairType(str, Enum):
+    """
+    Pubic-hair grooming options for the genital area — least to most hair:
+    SHAVED < TRIMMED < LANDING_STRIP < NATURAL < FULL.
+
+    Optional persona dimension (persona.pubicHair): None means "unspecified" and
+    resolves to SHAVED at phrase time (services/attribute_phrases.pubic_hair_phrase),
+    so existing rows/requests that predate this field need nothing. The grooming
+    phrase only enters a prompt where the area is actually exposed (nude base always;
+    generation/batch NAKED-class at HIGH nudity only) — never a dressed or sub-HIGH
+    prompt. Each value maps to a matte descriptive phrase in
+    services/attribute_phrases.py (PUBIC_HAIR_PHRASES, coverage-tested).
+    """
+    SHAVED = "shaved"
+    TRIMMED = "trimmed"
+    LANDING_STRIP = "landing_strip"
+    NATURAL = "natural"
+    FULL = "full"
+
+
 class PersonalityType(str, Enum):
     """Personality options."""
     NYMPHO = "nympho"

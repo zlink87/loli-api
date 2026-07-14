@@ -72,6 +72,19 @@ EDIT_SKIN_NEGATIVE = (
     "oversaturated colors, HDR, crushed blacks, harsh high contrast"
 )
 
+# Anatomy-realism negative for the genital area — appended ONLY where that area is
+# actually exposed: the HIGH (fully-nude) edit tier (edit_negative below) and the
+# nude base (workers.nude_base_worker imports this to extend its own anti-gloss
+# negative). Suppresses the smooth, featureless "doll crotch" the NSFW base renders
+# when there is nothing steering intimate anatomy. NEVER added to a dressed or
+# sub-HIGH edit (it would waste negative budget on a region that isn't in frame), so
+# it lives SEPARATELY from the always-on EDIT_SKIN_NEGATIVE. "airbrushed" overlaps
+# EDIT_SKIN_NEGATIVE deliberately — the two are appended to different branches, never
+# both to the same prompt at once.
+ANATOMY_REALISM_NEGATIVE = (
+    "airbrushed featureless crotch, doll-like smooth anatomy, deformed genitalia"
+)
+
 # Positive identity-preservation clause appended to edit prompts. {what} is the
 # thing being changed (e.g. "the clothing", "the pose", "the background").
 IDENTITY_PRESERVATION_CLAUSE = (
@@ -373,6 +386,12 @@ def edit_negative(extra: Optional[str] = None, nudity_level=None) -> str:
     suppression = NUDITY_SUPPRESSION.get(key, NUDITY_SUPPRESSION["low"])
     if suppression:
         parts.append(suppression)
+    # Anatomy-realism negative — HIGH (fully-nude) tier ONLY, where the genital area
+    # is actually exposed. Never on a dressed / sub-HIGH edit (those keep the global
+    # EDIT_SKIN_NEGATIVE alone), so a dressed edit's negative is byte-identical to before.
+    # Keyed by the "high" string (matching NUDITY_SUPPRESSION) to avoid importing the enum.
+    if key == "high":
+        parts.append(ANATOMY_REALISM_NEGATIVE)
     if extra and extra.strip():
         parts.append(extra.strip())
     return ", ".join(parts)

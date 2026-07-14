@@ -154,6 +154,21 @@ class SceneSpec(BaseModel):
             "planner_provider."
         ),
     )
+    direction_error: Optional[str] = Field(
+        default=None,
+        max_length=160,
+        description=(
+            "WHY this item has no Venice scene_direction, for after-the-fact debugging of "
+            "direction_source='fallback' batches. On a WHOLE-CALL failure the same short reason "
+            "is stamped on EVERY item (e.g. 'timeout after 20s', 'invalid JSON', 'truncated "
+            "response', 'empty response', an exception 'Class: message', or 'disabled: no "
+            "VENICE_API_KEY'); on a PER-ITEM validation rejection it names the violated rule "
+            "('identity_vocab', 'foreign_location', 'people_in_private', 'people_banned', "
+            "'garment_outside_outfit', 'story_voice', 'too_long', 'empty') or 'no_direction' when "
+            "the model simply omitted the item. None on success (direction_source='venice') and "
+            "when the deterministic provider skipped Venice entirely / legacy jsonb without the key."
+        ),
+    )
 
     # --- optional per-scene mood overrides (do NOT change identity) ---
     mood_kinks: Optional[List[KinkType]] = Field(

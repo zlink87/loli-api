@@ -86,6 +86,7 @@ def assemble_generation_prompt(
     pose_text: Optional[str] = None,
     wardrobe_styles=None,
     demeanor=None,
+    include_pubic_grooming: bool = True,
 ) -> Tuple[str, str, str]:
     """
     Deterministically assemble a character-generation prompt.
@@ -126,6 +127,16 @@ def assemble_generation_prompt(
     generation model is a fast turbo model that weights earlier tokens heavily,
     and the requested scene (e.g. "school dance") must not be buried behind flavor
     text or it gets diluted.
+
+    ``persona.pubicHair`` (optional grooming) adds ONE pubic-grooming clause, but
+    ONLY when the genital area is actually exposed: an explicit ``OutfitType.NAKED``
+    outfit AND ``nudity_level == HIGH``. The clause sits adjacent to the clothing/
+    nudity clause and NEVER enters ``locked``/``identity_block`` (the verify contract
+    stays byte-identical), so a dressed or sub-HIGH prompt never carries it. None/
+    unset pubicHair resolves to the SHAVED default at phrase time. ``include_pubic_
+    grooming=False`` suppresses this inline copy for the nude base, which places its
+    own grooming clause at the body-aesthetic position (avoids a duplicate) — every
+    other caller leaves it True.
 
     Nudity level is enforced entirely by POSITIVE tokens — the graded clothing
     clause, the LOW/SUGGESTIVE coverage guard, and the flavor gating that drops
@@ -196,6 +207,17 @@ def assemble_generation_prompt(
         parts.append(culture_styling)
     if clothing:
         parts.append(clothing)
+    # Pubic-grooming clause — ONLY where the genital area is exposed: an explicit
+    # NAKED outfit at HIGH nudity. Sits adjacent to the clothing/nudity clause, never
+    # in the locked identity block, so dressed or sub-HIGH prompts never carry it
+    # (the critical negative case). include_pubic_grooming=False lets the nude base
+    # suppress this inline copy and place its own at the body-aesthetic position.
+    if (
+        include_pubic_grooming
+        and outfit == OutfitType.NAKED
+        and getattr(nudity_level, "value", nudity_level) == NudityLevel.HIGH.value
+    ):
+        parts.append(ap.pubic_hair_phrase(getattr(persona, "pubicHair", None)))
     if pose_segment:
         parts.append(pose_segment)
     if free_text and free_text.strip():

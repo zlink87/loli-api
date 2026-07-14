@@ -223,6 +223,18 @@ def scene_to_pipeline_request(
         else None
     )
 
+    # Pubic grooming: the genital area is exposed ONLY on a NAKED-class outfit at HIGH
+    # nudity, so thread the character's grooming ENUM VALUE to the pose/outfit builders
+    # (via PipelineEditRequest.pubicHair) ONLY there. An unset persona value resolves to
+    # the "shaved" default so a NAKED+HIGH item always carries a definite grooming; every
+    # dressed / sub-HIGH item leaves it None -> the builders append nothing (unchanged).
+    naked_high = outfit == OutfitType.NAKED and nudity == NudityLevel.HIGH
+    pubic_hair = (
+        (_val(getattr(getattr(character, "persona", None), "pubicHair", None)) or "shaved")
+        if naked_high
+        else None
+    )
+
     # No-pose face guard: the pose step is the ONLY step that stamps the hero's face
     # (its ReActor pass); the outfit and background steps composite the SOURCE image's own
     # face back byte-exact. With NUDE_BASE_FACE_SWAP defaulting False the nude base carries
@@ -404,6 +416,10 @@ def scene_to_pipeline_request(
         # test stand-ins that predate the field.
         outfitDetailDominant=bool(getattr(scene, "outfit_detail_dominant", False)),
         nudityLevel=nudity,
+        # Pubic grooming enum value — set ONLY for a NAKED-class outfit at HIGH nudity
+        # (see `pubic_hair` above); None for every dressed / sub-HIGH item so the pose/
+        # outfit builders append nothing there.
+        pubicHair=pubic_hair,
         accessories=scene.accessories,
         # Additive scene metadata (identity-free enum-value strings) for the pose step (W3/B1).
         # lighting/timeOfDay re-light/re-time the re-diffused frame; location is the scene the

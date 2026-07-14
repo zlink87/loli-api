@@ -118,7 +118,7 @@ def _run_with_direction_spy(body) -> int:
         scenes = DeterministicScenePlanner().plan_scenes_sync(character, count, controls)
         return scenes, "deterministic"
 
-    async def _spy_apply(scenes, controls, *, settings):
+    async def _spy_apply(scenes, controls, *, settings, batch_id=None):
         calls["n"] += 1
         return scenes
 

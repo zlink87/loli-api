@@ -188,7 +188,7 @@ class BatchOrchestrator:
         # planning-time enrichment call), so the writer is only invoked for a real launch.
         if not body.dry_run:
             scenes = await scene_direction.apply_scene_directions(
-                scenes, controls, settings=self.settings
+                scenes, controls, settings=self.settings, batch_id=batch.id
             )
 
         rows = []

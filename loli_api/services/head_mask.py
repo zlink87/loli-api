@@ -59,6 +59,90 @@ def _get_detector():
     return _detector
 
 
+def _detect_face_box(img) -> Optional[Tuple[int, int, int, int]]:
+    """Highest-confidence face box (x, y, w, h) via the shared YuNet detector, or None
+    when no face is found. Thread-safe (the detector instance is not, hence the lock).
+    Extracted so both build_head_mask and crop_face_donor share ONE detection path."""
+    h, w = img.shape[:2]
+    with _lock:  # YuNet detector instances are not thread-safe
+        det = _get_detector()
+        det.setInputSize((w, h))
+        _ok, faces = det.detect(img)
+    if faces is None or not len(faces):
+        return None
+    best = max(faces, key=lambda f: f[-1])
+    x, y, fw, fh = (int(v) for v in best[:4])
+    return (x, y, fw, fh)
+
+
+# Face-donor crop (FACE_REF_CROP): margin expansion + a minimum-size guard. The detected
+# face box is grown this many multiples of its OWN size on each side (keeping hair/neck/a
+# little context while dropping the surrounding scene); a resulting crop smaller than the
+# min on either side, or one that removes no scenery, falls back to the full image.
+_CROP_EXPAND = 1.6
+_CROP_MIN = 256
+
+
+def crop_face_donor(image_bytes: bytes) -> Tuple[bytes, bool]:
+    """
+    Crop a hero photo down to the primary face/head region so it can serve as the pose
+    graph's ReActor / image3 conditioning donor (node 210) WITHOUT dragging the hero's own
+    scenery into the reference latents. Reuses the same YuNet detector as build_head_mask.
+
+    The detected face box is expanded ``_CROP_EXPAND`` x its own size on each side, squared
+    up by growing the short side, and clamped to the image bounds; the region is re-encoded
+    as PNG.
+
+    Returns ``(png_bytes, cropped)``:
+      * ``(cropped_png, True)``  — a real face-region crop (strictly smaller than the source
+        on at least one axis).
+      * ``(image_bytes, False)`` — FALLBACK to the UNCHANGED full image (same bytes object)
+        when no face is detected, the crop would be smaller than ``_CROP_MIN`` px on an axis,
+        or it removes no scenery. ReActor face-detects the donor itself, so a full-image
+        fallback is always swap-safe.
+    """
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("crop_face_donor: could not decode source image")
+    h, w = img.shape[:2]
+
+    box = _detect_face_box(img)
+    if box is None:
+        return image_bytes, False  # detector miss -> stage the full hero unchanged
+
+    x, y, fw, fh = box
+    x0 = x - fw * _CROP_EXPAND
+    x1 = x + fw + fw * _CROP_EXPAND
+    y0 = y - fh * _CROP_EXPAND
+    y1 = y + fh + fh * _CROP_EXPAND
+
+    # Square-ish: grow the SHORT side symmetrically toward the long side.
+    cw, ch = x1 - x0, y1 - y0
+    if cw < ch:
+        pad = (ch - cw) / 2.0
+        x0, x1 = x0 - pad, x1 + pad
+    elif ch < cw:
+        pad = (cw - ch) / 2.0
+        y0, y1 = y0 - pad, y1 + pad
+
+    # Clamp to image bounds.
+    x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
+    x1, y1 = min(w, int(round(x1))), min(h, int(round(y1)))
+
+    cw, ch = x1 - x0, y1 - y0
+    if cw < _CROP_MIN or ch < _CROP_MIN:
+        return image_bytes, False  # crop too small to be a useful donor -> full image
+    if cw >= w and ch >= h:
+        return image_bytes, False  # nothing actually cropped away -> full image
+
+    crop = img[y0:y1, x0:x1]
+    ok, buf = cv2.imencode(".png", crop)
+    if not ok:
+        raise ValueError("crop_face_donor: PNG encode failed")
+    return buf.tobytes(), True
+
+
 def build_head_mask(image_bytes: bytes) -> Tuple[bytes, bool]:
     """
     Build the head-protection mask PNG for a source image.
@@ -74,15 +158,7 @@ def build_head_mask(image_bytes: bytes) -> Tuple[bytes, bool]:
     h, w = img.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
 
-    box = None
-    with _lock:  # YuNet detector instances are not thread-safe
-        det = _get_detector()
-        det.setInputSize((w, h))
-        ok, faces = det.detect(img)
-        if faces is not None and len(faces):
-            best = max(faces, key=lambda f: f[-1])
-            x, y, fw, fh = (int(v) for v in best[:4])
-            box = (x, y, fw, fh)
+    box = _detect_face_box(img)
 
     found = box is not None
     if found:

@@ -26,10 +26,11 @@ Shape (mirrors scene_writer / trait_profile_writer):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from models.enums import OutfitType
 from services import scene_vocab as sv
@@ -128,36 +129,38 @@ def _words(text: str) -> set:
     return set(re.findall(r"[a-z]+", (text or "").lower()))
 
 
-def validate_scene_direction(
+def validate_scene_direction_reason(
     direction: Optional[str],
     *,
     location,
     outfit=None,
     outfit_detail: Optional[str] = None,
     venue_public: bool = False,
-) -> Optional[str]:
+) -> Tuple[Optional[str], Optional[str]]:
     """
-    Return the cleaned direction (whitespace-collapsed, <=320 chars) if it passes EVERY
-    rule, else None (the caller then keeps the item's staging phrase). Pure + unit-tested.
+    Reason-returning core of the validator. Returns ``(cleaned_text, None)`` when the
+    direction passes EVERY rule, or ``(None, rule_name)`` naming the FIRST rule it violates.
+    The rule names are the stable strings recorded on SceneSpec.direction_error. Pure +
+    unit-tested; ``validate_scene_direction`` is the boolean-style wrapper over this.
 
-    Rules (all must pass):
-      * non-empty, <= 320 chars;
-      * NO identity/appearance vocab — reuses story_planner._APPEARANCE_PATTERNS (hair/eyes/
-        skin/person-noun/age) plus an anatomy list (face/lips/breast/nude/…);
-      * NO story/second-person markers (she remembers…, you…, names via people rule);
-      * NO people — banned words (man/woman/couple/friend/…) fail everywhere; anonymous
-        background words (people/strangers/crowd) fail in a PRIVATE venue and pass only at a
-        public one;
-      * NO clothing word outside the item's OWN outfit words (so it can't name/change the
-        garment);
-      * NO foreign-location tokens — reuses story_planner._caption_foreign_location, so a
-        direction may reference its OWN place but never a DIFFERENT one.
+    Rules (checked in order) and their names:
+      * "empty"                  — not a string / blank after trimming;
+      * "too_long"               — over 320 chars;
+      * "identity_vocab"         — story_planner._APPEARANCE_PATTERNS (hair/eyes/skin/person-
+                                   noun/age), the planner's identity vocab, or the anatomy list;
+      * "story_voice"            — story/second-person markers (she remembers…, you…);
+      * "people_banned"          — relational/individuated people (man/woman/couple/friend/…);
+      * "people_in_private"      — anonymous crowd words (people/strangers/crowd) in a PRIVATE venue;
+      * "garment_outside_outfit" — a clothing word outside the item's OWN outfit words;
+      * "foreign_location"       — reuses story_planner._caption_foreign_location (a DIFFERENT place).
     """
     if not isinstance(direction, str):
-        return None
+        return None, "empty"
     text = re.sub(r"\s+", " ", direction).strip()
-    if not text or len(text) > _MAX_DIRECTION_LEN:
-        return None
+    if not text:
+        return None, "empty"
+    if len(text) > _MAX_DIRECTION_LEN:
+        return None, "too_long"
     low = text.lower()
 
     words = _words(text)
@@ -172,24 +175,24 @@ def validate_scene_direction(
     #   3. the truly-extra anatomy/figure words.
     probe = _CAMERA_IDIOM_RE.sub(" ", text)
     if any(p.search(probe) for p in sp._APPEARANCE_PATTERNS):
-        return None
+        return None, "identity_vocab"
     if words & _IDENTITY_WORD_TOKENS:
-        return None
+        return None, "identity_vocab"
     if any(phrase in low for phrase in _IDENTITY_PHRASES):
-        return None
+        return None, "identity_vocab"
     if _EXTRA_APPEARANCE_RE.search(text):
-        return None
+        return None, "identity_vocab"
 
     # Story / second-person voice.
     if _STORY_RE.search(text):
-        return None
+        return None, "story_voice"
 
     # People: relational/individuated names are never allowed; background-crowd words are
     # allowed only at a public venue.
     if words & _PEOPLE_BANNED_ALWAYS:
-        return None
+        return None, "people_banned"
     if (words & _PEOPLE_BG_OK) and not venue_public:
-        return None
+        return None, "people_in_private"
 
     # Clothing: any garment CLASS the direction names (reusing the planner's set) must be
     # covered by the item's OWN outfit words (enum value + outfit_detail); otherwise the
@@ -205,7 +208,7 @@ def validate_scene_direction(
     for w in words:
         cls = _garment_class(w)
         if cls and cls not in outfit_classes:
-            return None
+            return None, "garment_outside_outfit"
 
     # Location: must not name a DIFFERENT location's tokens. Suppressed when the direction
     # ALSO names its OWN location — some locations legitimately SHARE a token (office /
@@ -214,8 +217,29 @@ def validate_scene_direction(
     final_val = _val(location)
     if not sp._caption_names_location(low, sp._LOCATION_CAPTION_TOKENS.get(final_val, ())) \
             and sp._caption_foreign_location(low, final_val):
-        return None
+        return None, "foreign_location"
 
+    return text, None
+
+
+def validate_scene_direction(
+    direction: Optional[str],
+    *,
+    location,
+    outfit=None,
+    outfit_detail: Optional[str] = None,
+    venue_public: bool = False,
+) -> Optional[str]:
+    """
+    Return the cleaned direction (whitespace-collapsed, <=320 chars) if it passes EVERY
+    rule, else None (the caller then keeps the item's staging phrase). Pure + unit-tested.
+    Boolean-style wrapper over ``validate_scene_direction_reason`` for existing callers/tests
+    that only need pass/fail; use the ``_reason`` form when the violated rule is wanted.
+    """
+    text, _reason = validate_scene_direction_reason(
+        direction, location=location, outfit=outfit, outfit_detail=outfit_detail,
+        venue_public=venue_public,
+    )
     return text
 
 
@@ -262,6 +286,9 @@ class SceneDirectionWriter:
         self.api_key = api_key
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # WHY the last write_batch returned None (empty/invalid/truncated/disabled), so the
+        # caller can record it on every item's direction_error. None after a successful call.
+        self.last_error: Optional[str] = None
         self._client = VeniceClient(api_key, base_url=base_url, model=model, timeout=timeout)
 
     @property
@@ -274,9 +301,15 @@ class SceneDirectionWriter:
         """
         ONE Venice call for the whole batch. Returns a list of raw direction strings indexed
         by item index (missing/extra indices -> None at that slot), or None on any whole-call
-        failure (disabled, empty response, unparseable JSON). The caller validates each entry.
+        failure (disabled, empty response, unparseable JSON). On a None return, ``last_error``
+        holds a short reason. The caller validates each entry.
         """
-        if not self.enabled or not items:
+        self.last_error = None
+        if not self.enabled:
+            self.last_error = "disabled: no VENICE_API_KEY"
+            return None
+        if not items:
+            self.last_error = "no items"
             return None
         # self.max_tokens is a FLOOR, not a fixed cap: a large batch (one call, all items)
         # needs room for every item's direction, so scale up to ~130 tokens/item + a 400
@@ -292,8 +325,14 @@ class SceneDirectionWriter:
             max_tokens=effective_max_tokens,
         )
         if not content:
+            # VeniceClient swallows transport errors (incl. timeouts) and hands back None here.
+            self.last_error = "empty response"
             return None
-        return _parse_directions(content, len(items))
+        parsed = _parse_directions(content, len(items))
+        if parsed is None:
+            self.last_error = _describe_unparseable(content)
+            return None
+        return parsed
 
 
 def _facts_for_scene(index: int, scene, controls) -> Dict[str, Any]:
@@ -383,25 +422,63 @@ def _extract_json(raw: Optional[str]):
     return None
 
 
-async def apply_scene_directions(scenes: List, controls, *, settings) -> List:
+def _clip_reason(reason: Optional[str]) -> Optional[str]:
+    """Trim a direction_error reason to the SceneSpec.direction_error cap (160 chars). Pydantic
+    does not validate on assignment here, but the field IS re-validated on the jsonb round-trip,
+    so an over-long reason would blow up SceneSpec(**dumped) later — clip defensively."""
+    if not reason:
+        return reason
+    reason = reason.strip()
+    return reason if len(reason) <= 160 else reason[:157] + "..."
+
+
+def _describe_unparseable(content: str) -> str:
+    """Classify a non-empty response _parse_directions could not turn into a list: a body that
+    STARTED as JSON but never closed its bracket is the max_tokens cutoff signature
+    ('truncated response'); anything else is 'invalid JSON'."""
+    stripped = (content or "").strip()
+    if stripped[:1] in ("[", "{") and stripped[-1:] not in ("]", "}"):
+        return "truncated response"
+    return "invalid JSON"
+
+
+def _describe_call_exception(exc: Exception, writer: "SceneDirectionWriter") -> str:
+    """Turn a write_batch exception into a short direction_error reason: a timeout (asyncio or
+    httpx, matched by type-name) becomes 'timeout after Xs' from the writer's configured
+    timeout; anything else becomes 'ClassName: trimmed message'."""
+    name = type(exc).__name__
+    if isinstance(exc, asyncio.TimeoutError) or "timeout" in name.lower():
+        timeout_s = getattr(getattr(writer, "_client", None), "timeout", None)
+        return f"timeout after {timeout_s:g}s" if isinstance(timeout_s, (int, float)) else "timeout"
+    msg = str(exc).strip()
+    return f"{name}: {msg}" if msg else name
+
+
+async def apply_scene_directions(scenes: List, controls, *, settings, batch_id=None) -> List:
     """
-    Populate scene_direction / direction_source on every scene IN PLACE, AFTER
-    validate_and_repair (the facts are final). Returns the same list. NEVER raises.
+    Populate scene_direction / direction_source / direction_error on every scene IN PLACE,
+    AFTER validate_and_repair (the facts are final). Returns the same list. NEVER raises.
 
     Provider (settings.SCENE_DIRECTION_PROVIDER, default "venice"):
-      * "deterministic" (or no VENICE_API_KEY) -> Venice is NOT called; every scene keeps
-        scene_direction=None / direction_source=None, so the mapper falls back to the bare
-        `staging` phrase and the batch is byte-identical to the pre-feature behavior.
-      * "venice" -> ONE batched call; each item whose returned direction passes
-        validate_scene_direction gets scene_direction=text, direction_source="venice"; every
-        other item (invalid, or the whole call failed/timed out) gets scene_direction=None,
-        direction_source="fallback".
+      * "deterministic" -> Venice is NOT called; every scene keeps scene_direction=None /
+        direction_source=None / direction_error=None, byte-identical to the pre-feature
+        behavior (a deliberate config choice, not a failure).
+      * "venice" but no VENICE_API_KEY -> Venice can never run; every scene keeps
+        scene_direction=None / direction_source=None but gets direction_error="disabled: no
+        VENICE_API_KEY" so the misconfig is visible.
+      * "venice" with a key -> ONE batched call; each item whose returned direction passes
+        validation gets scene_direction=text, direction_source="venice", direction_error=None.
+        A WHOLE-CALL failure stamps the SAME reason (timeout/invalid JSON/truncated/empty/
+        exception) on EVERY item; a PER-ITEM rejection records the violated rule name (or
+        "no_direction" when the model omitted the item). All failures set direction_source=
+        "fallback" so the mapper keeps the bare `staging` phrase.
     """
     if not scenes:
         return scenes
+    tag = f"[BATCH {batch_id}]" if batch_id else "[BATCH ?]"
     provider = (getattr(settings, "SCENE_DIRECTION_PROVIDER", "venice") or "venice").strip().lower()
     if provider != "venice":
-        return scenes  # deterministic: skip Venice entirely, leave fields untouched (None)
+        return scenes  # deterministic: skip Venice entirely, leave ALL fields untouched (None)
 
     writer = SceneDirectionWriter(
         api_key=getattr(settings, "VENICE_API_KEY", "") or "",
@@ -416,31 +493,66 @@ async def apply_scene_directions(scenes: List, controls, *, settings) -> List:
         timeout=getattr(settings, "SCENE_DIRECTION_TIMEOUT_SECONDS", 20.0),
     )
     if not writer.enabled:
-        return scenes  # no key -> deterministic (no network), leave fields None
+        # Venice was REQUESTED but there is no key, so it can never run. direction_source stays
+        # None (Venice was never attempted), but surface WHY on every item.
+        reason = _clip_reason("disabled: no VENICE_API_KEY")
+        logger.warning(f"{tag} scene-direction disabled ({reason}); "
+                       f"all {len(scenes)} items keep their staging phrase")
+        for s in scenes:
+            s.direction_error = reason
+        return scenes
 
     items = [_facts_for_scene(i, s, controls) for i, s in enumerate(scenes)]
+    call_error: Optional[str] = None
     try:
         raw = await writer.write_batch(items, hint=_demeanor_hint(controls))
     except Exception as e:  # noqa: BLE001 — a decoration writer must never break a launch
-        logger.error(f"SceneDirectionWriter failed; all items fall back: {e}")
         raw = None
+        call_error = _describe_call_exception(e, writer)
+        logger.error(f"{tag} SceneDirectionWriter raised; all items fall back: {e}")
+    if raw is None and call_error is None:
+        # write_batch returned None WITHOUT raising (empty/invalid/truncated) — it recorded why.
+        call_error = writer.last_error or "no direction returned"
+    if raw is None:
+        call_error = _clip_reason(call_error)
+        logger.warning(f"{tag} scene-direction whole-call fallback ({call_error}); "
+                       f"all {len(scenes)} items keep their staging phrase")
 
+    per_item_failures = 0
     for i, s in enumerate(scenes):
-        cand = raw[i] if (raw is not None and i < len(raw)) else None
-        valid = None
-        if cand:
-            valid = validate_scene_direction(
-                cand,
-                location=s.location,
-                outfit=s.outfit,
-                outfit_detail=s.outfit_detail,
-                venue_public=sv.is_public_venue(s.location),
-            )
+        if raw is None:
+            # Whole-call failure: the SAME reason on every item.
+            s.scene_direction = None
+            s.direction_source = "fallback"
+            s.direction_error = call_error
+            continue
+        cand = raw[i] if i < len(raw) else None
+        if not cand:
+            # The call succeeded but the model omitted (or blanked) this index.
+            s.scene_direction = None
+            s.direction_source = "fallback"
+            s.direction_error = "no_direction"
+            per_item_failures += 1
+            continue
+        valid, rule = validate_scene_direction_reason(
+            cand,
+            location=s.location,
+            outfit=s.outfit,
+            outfit_detail=s.outfit_detail,
+            venue_public=sv.is_public_venue(s.location),
+        )
         if valid:
             s.scene_direction = valid
             s.direction_source = "venice"
+            s.direction_error = None
         else:
             # Keep the bare staging phrase as the effective direction (mapper falls back).
             s.scene_direction = None
             s.direction_source = "fallback"
+            s.direction_error = rule or "invalid"
+            per_item_failures += 1
+
+    if raw is not None and per_item_failures:
+        logger.warning(f"{tag} scene-direction per-item fallback on "
+                       f"{per_item_failures}/{len(scenes)} items (see direction_error)")
     return scenes

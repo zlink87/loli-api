@@ -310,6 +310,85 @@ def test_worker_rapid_natural_is_a_noop_for_both_features():
     assert not any(nid in wf for nid in ("304", "305", "306"))
 
 
+# ===========================================================================
+# WS-FRC — face-ref donor crop (drop the hero's own scenery before it reaches
+# node 210's image3 conditioning). Crop helper reuses head_mask's YuNet detector;
+# pipeline_worker._maybe_crop_face_donor gates it on settings.FACE_REF_CROP.
+# ===========================================================================
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+from services import head_mask  # noqa: E402
+from workers.pipeline_worker import _maybe_crop_face_donor  # noqa: E402
+
+
+def _png(h: int, w: int, val: int = 90) -> bytes:
+    return cv2.imencode(".png", np.full((h, w, 3), val, np.uint8))[1].tobytes()
+
+
+def _crop_with_box(image_bytes, box):
+    """Run crop_face_donor with the YuNet detector swapped for a fixed bbox (manual save/
+    restore so it runs under this file's __main__ runner too, not just pytest)."""
+    saved = head_mask._detect_face_box
+    head_mask._detect_face_box = lambda img: box
+    try:
+        return head_mask.crop_face_donor(image_bytes)
+    finally:
+        head_mask._detect_face_box = saved
+
+
+def _maybe_with(image_bytes, flag, box=None):
+    saved_flag = settings.FACE_REF_CROP
+    saved_det = head_mask._detect_face_box
+    settings.FACE_REF_CROP = flag
+    if box is not None:
+        head_mask._detect_face_box = lambda img: box
+    try:
+        return _maybe_crop_face_donor(image_bytes, "job")
+    finally:
+        settings.FACE_REF_CROP = saved_flag
+        head_mask._detect_face_box = saved_det
+
+
+def test_crop_face_donor_crops_to_detected_region():
+    # A known face box in a large frame -> the donor shrinks (its scenery mass is dropped).
+    src = _png(1024, 1024)
+    out, cropped = _crop_with_box(src, (400, 300, 200, 240))
+    assert cropped and out != src
+    dec = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
+    assert dec.shape[0] < 1024 and dec.shape[1] < 1024   # dimensions shrank
+
+
+def test_crop_face_donor_detector_miss_returns_full_image_byte_identical():
+    # A blank synthetic frame has no detectable face -> fall back to the full image, unchanged.
+    blank = _png(240, 180, 128)
+    out, cropped = head_mask.crop_face_donor(blank)
+    assert not cropped and out == blank
+
+
+def test_maybe_crop_flag_off_is_byte_identical_even_with_a_face():
+    # FACE_REF_CROP off stages the FULL hero verbatim (legacy behavior), face or not.
+    src = _png(1024, 1024)
+    assert _maybe_with(src, False, box=(400, 300, 200, 240)) == src
+
+
+def test_maybe_crop_flag_on_applies_crop():
+    src = _png(1024, 1024)
+    out = _maybe_with(src, True, box=(400, 300, 200, 240))
+    assert out != src
+    dec = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
+    assert dec.shape[0] < 1024 and dec.shape[1] < 1024
+
+
+def test_maybe_crop_flag_on_detector_miss_falls_back_to_full_image():
+    blank = _png(240, 180, 128)          # real detector runs, finds no face
+    assert _maybe_with(blank, True) == blank
+
+
+def test_face_ref_crop_defaults_on():
+    # The scenery-dilution fix ships ENABLED (the whole point of WS-FRC).
+    assert type(settings).model_fields["FACE_REF_CROP"].default is True
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

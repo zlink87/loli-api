@@ -4184,6 +4184,7 @@ def apply_item_scene_edit(
     if any(k in edit for k in _EDIT_FACT_KEYS):
         spec["scene_direction"] = None
         spec["direction_source"] = None
+        spec["direction_error"] = None  # the direction is gone; its failure reason is now stale too
         spec["staging"] = _restage_after_edit(spec)
 
     return SceneSpec(**spec)

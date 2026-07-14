@@ -293,6 +293,113 @@ def test_no_api_key_never_calls_venice():
     assert scenes[0].scene_direction is None and scenes[0].direction_source is None
 
 
+# ---------------------------------------------------------------------------
+# WS-SD2 — direction_error: WHY an item fell back (observability)
+# ---------------------------------------------------------------------------
+def _run_apply_raising(scenes, controls, settings, exc):
+    """apply_scene_directions with VeniceClient.chat raising `exc` (a transport failure the
+    real client would swallow, but which a test can force to exercise the exception path)."""
+    async def _boom(_self, messages, **kw):
+        raise exc
+
+    saved = vc.VeniceClient.chat
+    vc.VeniceClient.chat = lambda self, messages, **kw: _boom(self, messages, **kw)
+    try:
+        asyncio.run(sd.apply_scene_directions(scenes, controls, settings=settings, batch_id="b-err"))
+    finally:
+        vc.VeniceClient.chat = saved
+
+
+def test_validate_reason_names_the_violated_rule():
+    L, O = LocationType, OutfitType
+    # each rejection names its rule; the happy path returns (text, None).
+    assert sd.validate_scene_direction_reason(
+        _INVALID_IDENTITY, location=L.HOME_BEDROOM) == (None, "identity_vocab")
+    assert sd.validate_scene_direction_reason("x" * 321, location=L.HOME_BEDROOM)[1] == "too_long"
+    assert sd.validate_scene_direction_reason("", location=L.HOME_BEDROOM)[1] == "empty"
+    assert sd.validate_scene_direction_reason(
+        "Her boyfriend stands nearby.", location=L.BAR, venue_public=True)[1] == "people_banned"
+    assert sd.validate_scene_direction_reason(
+        "A blurred crowd fills the far background.", location=L.HOME_BEDROOM,
+        venue_public=False)[1] == "people_in_private"
+    assert sd.validate_scene_direction_reason(
+        "Several dresses hang on a rail beside the desk.", location=L.OFFICE,
+        outfit=O.BUSINESS_SUIT, outfit_detail="grey suit", venue_public=True)[1] == "garment_outside_outfit"
+    assert sd.validate_scene_direction_reason(
+        "Waves break on the sunny beach behind the loungers.", location=L.OFFICE,
+        venue_public=True)[1] == "foreign_location"
+    assert sd.validate_scene_direction_reason(
+        "She remembers the summers here.", location=L.HOME_BALCONY)[1] == "story_voice"
+    text, reason = sd.validate_scene_direction_reason(
+        _VALID_1, location=L.NIGHTCLUB, outfit=O.BODYCON_DRESS,
+        outfit_detail="black bodycon dress", venue_public=True)
+    assert text == _VALID_1 and reason is None
+
+
+def test_apply_whole_call_timeout_records_reason_on_all():
+    import httpx
+    scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter"),
+              _scene(1, LocationType.HOME_BEDROOM, staging="lying back on the pillows")]
+    _run_apply_raising(scenes, BatchControls(base_seed=1), _settings(),
+                       httpx.TimeoutException("read timed out"))
+    for s in scenes:
+        assert s.scene_direction is None and s.direction_source == "fallback"
+        assert s.direction_error is not None and s.direction_error.startswith("timeout")
+
+
+def test_apply_per_item_identity_failure_records_rule_others_none():
+    scenes = [
+        _scene(0, LocationType.NIGHTCLUB, OutfitType.BODYCON_DRESS, "bodycon dress",
+               staging="perched on a bar stool at the counter"),
+        _scene(1, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
+               staging="lying back on the pillows"),
+    ]
+    content = json.dumps([
+        {"index": 0, "direction": _VALID_1},              # valid
+        {"index": 1, "direction": _INVALID_IDENTITY},     # fails the identity rule
+    ])
+    _run_apply(scenes, BatchControls(base_seed=1), _settings(), content)
+    assert scenes[0].direction_source == "venice" and scenes[0].direction_error is None
+    assert scenes[1].direction_source == "fallback" and scenes[1].direction_error == "identity_vocab"
+
+
+def test_apply_happy_path_leaves_direction_error_none():
+    scenes = [_scene(0, LocationType.NIGHTCLUB, OutfitType.BODYCON_DRESS, "black bodycon dress",
+                     staging="perched on a bar stool at the counter")]
+    _run_apply(scenes, BatchControls(base_seed=1), _settings(),
+               json.dumps([{"index": 0, "direction": _VALID_1}]))
+    assert scenes[0].direction_source == "venice" and scenes[0].direction_error is None
+
+
+def test_apply_bad_json_records_invalid_json_reason():
+    scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter")]
+    _run_apply(scenes, BatchControls(base_seed=1), _settings(), "not json at all { [")
+    assert scenes[0].direction_source == "fallback" and scenes[0].direction_error == "invalid JSON"
+
+
+def test_apply_truncated_response_records_truncated_reason():
+    # A body that STARTS as a JSON array but never closes its bracket = the max_tokens cutoff.
+    scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter")]
+    _run_apply(scenes, BatchControls(base_seed=1), _settings(), '[{"index": 0, "direction": "warm ligh')
+    assert scenes[0].direction_source == "fallback" and scenes[0].direction_error == "truncated response"
+
+
+def test_apply_no_key_records_disabled_reason_but_leaves_source_none():
+    # provider=venice but no key -> Venice never attempted (source stays None), yet the misconfig
+    # is surfaced on every item via direction_error.
+    scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter")]
+    _run_apply(scenes, BatchControls(base_seed=1), _settings(key=""), None)
+    assert scenes[0].direction_source is None
+    assert scenes[0].direction_error == "disabled: no VENICE_API_KEY"
+
+
+def test_apply_deterministic_provider_leaves_direction_error_none():
+    # A deliberate config choice is NOT a failure -> no error stamped.
+    scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter")]
+    _run_apply(scenes, BatchControls(base_seed=1), _settings(provider="deterministic"), None)
+    assert scenes[0].direction_source is None and scenes[0].direction_error is None
+
+
 def _capture_write_batch_max_tokens(n_items: int, setting_max_tokens: int = 4000) -> int:
     """Run write_batch over n_items with a chat stub that records the max_tokens it was
     passed. Returns that value."""
@@ -373,6 +480,19 @@ def test_scene_spec_direction_fields_round_trip_jsonb():
     legacy = {k: v for k, v in dumped.items() if k not in ("scene_direction", "direction_source")}
     legacy_spec = SceneSpec(**legacy)
     assert legacy_spec.scene_direction is None and legacy_spec.direction_source is None
+
+
+def test_scene_spec_direction_error_round_trips_jsonb():
+    s = _scene(0, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe")
+    s.direction_source = "fallback"
+    s.direction_error = "timeout after 20s"
+    dumped = s.model_dump(mode="json")
+    assert dumped["direction_error"] == "timeout after 20s"
+    back = SceneSpec(**dumped)                       # re-validates the field (<=160) on the way in
+    assert back.direction_error == "timeout after 20s" and back.direction_source == "fallback"
+    # legacy jsonb WITHOUT the key -> defaults None.
+    legacy = {k: v for k, v in dumped.items() if k != "direction_error"}
+    assert SceneSpec(**legacy).direction_error is None
 
 
 # ---------------------------------------------------------------------------

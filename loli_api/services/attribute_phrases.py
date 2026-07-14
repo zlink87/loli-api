@@ -149,6 +149,21 @@ BREAST_SIZE_PHRASES = {
     "extra_large": "very large breasts",
 }
 
+# Pubic-hair grooming descriptors, keyed by PubicHairType value (models/enums.py).
+# Matte doctrine (no gloss/shine vocabulary — same discipline as the nude-base
+# anti-gloss clauses): these describe grooming/hair only, never a wet/oily/glossy
+# finish. Consumed ONLY where the genital area is exposed (nude base always;
+# generation/batch NAKED-class at HIGH nudity), via pubic_hair_phrase() below —
+# never in the always-on identity block. A None/unknown value resolves to the
+# SHAVED phrase (see pubic_hair_phrase), the product default.
+PUBIC_HAIR_PHRASES = {
+    "shaved": "completely smooth shaved pubic area",
+    "trimmed": "neatly trimmed short pubic hair",
+    "landing_strip": "a narrow neatly groomed strip of pubic hair",
+    "natural": "naturally groomed soft pubic hair",
+    "full": "full natural untrimmed pubic hair",
+}
+
 # --- Persona flavor ----------------------------------------------------------
 PERSONALITY_PHRASES = {
     "nympho": "a sultry, seductive expression",
@@ -290,6 +305,26 @@ def skin_tone_phrase(ethnicity) -> Optional[str]:
         return None
     key = str(key).strip().lower().replace("-", "_").replace(" ", "_")
     return SKIN_TONE_PHRASES.get(key)
+
+
+def pubic_hair_phrase(pubic_hair) -> str:
+    """
+    Grooming descriptor for the pubic area (e.g. ``trimmed`` -> "neatly trimmed
+    short pubic hair").
+
+    None/unknown resolves to the SHAVED phrase (the product default) so a persona
+    or stored row that predates this field still renders a definite groomed state
+    instead of leaving the NSFW-tuned base to improvise anatomy. Case- and
+    underscore-tolerant, mirroring ``skin_tone_phrase``: an enum member, "SHAVED",
+    or "landing-strip" all resolve. Returns a matte descriptor from
+    PUBIC_HAIR_PHRASES (never gloss/shine vocabulary). Always returns a non-empty
+    string — callers gate on WHERE it applies (exposed genital area only), not on
+    whether it's set.
+    """
+    key = _val(pubic_hair)
+    if key is not None:
+        key = str(key).strip().lower().replace("-", "_").replace(" ", "_")
+    return PUBIC_HAIR_PHRASES.get(key, PUBIC_HAIR_PHRASES["shaved"])
 
 
 def age_phrase(age: Optional[int]) -> str:

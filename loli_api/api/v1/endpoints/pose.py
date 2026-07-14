@@ -488,6 +488,31 @@ def pose_template_has_face_ref_conditioning(template: dict) -> bool:
     return "image3" in template.get("114", {}).get("inputs", {})
 
 
+# Turbo finishing pass (07-14, ships DARK). The turbofinish pose graph
+# (pose_2511_skinlora_faceref_turbofinish_API.json) inserts a LOW-denoise Z-Image-Turbo
+# img2img refine between the Qwen VAEDecode (node 8) and the ReActor swap (node 200): a
+# plain CLIPTextEncode (node "404", the turbo positive) whose text the preparer mirrors
+# from node 114, and a BasicScheduler (node "407") whose ``denoise`` float carries the
+# refine strength (graph bakes 0.32). Both node ids are absent from EVERY other pose
+# template, so the two writes in prepare_pose_workflow are strictly presence-gated and a
+# byte-identical no-op elsewhere. Detected off node 404 specifically (a CLIPTextEncode —
+# distinct from node 114's TextEncodeQwenImageEditPlus), mirroring how the face-ref clause
+# is detected off node 114.
+_TURBO_FINISH_POS_NODE = "404"
+_TURBO_FINISH_DENOISE_NODE = "407"
+
+
+def pose_template_has_turbo_finish(template: dict) -> bool:
+    """
+    True when this pose template carries the Z-Image-Turbo finishing pass — i.e. node 404
+    (the turbo positive CLIPTextEncode the preparer mirrors node 114's text into) exists.
+    Only pose_2511_skinlora_faceref_turbofinish_API.json ships it; every other pose graph
+    returns False, so the turbo writes in prepare_pose_workflow no-op there.
+    """
+    node = template.get(_TURBO_FINISH_POS_NODE)
+    return bool(node) and node.get("class_type") == "CLIPTextEncode"
+
+
 # WS-N2: style-scaled LoRA strengths. Natural/candid_phone renders otherwise look
 # editorial/contrasty because the pose graph's LoRA stack (node 304 URP / 305 NSFW /
 # 306 skin) applies its baked strengths identically to every style. For those two styles
@@ -555,6 +580,7 @@ def prepare_pose_workflow(
     output_megapixels: Optional[float] = None,
     face_restore_model: Optional[str] = None,
     lora_scales: Optional[Dict[str, float]] = None,
+    turbo_finish_denoise: Optional[float] = None,
 ) -> dict:
     """
     Prepare the pose workflow with injected parameters.
@@ -648,6 +674,17 @@ def prepare_pose_workflow(
             style). None/empty (default, and every polished/studio/interactive caller)
             touches nothing. A true no-op on graphs lacking those nodes (the v1 Rapid pose
             graph has none of them), so it never raises there.
+        turbo_finish_denoise: Turbo finishing pass (07-14, ships DARK), turbofinish pose
+            graph ONLY. Optional override for node 407 (BasicScheduler.denoise) — the
+            single scalar carrying the low-denoise Z-Image-Turbo re-skin strength (graph
+            bakes 0.32). >= 0 writes node 407's ``denoise``; None / the -1.0 sentinel
+            (default, and every caller until ops flips ``settings.POSE_TURBO_FINISH_DENOISE``)
+            leaves the baked 0.32 untouched (0.0 is itself a valid denoise, so it can't
+            double as "no override"). Independent of this knob, whenever node 404 (the
+            turbo positive CLIPTextEncode) is present its text is mirrored from the pose
+            positive ``prompt`` so Turbo re-skins under the SAME positive Qwen composed
+            under. Both writes are presence-gated: a true no-op (byte-identical) on every
+            pose graph without nodes 404/407.
 
     Returns:
         Prepared workflow dict
@@ -700,6 +737,34 @@ def prepare_pose_workflow(
     if prompt is not None and "114" in wf:
         wf["114"]["inputs"]["prompt"] = prompt
         logger.debug(f"Set node 114 prompt: {prompt[:80]}...")
+
+    # Node 404 (turbo finishing pass, ships DARK): the low-denoise Z-Image-Turbo refine
+    # re-skins the Qwen render with Turbo's natural prior BEFORE the ReActor swap. Turbo
+    # keeps doing NOTHING to composition — Qwen owns pose/outfit/scene — so its positive
+    # CLIPTextEncode must carry the SAME text as node 114. Mirror the pose positive prompt
+    # into it (node 404's field is ``text``, vs node 114's ``prompt``). Present ONLY on
+    # pose_2511_skinlora_faceref_turbofinish_API.json; every other template no-ops.
+    if prompt is not None and _TURBO_FINISH_POS_NODE in wf:
+        wf[_TURBO_FINISH_POS_NODE]["inputs"]["text"] = prompt
+        logger.debug(
+            f"Set node {_TURBO_FINISH_POS_NODE} turbo-finish prompt: {prompt[:60]}..."
+        )
+
+    # Node 407 (turbo finishing pass): optional refine-strength override. The turbo img2img
+    # denoise (BasicScheduler.denoise) is the single scalar tuning how hard Turbo re-skins;
+    # the graph bakes 0.32. >= 0 overrides it; None / the -1.0 sentinel leaves the baked
+    # value (0.0 is a valid denoise, so it can't be the no-override marker). Presence-gated,
+    # so a no-op on every non-turbofinish template.
+    if (
+        turbo_finish_denoise is not None
+        and turbo_finish_denoise >= 0
+        and _TURBO_FINISH_DENOISE_NODE in wf
+    ):
+        wf[_TURBO_FINISH_DENOISE_NODE]["inputs"]["denoise"] = float(turbo_finish_denoise)
+        logger.debug(
+            f"Set node {_TURBO_FINISH_DENOISE_NODE} turbo-finish denoise: "
+            f"{float(turbo_finish_denoise)}"
+        )
 
     # Node 115: LIVE negative — Tier-A (2511) pose graph ONLY. The v1 Rapid graph
     # has no node 115 and samples at cfg 1 (negatives inert), so this is gated on
