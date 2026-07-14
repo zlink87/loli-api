@@ -1,9 +1,11 @@
 """
 Single-pass batch pipeline (CORE FLOW).
 
-An eligible batch item (nude-base source + a pose + an outfit) collapses to ONE
-pose-graph job that dresses + re-scenes from the nude base in a single full-frame
-re-diffusion, instead of the legacy outfit -> background -> pose chain.
+An eligible batch item (nude-base source + a pose + a NAKED outfit) collapses to ONE
+pose-graph job that re-poses + re-scenes the already-nude body in a single full-frame
+re-diffusion, instead of the legacy outfit -> background -> pose chain. A real (non-NAKED)
+garment is NOT single-pass eligible: the full-frame pose graph can't reliably add an
+occluding garment over the nude base, so it routes to the legacy masked-inpaint path.
 
 Covers:
   * PipelineBackgroundWorker._determine_active_steps -> ["pose"] when singlePassEdit
@@ -186,11 +188,14 @@ def test_single_pass_scene_text_has_no_mood_or_time_lighting():
     mk = [list(KinkType)[0]]
     mp = list(PersonalityType)[0]
     scene = _scene(
-        pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT,
+        pose=PoseType.SITTING, outfit=OutfitType.NAKED,
         mood_kinks=mk, mood_personality=mp,
         time_of_day=TimeOfDayType.NIGHT, lighting=LightingType.CANDLELIT,
     )
-    req = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=True)
+    # NAKED is single-pass eligible; unblock it so it survives the effective-outfit filter
+    # (default controls block NAKED).
+    controls = BatchControls(blocked_outfits=[])
+    req = scene_to_pipeline_request(char, scene, controls, single_pass=True)
     assert req.singlePassEdit is True
 
     mood_phrase = sv.scene_mood_phrase(mk, mp)
@@ -212,7 +217,8 @@ _EST_SETTINGS = SimpleNamespace(
 
 
 def test_active_steps_single_pass_eligible_is_one_job():
-    scene = _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT)
+    # NAKED is the only single-pass-safe outfit (nothing to add over the nude base).
+    scene = _scene(pose=PoseType.SITTING, outfit=OutfitType.NAKED)
     # eligible: single-pass on + a nude base -> 1
     assert _active_steps_for_scene(
         scene, BatchControls(), single_pass=True, has_nude_base=True
@@ -242,9 +248,37 @@ def test_active_steps_single_pass_needs_both_pose_and_outfit():
     ) == 2
 
 
+def test_single_pass_naked_only_garment_routes_to_multistep():
+    # Regression (prod bug): the pose graph is a full-frame edit anchored to the nude base,
+    # NOT a masked dresser, so a real garment can't be reliably added over the bare body and
+    # the item came back NUDE. A non-NAKED outfit must therefore route to the legacy 3-step
+    # path (whose masked-inpaint OUTFIT step dresses the base before posing); only a NAKED
+    # target is single-pass safe. Both estimate side (_active_steps_for_scene) and decision
+    # side (scene_to_pipeline_request) must agree.
+    char = _character()
+    for garment in (OutfitType.BUSINESS_SUIT, OutfitType.BIKINI):
+        dressed = _scene(pose=PoseType.SITTING, outfit=garment)
+        assert _active_steps_for_scene(
+            dressed, BatchControls(), single_pass=True, has_nude_base=True
+        ) == 3
+        req = scene_to_pipeline_request(char, dressed, BatchControls(), single_pass=True)
+        assert req.singlePassEdit is False
+
+    # NAKED counterpart with the same pose + nude base IS single-pass eligible. Unblock
+    # NAKED so it survives the effective-outfit filter (default controls block it); the
+    # estimate mirror uses the raw scene.outfit so it doesn't need the unblock.
+    naked = _scene(pose=PoseType.SITTING, outfit=OutfitType.NAKED)
+    assert _active_steps_for_scene(
+        naked, BatchControls(), single_pass=True, has_nude_base=True
+    ) == 1
+    naked_controls = BatchControls(blocked_outfits=[])
+    req = scene_to_pipeline_request(char, naked, naked_controls, single_pass=True)
+    assert req.singlePassEdit is True
+
+
 def test_compute_estimate_reflects_single_pass_collapse():
     scenes = [
-        _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT, global_index=i)
+        _scene(pose=PoseType.SITTING, outfit=OutfitType.NAKED, global_index=i)
         for i in range(4)
     ]
     with_base = compute_estimate(scenes, BatchControls(), _EST_SETTINGS, has_nude_base=True)

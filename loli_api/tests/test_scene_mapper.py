@@ -608,9 +608,12 @@ def _single_pass_req(*, nude, pose, outfit, flag, controls=None):
     if pose:
         kw["pose"] = PoseType.SITTING
     if outfit:
-        kw["outfit"] = OutfitType.BUSINESS_SUIT
+        # NAKED is the only single-pass-eligible outfit (nothing to add over the nude base);
+        # a real garment routes to the legacy multi-step path. Default controls block NAKED,
+        # so unblock it here so it survives the effective-outfit filter.
+        kw["outfit"] = OutfitType.NAKED
     return scene_to_pipeline_request(
-        char, _scene(**kw), controls or BatchControls(), single_pass=flag
+        char, _scene(**kw), controls or BatchControls(blocked_outfits=[]), single_pass=flag
     )
 
 
@@ -632,11 +635,13 @@ def test_single_pass_not_eligible_when_any_condition_missing():
 
 def test_single_pass_default_param_is_not_eligible():
     # single_pass defaults to None (caller passes the settings flag); an omitted flag must
-    # never collapse an otherwise-eligible item.
+    # never collapse an otherwise-eligible item (nude base + pose + NAKED, the only single-
+    # pass-safe outfit). Here the ONLY missing condition is the flag.
     char = _character()
     char.nude_base_url = "https://x.supabase.co/nude.png"
     req = scene_to_pipeline_request(
-        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT), BatchControls()
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.NAKED),
+        BatchControls(blocked_outfits=[]),
     )
     assert req.singlePassEdit is False
 
@@ -674,12 +679,16 @@ def test_background_text_is_mood_free_in_both_modes():
     mp = list(PersonalityType)[0]
     mood = sv.scene_mood_phrase(mk, mp)
     assert mood  # guard: the mood function must produce something for the test to be meaningful
+    # NAKED (unblocked) keeps the single_pass=True request genuinely single-pass, so this
+    # exercises the scenery-only rule in BOTH the legacy multi-step and single-pass modes.
+    controls = BatchControls(blocked_outfits=[])
     scene = _scene(
-        pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT,
+        pose=PoseType.SITTING, outfit=OutfitType.NAKED,
         mood_kinks=mk, mood_personality=mp,
     )
-    legacy = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=False)
-    single = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=True)
+    legacy = scene_to_pipeline_request(char, scene, controls, single_pass=False)
+    single = scene_to_pipeline_request(char, scene, controls, single_pass=True)
+    assert single.singlePassEdit is True
     assert mood not in (legacy.prompt or "")   # moods no longer ride the background text
     assert mood not in (single.prompt or "")
 
@@ -690,12 +699,16 @@ def test_single_pass_scene_text_drops_time_and_lighting_duplication():
     # be composed into the scene text (else the one pose prompt says them twice).
     char = _character()
     char.nude_base_url = "https://x.supabase.co/nude.png"
+    # NAKED (unblocked) so single_pass=True is genuinely single-pass and this exercises the
+    # scene-text time/lighting de-duplication (a real garment would route to multi-step).
+    controls = BatchControls(blocked_outfits=[])
     scene = _scene(
-        pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT,
+        pose=PoseType.SITTING, outfit=OutfitType.NAKED,
         time_of_day=TimeOfDayType.NIGHT, lighting=LightingType.CANDLELIT,
     )
-    single = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=True)
-    legacy = scene_to_pipeline_request(char, scene, BatchControls(), single_pass=False)
+    single = scene_to_pipeline_request(char, scene, controls, single_pass=True)
+    legacy = scene_to_pipeline_request(char, scene, controls, single_pass=False)
+    assert single.singlePassEdit is True
     assert sv.time_of_day_phrase("night") not in (single.prompt or "")
     assert sv.lighting_phrase("candlelit") not in (single.prompt or "")
     # Legacy composes them into the background text as before.

@@ -199,11 +199,18 @@ def scene_to_pipeline_request(
 
     ``single_pass`` (the batch settings flag, passed by the caller so this module stays
     settings-free): when truthy AND the item is eligible — the swap SOURCE is the
-    character's nude base, a pose is set, and an outfit is set (NAKED counts; its tier
-    prose describes the state of dress) — the request is flagged ``singlePassEdit`` so
-    the pipeline collapses to ONE pose-graph job that dresses + re-scenes from the nude
-    base in a single full-frame re-diffusion. Not eligible / None -> the legacy
-    multi-step request, byte-identical to before this param existed.
+    character's nude base, a pose is set, and the effective outfit is NAKED — the request
+    is flagged ``singlePassEdit`` so the pipeline collapses to ONE pose-graph job that
+    re-poses + re-scenes the already-nude body in a single full-frame re-diffusion.
+    The NAKED-only gate is the whole point: the pose graph is a full-frame Qwen-Image-Edit
+    that re-diffuses the entire frame anchored to image1 (the nude base) — it is NOT a
+    masked dresser. It reliably re-poses/re-scenes a NUDE target (nothing to add), but it
+    cannot reliably ADD an occluding garment over the nude base: the "Dress her in: …"
+    text loses to the bare-body anchor and the item renders NUDE (observed in prod). A
+    real (non-NAKED) garment therefore stays on the legacy multi-step path, whose dedicated
+    masked-inpaint OUTFIT step clothes the nude base BEFORE the pose step ever runs (so the
+    pose step's image1 is already dressed). Not eligible / None -> the legacy multi-step
+    request, byte-identical to before this param existed.
     """
     pose = scene.pose if scene.pose not in (controls.blocked_poses or []) else None
     outfit = _effective_outfit(scene, controls)
@@ -262,14 +269,19 @@ def scene_to_pipeline_request(
     else:
         outfit_prompt_mode = controls.outfit_prompt_mode
 
-    # Single-pass eligibility: the pose step re-diffuses the WHOLE frame anyway, so when
-    # the source is the nude base AND we have both a pose and an outfit, the outfit +
-    # background steps only build a throwaway reference — collapse to one pose-graph job
-    # that dresses and re-scenes from the nude base. Requires all four: the caller's flag,
-    # a nude-base source, a pose, and an outfit (NAKED counts — its tier prose IS the
-    # state-of-dress, literally true against a nude base). Not eligible -> legacy request.
+    # Single-pass eligibility: the pose step re-diffuses the WHOLE frame anchored to the
+    # nude base (image1), so a NAKED target has nothing to add — the outfit + background
+    # steps only build a throwaway reference and we can collapse to one pose-graph job that
+    # re-poses and re-scenes the already-nude body. But that same full-frame re-diffusion is
+    # NOT a masked dresser: it cannot reliably paint an occluding garment over the bare body
+    # (the "Dress her in: …" text loses to the nude anchor and the item renders NUDE — seen
+    # in prod). So the outfit MUST be NAKED here; any real garment routes to the legacy
+    # multi-step path, whose dedicated masked-inpaint OUTFIT step clothes the base BEFORE the
+    # pose step runs. Requires all four: the caller's flag, a nude-base source, a pose, and a
+    # NAKED effective outfit (its tier prose IS the state-of-dress, literally true against a
+    # nude base). Not eligible -> legacy request.
     single_pass_edit = bool(
-        single_pass and nude_source and pose is not None and outfit is not None
+        single_pass and nude_source and pose is not None and outfit == OutfitType.NAKED
     )
 
     # C3 setting-led scenery: the director's ``setting`` sentence LEADS the composed

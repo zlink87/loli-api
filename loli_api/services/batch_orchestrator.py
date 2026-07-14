@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from models.enums import JobStatus
+from models.enums import JobStatus, OutfitType
 from models.batch import BatchCreate, BatchRead, BatchEstimate, BatchControls
 from models.scene import SceneSpec
 from models.trait_profile import TraitProfile
@@ -49,11 +49,15 @@ def _single_pass_eligible_scene(
 ) -> bool:
     """Estimate-side mirror of scene_mapper's single-pass eligibility: an item collapses
     to ONE pose-graph job when single-pass is on, the character has a nude base (the swap
-    source), and the scene sets both a (non-blocked) pose and an outfit (NAKED counts)."""
+    source), and the scene sets both a (non-blocked) pose and a NAKED outfit. A real garment
+    can't be added by the full-frame pose graph, so it routes to the legacy multi-step path
+    (see scene_to_pipeline_request); only NAKED is single-pass safe."""
     if not (single_pass and has_nude_base):
         return False
     pose_active = scene.pose is not None and scene.pose not in (controls.blocked_poses or [])
-    outfit_active = scene.outfit is not None
+    # Advisory cost/time only: this estimate mirror gates on the raw ``scene.outfit`` (not
+    # the effective outfit), matching the existing per-step counting pattern below.
+    outfit_active = scene.outfit == OutfitType.NAKED
     return pose_active and outfit_active
 
 

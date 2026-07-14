@@ -343,12 +343,15 @@ def test_mapper_threads_staging_into_prompt_and_request():
 def test_mapper_single_pass_scene_text_carries_staging_once():
     char = _character()
     char.nude_base_url = "https://x.supabase.co/nude.png"
+    # NAKED is the single-pass-safe outfit; a real garment routes to multi-step. Use NAKED
+    # (unblocked) so this stays single-pass and exercises the scene-text staging carry.
     scene = _scene(
-        pose=PoseType.SITTING_LEGS_WIDE_OPEN, outfit=OutfitType.BODYCON_DRESS,
+        pose=PoseType.SITTING_LEGS_WIDE_OPEN, outfit=OutfitType.NAKED,
         nudityLevel=NudityLevel.MEDIUM, staging="perched on a bar stool at the counter",
     )
     req = scene_to_pipeline_request(
-        char, scene, BatchControls(max_nudity=NudityLevel.MEDIUM), single_pass=True,
+        char, scene, BatchControls(max_nudity=NudityLevel.MEDIUM, blocked_outfits=[]),
+        single_pass=True,
     )
     assert req.singlePassEdit is True
     assert (req.prompt or "").count("perched on a bar stool at the counter") == 1
