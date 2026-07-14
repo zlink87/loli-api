@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-One-time generator for the 16 pose reference images.
+One-time generator for the pose reference images (one per PoseType).
 
 Drives the live API's ``POST /v1/generate/image`` endpoint (NOT the raw ComfyUI
 workflow) with a fixed neutral adult persona (age 30) plus each pose's
@@ -246,14 +246,14 @@ def print_review_checklist(saved: List[PoseType], out_dir: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate the 16 pose reference images via POST /v1/generate/image."
+        description="Generate the pose reference images via POST /v1/generate/image."
     )
     parser.add_argument(
         "--pose",
         action="append",
         dest="poses",
         metavar="POSE",
-        help="Pose value to (re)generate. Repeatable. Default: all 16 poses.",
+        help="Pose value to (re)generate. Repeatable. Default: all poses.",
     )
     parser.add_argument(
         "--overwrite",

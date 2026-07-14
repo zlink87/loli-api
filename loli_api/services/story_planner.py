@@ -51,7 +51,7 @@ from services import attribute_phrases as ap
 from services import scene_vocab as sv
 from services import story_templates as st
 from services import outfit_vocab as ov
-from services.pose_assets import POSE_DESCRIPTIONS
+from services.pose_assets import POSE_DESCRIPTIONS, has_pose_ref
 from services.venice_client import VeniceClient
 
 logger = logging.getLogger(__name__)
@@ -396,6 +396,13 @@ class StoryPlanner(ABC):
 # ---------------------------------------------------------------------------
 def _allowed_pose_pool(tmpl, controls: BatchControls) -> List[PoseType]:
     pool = [p for p in tmpl.pose_pool if p not in (controls.blocked_poses or [])]
+    # POSE PACK ref latch: drop any pose whose reference PNG is not installed, so the planner
+    # never picks a pose the render can't reference (load_pose_reference_b64 would raise). Every
+    # pose an authored template pools today ships WITH a ref -> this is a strict NO-OP here (the
+    # pool is byte-identical), but it hard-guards a future template that pools a pose before its
+    # PNG lands, and it is the sibling of the same filter in _controls_pose_vocab (the fallback
+    # vocab) that keeps the effective pose vocabulary identical to the pre-POSE-PACK baseline.
+    pool = [p for p in pool if has_pose_ref(p)]
     # WS-P pick-time compat: an ATHLETIC pose (jogging/squatting) can only ever pair
     # incoherently when the batch's effective wardrobe has NO athletic-compatible outfit — so
     # remove athletic poses from the pool up front in that case (drop the pose, NEVER the outfit:
@@ -475,25 +482,53 @@ _NATURAL_PHOTO_STYLES = ("natural", "candid_phone")
 _DRAMATIC_LIGHTING_KEYWORDS = ("dramatic", "backlit", "rim lighting", "spotlight", "neon", "moody")
 
 
-def _allowed_lighting_pool(tmpl, controls: BatchControls) -> List[LightingType]:
+def _allowed_lighting_pool(tmpl, controls: BatchControls, location=None) -> List[LightingType]:
     """
-    Lighting pool for a beat, filtered for photo_style natural/candid_phone (PROMPT
-    DE-GLOSS: a "natural" batch was still landing dramatic/theatrical light — see
-    _DRAMATIC_LIGHTING_KEYWORDS). polished/studio and every other style return
-    `tmpl.lighting_pool` unchanged (byte-identical pool, no behavior change).
+    Lighting pool for a beat, narrowed for:
+      1. venue sanity — LIGHTING_LOCATION_COMPAT (defined below, near LOCATION_TIME_
+         COMPAT), when `location` is given: the beat's authored lighting_pool
+         intersected with what `location` allows (a single LocationType/value, or an
+         iterable of candidates — the Venice per-beat menu offers several location
+         options at once, so the UNION of what each permits is used, a permissive
+         superset; the FINAL choice is narrowed for real by
+         _enforce_lighting_location_compat once the provider settles on one location).
+         Empty intersection -> the location's FULL allowed set, not the raw pool (venue
+         sanity wins over beat authorship). `location=None` skips this step entirely —
+         byte-identical to the pre-venue-sanity pool for any caller that opts out.
+      2. photo_style natural/candid_phone (PROMPT DE-GLOSS: a "natural" batch was still
+         landing dramatic/theatrical light — see _DRAMATIC_LIGHTING_KEYWORDS /
+         _is_dramatic_lighting). polished/studio and every other style skip this step
+         (byte-identical to whatever step 1 produced).
 
-    Safe fallback: if excluding theatrical phrases would empty a beat's pool entirely
-    (e.g. a night-club beat whose ONLY options are neon/moody), the ORIGINAL pool is
-    returned instead — a theatrical light beats no light. Callers filter BEFORE the
-    seeded rng.choice pick (never re-draw), so this never disturbs determinism.
+    Safe fallback chain (natural/candid_phone only): if step 2 would empty step 1's
+    result (a beat/location combo with no non-dramatic overlap — e.g. a night-club beat
+    whose ONLY authored options are neon/moody), fall back to `location`'s FULL allowed
+    set filtered the same way, THEN — only with no `location` context at all — the
+    pre-venue-sanity "a theatrical light beats no light" fallback (the historical
+    behavior, unchanged). natural_soft belongs to EVERY location's LIGHTING_LOCATION_
+    COMPAT set (coverage-tested), so once `location` is known this chain can never
+    actually land on a dramatic value — this is what closes the moody_dim leak: three
+    hand-authored beats (office/night_out/friends_and_date's "after hours" beat) offer
+    ONLY theatrical lighting, so filtering for natural used to empty the pool and the old
+    fallback reinstated the raw, still-100%-dramatic pool. Callers filter BEFORE the
+    seeded rng.choice pick (never re-draw), so this never disturbs determinism, and every
+    returned list is ordered by LightingType's own declaration order (never a raw set/
+    frozenset iteration — see _ordered_lighting), so the pick reproduces across process
+    restarts too.
     """
-    pool = list(tmpl.lighting_pool)
+    pool = _lighting_location_pool(list(tmpl.lighting_pool), location)
     if _val(controls.photo_style) not in _NATURAL_PHOTO_STYLES:
         return pool
-    filtered = [
-        li for li in pool
-        if not any(kw in sv.lighting_phrase(li).lower() for kw in _DRAMATIC_LIGHTING_KEYWORDS)
-    ]
+    filtered = [li for li in pool if not _is_dramatic_lighting(li)]
+    if filtered:
+        return filtered
+    if location is not None:
+        loc_filtered = [
+            li for li in _ordered_lighting(_lighting_locations_allowed(location))
+            if not _is_dramatic_lighting(li)
+        ]
+        if loc_filtered:
+            return loc_filtered
     return filtered or pool
 
 
@@ -572,10 +607,12 @@ class DeterministicScenePlanner(StoryPlanner):
                         nudityLevel=nudity,
                         location=location,
                         time_of_day=time_of_day,
-                        # Filtered for photo_style natural/candid_phone (excludes theatrical
-                        # phrases like "dramatic backlit rim lighting") BEFORE this seeded
-                        # pick, so determinism is preserved — see _allowed_lighting_pool.
-                        lighting=rng.choice(_allowed_lighting_pool(tmpl, controls)),
+                        # Filtered for venue sanity (LIGHTING_LOCATION_COMPAT, keyed to the
+                        # already-picked `location`) THEN photo_style natural/candid_phone
+                        # (excludes theatrical phrases like "dramatic backlit rim lighting")
+                        # BEFORE this seeded pick, so determinism is preserved — see
+                        # _allowed_lighting_pool.
+                        lighting=rng.choice(_allowed_lighting_pool(tmpl, controls, location=location)),
                         # mood_kinks/mood_personality are assigned below to a seeded ~1/3
                         # eligible subset (never on LOW/public scenes) so the batch stops
                         # ending every card on the same "sultry, seductive" mood tail.
@@ -935,6 +972,191 @@ def _time_compat_pool(
     """
     filtered = tuple(t for t in pool if _time_ok_at(t, location))
     return filtered or tuple(pool)
+
+
+# ---------------------------------------------------------------------------
+# Lighting <-> location coherence (WS-LIGHT real-world-sense guard)
+# ---------------------------------------------------------------------------
+# There was NO lighting<->venue rule at all: candlelit at a daytime cafe, or studio
+# softbox lighting anywhere, was equally "legal" before this table existed. A related,
+# sneakier bug this closes: a photo_style=natural batch — which must NEVER show
+# theatrical light (_DRAMATIC_LIGHTING_KEYWORDS / _is_dramatic_lighting) — still
+# occasionally landed moody_dim, because three hand-authored beats (office/night_out/
+# friends_and_date's "after hours" beat) offer ONLY theatrical lighting
+# ((moody_dim, neon), nothing else); filtering that pool for "natural" emptied it, and
+# the old "a theatrical light beats no light" fallback returned the still-100%-dramatic
+# raw pool. LIGHTING_LOCATION_COMPAT is the coherence table (mirrors LOCATION_TIME_COMPAT
+# exactly in shape): the set of LightingType values each place reads as real under. EVERY
+# LocationType value is covered (coverage-tested), and every entry contains AT LEAST
+# natural_soft — which is also the ONLY value guaranteed to survive the natural-style
+# dramatic filter — so falling back to a location's full allowed set (see
+# _allowed_lighting_pool) can now never resolve to a dramatic value: the moody_dim leak's
+# exact hole is closed structurally, not just patched at the three beats that triggered it.
+#
+# Enforced two ways, mirroring the time guard: at pick time the pool is intersected with
+# the location's allowed set BEFORE the natural-style filter (deterministic planner,
+# Venice per-beat menu, and the beat-pool repair — see _allowed_lighting_pool), and
+# _enforce_lighting_location_compat repairs any provider's output on the FINAL location.
+# Unlike time there is no "chronological nearest" concept for light, so the repair (and
+# apply_item_scene_edit's edit-time snap) both settle on the FIRST allowed value in
+# LightingType's own declaration order — deterministic, and natural_soft-first by
+# construction, so an incoherent edit/repair defaults to the safest, most neutral light.
+_LI = LightingType
+
+# Locations with no real window/daylight character: closed sets, artificial-light-only
+# venues, or curated interiors LOCATION_PHRASES gives no daylight read to (a "dimly lit
+# cocktail bar", an "exclusive VIP interior", a parked car's small cabin, photo_studio's
+# "closed set, artificial light" — the same note LOCATION_TIME_COMPAT makes for it — and
+# a theatrical stage). Backs bright_daylight/overcast and the "+windowed" half of
+# golden_warm below: every OTHER location gets those (the permissive default, so a new
+# LocationType degrades to "gets daylight" rather than a crash).
+_LIGHT_NO_WINDOW: frozenset = frozenset({
+    LocationType.PHOTO_STUDIO.value,
+    LocationType.STAGE.value,
+    LocationType.NIGHTCLUB.value,
+    LocationType.BAR.value,
+    LocationType.LUXURY_LOUNGE.value,
+    LocationType.CAR_INTERIOR.value,
+})
+_LIGHT_DAYLIT: frozenset = frozenset(
+    loc.value for loc in LocationType if loc.value not in _LIGHT_NO_WINDOW
+)
+
+# golden_warm additionally reaches two of the no-window venues that still read as a
+# "cozy warm glow" without a literal window: a plush lounge's ambient light, and the
+# cinematic golden light through a parked car's glass.
+_LIGHT_COZY_EXTRA: frozenset = frozenset({
+    LocationType.LUXURY_LOUNGE.value, LocationType.CAR_INTERIOR.value,
+})
+
+# Evening-romantic interiors a candlelit dinner/bath/bedroom reads as real in: dining
+# (restaurant — NOT restaurant_kitchen, a steel-counter service kitchen is never
+# candlelit, see LOCATION_PHRASES), every home_* room, hotel_room, luxury_lounge, bar.
+_LIGHT_CANDLELIT: frozenset = frozenset({
+    LocationType.RESTAURANT.value,
+    LocationType.HOME_BEDROOM.value, LocationType.HOME_LIVING_ROOM.value,
+    LocationType.HOME_KITCHEN.value, LocationType.HOME_BATHROOM.value,
+    LocationType.HOME_BALCONY.value, LocationType.HOME_OFFICE.value,
+    LocationType.HOTEL_ROOM.value, LocationType.LUXURY_LOUNGE.value, LocationType.BAR.value,
+})
+
+_LIGHT_STUDIO_SET: frozenset = frozenset({LocationType.PHOTO_STUDIO.value, LocationType.STAGE.value})
+_LIGHT_BACKLIT_SET: frozenset = frozenset({
+    LocationType.PHOTO_STUDIO.value, LocationType.STAGE.value, LocationType.NIGHTCLUB.value,
+})
+_LIGHT_NEON_SET: frozenset = frozenset({
+    LocationType.NIGHTCLUB.value, LocationType.BAR.value, LocationType.STAGE.value,
+})
+_LIGHT_MOODY_SET: frozenset = frozenset({
+    LocationType.NIGHTCLUB.value, LocationType.BAR.value, LocationType.STAGE.value,
+    LocationType.HOTEL_ROOM.value, LocationType.HOME_BEDROOM.value, LocationType.LUXURY_LOUNGE.value,
+})
+
+# lighting -> locations, authored per the rules in the section docstring above (the
+# readable source of truth); LIGHTING_LOCATION_COMPAT (location -> lightings, matching
+# LOCATION_TIME_COMPAT's own shape) is DERIVED from this by inversion below, so the two
+# views can never drift apart (mirrors scene_vocab.HOME_LIKE_LOCATIONS's derivation).
+_LIGHTING_TO_LOCATIONS: Dict[str, frozenset] = {
+    _LI.NATURAL_SOFT.value: frozenset(loc.value for loc in LocationType),  # universal
+    _LI.BRIGHT_DAYLIGHT.value: _LIGHT_DAYLIT,
+    _LI.OVERCAST.value: _LIGHT_DAYLIT,
+    _LI.GOLDEN_WARM.value: _LIGHT_DAYLIT | _LIGHT_COZY_EXTRA,
+    _LI.CANDLELIT.value: _LIGHT_CANDLELIT,
+    _LI.STUDIO_SOFTBOX.value: _LIGHT_STUDIO_SET,
+    _LI.BACKLIT_RIM.value: _LIGHT_BACKLIT_SET,
+    _LI.NEON.value: _LIGHT_NEON_SET,
+    _LI.MOODY_DIM.value: _LIGHT_MOODY_SET,
+}
+
+LIGHTING_LOCATION_COMPAT: Dict[str, frozenset] = {
+    loc.value: frozenset(
+        li for li in LightingType if loc.value in _LIGHTING_TO_LOCATIONS[li.value]
+    )
+    for loc in LocationType
+}
+
+
+def _ordered_lighting(members) -> List[LightingType]:
+    """Any container of LightingType rendered as a list in LightingType's own
+    declaration order — deterministic regardless of the input container's internal
+    (possibly hash-randomized, for a set/frozenset) iteration order. Every lighting pool
+    this module hands to a seeded rng.choice is built this way, never via list(some_set),
+    so a repeated plan is byte-identical across process restarts too."""
+    return [li for li in LightingType if li in members]
+
+
+def _lights_allowed_at(location) -> frozenset:
+    """Allowed LightingType set for a location (enum or value); unmapped/unknown ->
+    every LightingType (permissive default, mirrors _times_allowed_at)."""
+    return LIGHTING_LOCATION_COMPAT.get(_val(location), frozenset(LightingType))
+
+
+def _lighting_ok_at(lighting, location) -> bool:
+    """True iff `lighting` reads as real at `location` (LIGHTING_LOCATION_COMPAT)."""
+    try:
+        li = LightingType(_val(lighting))
+    except (ValueError, TypeError):
+        return True
+    return li in _lights_allowed_at(location)
+
+
+def _lighting_locations_allowed(location) -> frozenset:
+    """LIGHTING_LOCATION_COMPAT union across `location` — a single LocationType/value, or
+    an iterable of candidates (the Venice per-beat menu may offer several before the
+    provider settles on one). None/empty -> every LightingType (permissive)."""
+    if location is None:
+        return frozenset(LightingType)
+    locs = [location] if isinstance(location, (str, LocationType)) else list(location)
+    if not locs:
+        return frozenset(LightingType)
+    allowed = frozenset()
+    for loc in locs:
+        allowed |= _lights_allowed_at(loc)
+    return allowed
+
+
+def _lighting_location_pool(pool, location) -> List[LightingType]:
+    """
+    `pool` (already deterministically ordered, e.g. a beat's own tmpl.lighting_pool)
+    narrowed to _lighting_locations_allowed(`location`) — the pick-time coherence filter,
+    mirroring _time_compat_pool. Empty intersection -> that allowed set in full
+    (LightingType declaration order, never a raw set iteration — see _ordered_lighting),
+    so venue sanity wins over beat authorship rather than stranding the beat with zero
+    options. `location=None` -> `pool` unchanged (no location context; every existing
+    caller always supplies one).
+    """
+    if location is None:
+        return list(pool)
+    allowed = _lighting_locations_allowed(location)
+    narrowed = [li for li in pool if li in allowed]
+    return narrowed or _ordered_lighting(allowed)
+
+
+def _first_allowed_lighting(location, within=None) -> LightingType:
+    """
+    Deterministic 'first allowed' LightingType for `location` per
+    LIGHTING_LOCATION_COMPAT — the first LightingType (declaration order) present in
+    both the location's compat set and `within` (when given; None uses the full compat
+    set). No RNG (unlike time-of-day there is no "chronological nearest" concept for
+    light). natural_soft is declared first and is a member of every location's set
+    (coverage-tested), so with `within=None` this resolves to natural_soft everywhere —
+    the safe, neutral value an incoherent edit snaps to (apply_item_scene_edit). `within`
+    lets _enforce_lighting_location_compat additionally require the natural-style
+    non-dramatic subset without duplicating this same enum-order scan.
+    """
+    allowed = _lights_allowed_at(location)
+    candidates = allowed if within is None else (allowed & within)
+    for li in LightingType:
+        if li in candidates:
+            return li
+    return LightingType.NATURAL_SOFT  # unreachable: every location's set is non-empty
+
+
+def _is_dramatic_lighting(li) -> bool:
+    """True iff `li`'s rendered phrase reads as theatrical/staged light
+    (_DRAMATIC_LIGHTING_KEYWORDS) — the single exclusion test shared by
+    _allowed_lighting_pool (pick time) and _enforce_lighting_location_compat (repair)."""
+    return any(kw in sv.lighting_phrase(li).lower() for kw in _DRAMATIC_LIGHTING_KEYWORDS)
 
 
 def _compress_photo_runs(values, *, start_photo: int = 0) -> List[str]:
@@ -1414,10 +1636,16 @@ class VeniceScenePlanner(StoryPlanner):
                 fallback = controls.allowed_locations[0] if controls.allowed_locations else LocationType.HOME_LIVING_ROOM
                 location_pool = [_val(fallback)]
             time_pool = [_val(t) for t in slot.tmpl.time_pool]
-            # Same natural/candid_phone theatrical-lighting exclusion the deterministic
-            # planner applies (see _allowed_lighting_pool) — Venice must not even be
-            # OFFERED a dramatic/moody/neon option on a natural-style batch.
-            lighting_pool = [_val(li) for li in _allowed_lighting_pool(slot.tmpl, controls)]
+            # Same venue-sanity (LIGHTING_LOCATION_COMPAT, unioned across this beat's OWN
+            # location candidates above — Venice hasn't picked ONE yet) + natural/
+            # candid_phone theatrical-lighting exclusion the deterministic planner applies
+            # (see _allowed_lighting_pool) — Venice must not even be OFFERED an
+            # incoherent-for-the-venue or (on a natural-style batch) dramatic/moody/neon
+            # option. A permissive superset only: _enforce_lighting_location_compat
+            # narrows for real once Venice settles on one location.
+            lighting_pool = [
+                _val(li) for li in _allowed_lighting_pool(slot.tmpl, controls, location=location_pool)
+            ]
             beat_lines.append(
                 f'  BEAT {i + 1} (vibe: "{slot.tmpl.beat_description}"):\n'
                 f'    pose: {", ".join(pose_pool) or "(none allowed - output null)"}\n'
@@ -1803,11 +2031,13 @@ def _enforce_beat_pool(s: SceneSpec, slot: _BeatSlot, controls: BatchControls, s
 
     if s.time_of_day not in slot.tmpl.time_pool:
         s.time_of_day = rng.choice(list(slot.tmpl.time_pool))
-    # Same natural/candid_phone theatrical-lighting exclusion as the initial pick (see
-    # _allowed_lighting_pool) — an off-pool value from Venice/Manual is repaired INTO the
-    # filtered pool, not the raw beat pool, so a natural-style repair can't reintroduce a
-    # dramatic/moody/neon light either.
-    lighting_pool = _allowed_lighting_pool(slot.tmpl, controls)
+    # Same venue-sanity (LIGHTING_LOCATION_COMPAT, keyed to THIS scene's now-final
+    # location above) + natural/candid_phone theatrical-lighting exclusion as the
+    # initial pick (see _allowed_lighting_pool) — an off-pool value from Venice/Manual
+    # is repaired INTO the filtered/venue-narrowed pool, never the raw beat pool, so a
+    # repair can no longer reintroduce a dramatic/moody/neon light OR an incoherent
+    # venue pairing (the root cause of the moody_dim leak — see LIGHTING_LOCATION_COMPAT).
+    lighting_pool = _allowed_lighting_pool(slot.tmpl, controls, location=s.location)
     if s.lighting not in lighting_pool:
         s.lighting = rng.choice(lighting_pool)
 
@@ -1850,14 +2080,25 @@ _PRIVATE_INTERIORS = _HOME_INTERIORS | {
 _LYING_SPOTS = _PRIVATE_INTERIORS | {
     LocationType.POOLSIDE.value, LocationType.BEACH.value, LocationType.LUXURY_LOUNGE.value,
 }
-# Jogging reads coherent only on a runnable outdoor path or in a gym — NOT a cafe (the reported
-# "jogging @ cafe" bug) nor the decorative garden/poolside/rooftop the old _OUTDOORS set let
-# through. Judged from LocationType: park/city_street/beach/forest_trail are open paths, the gym
-# has treadmills.
+# Jogging/running reads coherent only on a runnable outdoor path or in a gym — NOT a cafe (the
+# reported "jogging @ cafe" bug) nor the decorative garden/poolside/rooftop the old _OUTDOORS set
+# let through. Judged from LocationType: park/city_street/beach/forest_trail are open paths, the
+# gym has treadmills. POSE PACK: running shares this exact set (see _POSE_LOCATION_GUARD).
 _JOG_SPOTS = {
     LocationType.PARK.value, LocationType.CITY_STREET.value, LocationType.BEACH.value,
     LocationType.FOREST_TRAIL.value, LocationType.GYM.value,
 }
+
+# POSE PACK: bent_over_from_behind is public-legal like its base pose bending_over (which stays
+# location-agnostic), but a provocative bend-from-behind must never land in a straight, formal
+# professional venue. Allowlist = every location EXCEPT those workplaces (office / classroom /
+# library / hospital_ward). Derived from LocationType so a newly added location is permitted by
+# default (only the four formal venues are ever excluded).
+_FORMAL_WORK_VENUES = {
+    LocationType.OFFICE.value, LocationType.CLASSROOM.value,
+    LocationType.LIBRARY.value, LocationType.HOSPITAL_WARD.value,
+}
+_BENT_OVER_FROM_BEHIND_SPOTS = {loc.value for loc in LocationType} - _FORMAL_WORK_VENUES
 
 # Pose -> the set of LOCATION values where that pose reads as coherent (WS-P extends this for
 # the reported bad pairs). A pose absent from this map is location-agnostic (allowed anywhere).
@@ -1875,6 +2116,12 @@ _POSE_LOCATION_GUARD: Dict[str, set] = {
     # WS-P jogging: TIGHTENED to outdoor paths + gym (was _OUTDOORS | {gym}); drops cafe (the
     # bug) and the decorative garden/poolside/rooftop. Covers authored {city_street, park}.
     PoseType.JOGGING.value: _JOG_SPOTS,
+    # POSE PACK: running inherits jogging's exact location set (outdoor paths + gym).
+    PoseType.RUNNING.value: _JOG_SPOTS,
+    # POSE PACK: bent_over_from_behind — public-legal everywhere except the formal workplaces
+    # (office/classroom/library/hospital_ward). NOT private-only (it stays legal at public social
+    # venues); the allowlist is what keeps it out of a straight professional setting.
+    PoseType.BENT_OVER_FROM_BEHIND.value: _BENT_OVER_FROM_BEHIND_SPOTS,
     # WS-P lying_back / lying_stomach: private/intimate lounging places only. Covers authored
     # {home_balcony, home_bathroom, home_bedroom, home_living_room, hotel_room, photo_studio}
     # for lying_back and {home_bedroom} for lying_stomach; poolside/beach lounging allowed too.
@@ -1936,6 +2183,12 @@ _UNIFORM_OUTFITS = {
 # other public crowd venue (club/bar/cafe/office/beach/…).
 PRIVATE_ONLY_POSES: frozenset = frozenset({
     PoseType.SPREAD_LEGS, PoseType.SITTING_LEGS_WIDE_OPEN, PoseType.ALL_FOURS,
+    # POSE PACK (07-14): the new overtly-sexual floor/kneel + straddle poses are private-only
+    # too — barred from every inherently-populated PUBLIC venue. None of the three carries a
+    # _POSE_LOCATION_GUARD allowlist entry (unlike all_fours, whose gym/yoga_studio entry WINS
+    # per _pose_ok_at), so they stay private at EVERY public venue. bent_over_from_behind is
+    # deliberately NOT here — it is public-legal (guarded only against formal workplaces).
+    PoseType.ALL_FOURS_FROM_BEHIND, PoseType.KNEELING_ARCHED_BACK, PoseType.STRADDLING_CHAIR,
 })
 _PRIVATE_ONLY_POSE_VALUES: frozenset = frozenset(p.value for p in PRIVATE_ONLY_POSES)
 
@@ -1951,10 +2204,13 @@ _PRIVATE_ONLY_POSE_VALUES: frozenset = frozenset(p.value for p in PRIVATE_ONLY_P
 _ATHLETIC_OUTFIT_STYLES: frozenset = frozenset({
     WardrobeStyleType.SPORTY, WardrobeStyleType.STREETWEAR, WardrobeStyleType.CASUAL_MINIMAL,
 })
-# The athletic pose set: jogging + squatting (the only PoseType members that are clearly
+# The athletic pose set: jogging + squatting + running (the PoseType members that are clearly
 # sport/exercise). Removed from a batch's pose pools up front when the wardrobe has no
 # athletic-compatible outfit (see _allowed_pose_pool), and enforced per-scene at repair time.
-ATHLETIC_POSES: frozenset = frozenset({PoseType.JOGGING, PoseType.SQUATTING})
+# POSE PACK: running joins the set so it inherits jogging's exact wardrobe compat (same
+# {sporty, streetwear, casual_minimal} requirement, via POSE_OUTFIT_COMPAT below) — a formal
+# dress never gets "running", just as it never got "jogging".
+ATHLETIC_POSES: frozenset = frozenset({PoseType.JOGGING, PoseType.SQUATTING, PoseType.RUNNING})
 # pose value -> required outfit-style set (same {sporty, streetwear, casual} for every athletic
 # pose). Shape mirrors _POSE_LOCATION_GUARD (value-keyed) so _pose_outfit_ok reads off it the
 # same way _pose_ok_at reads _POSE_LOCATION_GUARD; a pose absent here is outfit-agnostic.
@@ -2266,7 +2522,14 @@ def _controls_pose_vocab(controls: BatchControls) -> List[PoseType]:
     allow_athletic = _athletic_poses_allowed(controls)
     return [
         p for p in PoseType
-        if p not in (controls.blocked_poses or [])
+        # POSE PACK ref latch: a pose whose reference PNG is not installed is "dark" — never a
+        # fallback re-pick candidate. This is what keeps the effective pose vocabulary
+        # byte-identical to the pre-POSE-PACK baseline: the 11 appended poses ship refless, so
+        # this iterator yields exactly the original installed poses, in the original order, so
+        # every seeded fallback re-pick (usage caps / variety / compat) reproduces unchanged
+        # until the new references are committed (see services.pose_assets.has_pose_ref).
+        if has_pose_ref(p)
+        and p not in (controls.blocked_poses or [])
         and (allow_athletic or p not in ATHLETIC_POSES)
     ]
 
@@ -3167,6 +3430,43 @@ def _enforce_time_location_compat(scenes: List[SceneSpec], controls: BatchContro
 
 
 # ---------------------------------------------------------------------------
+# Lighting <-> location compat repair (WS-LIGHT) — the authoritative net.
+# ---------------------------------------------------------------------------
+def _enforce_lighting_location_compat(scenes: List[SceneSpec], controls: BatchControls) -> None:
+    """
+    Every scene's lighting must be a value LIGHTING_LOCATION_COMPAT allows at its FINAL
+    location (_lighting_ok_at). Mirrors _enforce_time_location_compat exactly: the
+    usage-cap/ceiling/exposure/pose repairs above can all move the LOCATION after
+    lighting was first picked or beat-pool-repaired, so this is the authoritative net on
+    the settled state.
+
+    Deterministic (no RNG, so no seeded stream is consumed and reproducibility of every
+    other field is byte-identical): snaps to the FIRST LightingType (declaration order)
+    the FINAL location allows, additionally excluding dramatic/theatrical values
+    (_is_dramatic_lighting) when the batch is natural/candid_phone-styled — reusing
+    _allowed_lighting_pool's own exclusion logic so a natural batch can never end this
+    pass on a moody/neon/backlit light, even at a location (nightclub/bar/luxury_lounge)
+    whose compat set otherwise skews theatrical (natural_soft is a member of EVERY
+    location's set — see LIGHTING_LOCATION_COMPAT — so this always has a safe value to
+    land on: the moody_dim leak's exact hole, closed here too, not just at pick time).
+
+    Runs immediately after _enforce_time_location_compat and BEFORE _reconcile_captions
+    (order between the two compat passes doesn't matter — captions never name a lighting
+    value — only that both settle before the caption rebuild reads the final scene state).
+    No-op for a scene whose lighting already fits (byte-identical).
+    """
+    natural = _val(controls.photo_style) in _NATURAL_PHOTO_STYLES
+    for s in scenes:
+        allowed = _lights_allowed_at(s.location)
+        candidates = allowed
+        if natural:
+            non_dramatic = frozenset(li for li in allowed if not _is_dramatic_lighting(li))
+            candidates = non_dramatic or allowed
+        if s.lighting not in candidates:
+            s.lighting = _first_allowed_lighting(s.location, within=candidates)
+
+
+# ---------------------------------------------------------------------------
 # Caption coherence (PLANNER COHERENCE): repair captions the repairs falsified.
 # ---------------------------------------------------------------------------
 # Lowercase caption tokens that IMPLY a given LocationType. A beat_description is written
@@ -3584,13 +3884,17 @@ def validate_and_repair(
     #   9. _enforce_expression_adjacency    — no identical expression in consecutive items
     #  10. _enforce_time_location_compat(1a)— snap each time onto the FINAL location's allowed set
     #                                         (never relocates; deterministic), BEFORE captions
-    #  11. _reconcile_captions              — rewrite captions the moves above falsified
+    #  11. _enforce_lighting_location_compat(WS-LIGHT) — snap each lighting onto the FINAL
+    #                                         location's allowed set (+ natural-style dramatic
+    #                                         exclusion), deterministic, BEFORE captions
+    #  12. _reconcile_captions              — rewrite captions the moves above falsified
     # 6 touches ONLY pose/pose_detail (multiset-preserving swaps + cap-aware re-picks); 8 touches
     # ONLY expression (swap-first, so the candid share + usage cap hold and 9 still runs last on
-    # the settled multiset); 10 touches ONLY time_of_day (deterministic nearest-allowed, no RNG).
-    # So the nudity ramp, location ceilings, exposure caps and mood strip are all left intact. 11
-    # runs LAST, once location/outfit/pose/time are final, and only rewrites a beat_description
-    # that names a location the item no longer occupies (a coherent caption stays byte-identical).
+    # the settled multiset); 10 touches ONLY time_of_day and 11 touches ONLY lighting (both
+    # deterministic nearest/first-allowed, no RNG). So the nudity ramp, location ceilings,
+    # exposure caps and mood strip are all left intact. 12 runs LAST, once location/outfit/pose/
+    # time/lighting are final, and only rewrites a beat_description that names a location the
+    # item no longer occupies (a coherent caption stays byte-identical).
     if enforce_variety:
         _strip_ineligible_moods(repaired)
         repaired = _enforce_pose_compat(repaired, slots, controls)
@@ -3602,6 +3906,10 @@ def validate_and_repair(
         # WS1a: snap any time_of_day the location moves left incoherent onto the nearest value
         # the FINAL location allows (never relocates), before the caption rebuild.
         _enforce_time_location_compat(repaired, controls)
+        # WS-LIGHT: snap any lighting the location moves left incoherent (or that a
+        # natural-style batch should never have carried) onto the FINAL location's
+        # allowed set, before the caption rebuild.
+        _enforce_lighting_location_compat(repaired, controls)
         _reconcile_captions(repaired)
 
     # SCENE STAGING (WS-STAGE, final enrichment): anchor every scene to a concrete
@@ -3752,6 +4060,14 @@ def _validate_edit_enum(key: str, value, controls: BatchControls) -> None:
     elif key == "pose":
         if value in (controls.blocked_poses or []):
             raise SceneEditError(f"pose '{value.value}' is blocked for this batch")
+        if not has_pose_ref(value):
+            # Same latch as the planner pools and the interactive pose endpoint:
+            # a refless pose would only fail later at the worker (missing
+            # pose_ref PNG) -- reject the edit up front instead.
+            raise SceneEditError(
+                f"pose '{value.value}' is not available yet (its reference "
+                "image has not been generated)"
+            )
     elif key == "location":
         if value in (controls.blocked_locations or []):
             raise SceneEditError(f"location '{value.value}' is blocked for this batch")
@@ -3820,8 +4136,12 @@ def apply_item_scene_edit(
     coerced with _coerce_enum then checked against ``controls`` — an outfit/pose/
     location the allow/block lists forbid, or a nudity above ``max_nudity`` (or
     non-LOW under sfw_only), raises SceneEditError. An explicit null clears the
-    nullable steps (outfit/pose). Free-text detail fields (setting, activity,
-    pose_detail, outfit_detail, expression) get the planner's identity scrub,
+    nullable steps (outfit/pose). A ``lighting`` edit that lands on a value
+    LIGHTING_LOCATION_COMPAT disallows at the item's FINAL location (the just-edited
+    location, if this same edit also touched it, else the stored one) is snapped to that
+    location's first allowed value instead of rejected — repaired, not rejected, like
+    every other coherence guard in this module. Free-text detail fields (setting,
+    activity, pose_detail, outfit_detail, expression) get the planner's identity scrub,
     companion strip, and length caps (_scrub_scene_text / strip_companions /
     _scrub_expression). Raises SceneEditError on any violation.
     """
@@ -3841,6 +4161,15 @@ def apply_item_scene_edit(
             raise SceneEditError(f"invalid {key}: {raw!r}")
         _validate_edit_enum(key, value, controls)
         spec[attr] = value.value
+
+    # Lighting <-> location coherence (LIGHTING_LOCATION_COMPAT): only runs when THIS
+    # edit itself sets lighting (a location-only edit is left for the planner's own
+    # repair pass on the next full replan, not re-validated on a single-item PATCH).
+    # spec["location"] already reflects a same-request location edit (processed above,
+    # _EDIT_ENUM_FIELDS iterates in its own fixed key order) or else the item's stored
+    # location. Deterministic snap, no RNG.
+    if "lighting" in edit and not _lighting_ok_at(spec.get("lighting"), spec.get("location")):
+        spec["lighting"] = _first_allowed_lighting(spec.get("location")).value
 
     for key in ("setting", "activity", "pose_detail", "outfit_detail", "expression"):
         if key in edit:

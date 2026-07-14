@@ -53,6 +53,7 @@ from workers.nude_base_worker import (
     ANTI_GLOSS_POSITIVE,
     NEUTRAL_BASE_OUTFIT_CLAUSE,
     BODY_AESTHETIC_CLAUSES,
+    BODY_AESTHETIC_POSTURE_TAIL,
     REACTOR_CODEFORMER_WEIGHT,
     REACTOR_FACE_RESTORE_VISIBILITY,
     REACTOR_FACE_RESTORE_MODEL,
@@ -83,6 +84,47 @@ def test_seed_is_deterministic_crc32_per_character():
     assert stable_nude_base_seed("c1") == zlib.crc32(b"c1")             # crc32, not hash()
     assert stable_nude_base_seed("c1") != stable_nude_base_seed("c2")   # per-character
     assert isinstance(stable_nude_base_seed("abc"), int)
+
+
+# ---------------------------------------------------------------------------
+# Reroll — variant seed math (stable_nude_base_seed extended, not replaced).
+# ---------------------------------------------------------------------------
+def test_seed_variant_omitted_defaults_to_zero_matches_legacy_call():
+    # No second argument at all — the pre-reroll call signature — still resolves
+    # to variant=0, so every existing caller (including every OTHER test in this
+    # file that calls stable_nude_base_seed(character_id) with one argument) keeps
+    # today's canonical seed unchanged.
+    assert stable_nude_base_seed("c1") == stable_nude_base_seed("c1", 0)
+
+
+def test_seed_variant_zero_is_byte_identical_to_original_seed():
+    assert stable_nude_base_seed("c1", 0) == zlib.crc32(b"c1")
+
+
+def test_seed_variant_seven_is_old_seed_plus_seven_masked_to_32_bits():
+    old = stable_nude_base_seed("c1")
+    assert stable_nude_base_seed("c1", 7) == (old + 7) & 0xFFFFFFFF
+    assert stable_nude_base_seed("c1", 7) != old
+
+
+def test_seed_variant_is_deterministic_per_variant():
+    assert stable_nude_base_seed("c1", 5) == stable_nude_base_seed("c1", 5)   # stable
+    assert stable_nude_base_seed("c1", 5) != stable_nude_base_seed("c1", 6)   # distinct
+    assert stable_nude_base_seed("c1", 5) != stable_nude_base_seed("c2", 5)   # still per-character
+
+
+def test_seed_variant_wraps_at_32_bit_boundary_not_a_no_op_mask():
+    # Direct proof the "& 0xFFFFFFFF" isn't decorative: crc32's own max value
+    # already sits at the top of the 32-bit range, so a variant offset from there
+    # MUST wrap around rather than overflow past it.
+    prev_crc32 = nbw.zlib.crc32
+    nbw.zlib.crc32 = lambda data: 0xFFFFFFFF
+    try:
+        assert stable_nude_base_seed("anything", 0) == 0xFFFFFFFF
+        assert stable_nude_base_seed("anything", 1) == 0            # wraps past the top
+        assert stable_nude_base_seed("anything", 5) == 4
+    finally:
+        nbw.zlib.crc32 = prev_crc32
 
 
 # ---------------------------------------------------------------------------
@@ -117,20 +159,25 @@ def test_base_prompt_carries_identity_naked_pose_backdrop_natural_no_glamour():
     assert ANTI_GLOSS_POSITIVE in positive
     assert "matte natural skin" in low and "visible pores" in low and "sharp focus" in low
 
-    # Body-aesthetic clause (nude base v2): _persona() is bodyType="curvy", so her
-    # own graceful/model-like framing clause reaches the base, inserted between the
-    # quality tail and the anti-gloss clause.
+    # Body-aesthetic clause (nude base v3): _persona() is bodyType="curvy", so her
+    # own stronger, model-like framing clause reaches the base, inserted between the
+    # quality tail and the anti-gloss clause, immediately followed by the shared
+    # posture tail.
     assert BODY_AESTHETIC_CLAUSES["curvy"] in positive
+    assert BODY_AESTHETIC_POSTURE_TAIL in positive
+    assert positive.index(BODY_AESTHETIC_CLAUSES["curvy"]) < positive.index(BODY_AESTHETIC_POSTURE_TAIL)
 
     # NO glamour/gloss tokens anywhere in the assembled POSITIVE.
     for banned in _GLAMOUR_BANNED:
         assert banned not in low, f"banned glamour/gloss token in base prompt: {banned!r}"
 
     # Extend the banned-vocab check to EVERY BODY_AESTHETIC_CLAUSES entry (not just
-    # the one this persona happens to draw) so a future edit to any of the 5 clauses
-    # can't quietly reintroduce a glamour/gloss token. curvy/bbw additionally must
-    # never carry slimming vocabulary — that would fight the admin's explicit
-    # body-type choice instead of gracefully framing it.
+    # the one this persona happens to draw) plus the shared posture tail, so a future
+    # edit to any of the 5 clauses (or the tail) can't quietly reintroduce a
+    # glamour/gloss token. curvy/bbw additionally must never carry slimming
+    # vocabulary — that would fight the admin's explicit body-type choice instead
+    # of gracefully framing it. The posture tail rides along with EVERY clause
+    # (including curvy/bbw), so it is held to the same slimming-vocab ban.
     for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
         clause_low = clause.lower()
         for banned in _GLAMOUR_BANNED:
@@ -142,6 +189,12 @@ def test_base_prompt_carries_identity_naked_pose_backdrop_natural_no_glamour():
                 assert slim_word not in clause_low, (
                     f"slimming vocab leaked into {body_type!r} body clause: {slim_word!r}"
                 )
+
+    tail_low = BODY_AESTHETIC_POSTURE_TAIL.lower()
+    for banned in _GLAMOUR_BANNED:
+        assert banned not in tail_low, f"banned glamour/gloss token in posture tail: {banned!r}"
+    for slim_word in ("slim", "slender", "petite", "skinny"):
+        assert slim_word not in tail_low, f"slimming vocab leaked into posture tail: {slim_word!r}"
 
     # The gloss-suppression wording lives in the NEGATIVE instead (never the positive).
     neg_low = negative.lower()
@@ -172,8 +225,10 @@ def _persona_with_body(body_type) -> PersonaOptions:
 def test_base_prompt_carries_body_clause_for_skinny_persona():
     positive, _negative, _locked = build_nude_base_prompt(_persona_with_body("skinny"))
     assert BODY_AESTHETIC_CLAUSES["skinny"] in positive
-    # Sits between the quality tail and the anti-gloss clause, as assembled.
-    assert positive.index(BODY_AESTHETIC_CLAUSES["skinny"]) < positive.index(ANTI_GLOSS_POSITIVE)
+    # Sits between the quality tail and the anti-gloss clause, as assembled, with
+    # the shared posture tail immediately after the per-type clause.
+    assert positive.index(BODY_AESTHETIC_CLAUSES["skinny"]) < positive.index(BODY_AESTHETIC_POSTURE_TAIL)
+    assert positive.index(BODY_AESTHETIC_POSTURE_TAIL) < positive.index(ANTI_GLOSS_POSITIVE)
     # No other body type's clause leaks in.
     for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
         if body_type != "skinny":
@@ -183,7 +238,8 @@ def test_base_prompt_carries_body_clause_for_skinny_persona():
 def test_base_prompt_carries_body_clause_for_curvy_persona():
     positive, _negative, _locked = build_nude_base_prompt(_persona_with_body("curvy"))
     assert BODY_AESTHETIC_CLAUSES["curvy"] in positive
-    assert positive.index(BODY_AESTHETIC_CLAUSES["curvy"]) < positive.index(ANTI_GLOSS_POSITIVE)
+    assert positive.index(BODY_AESTHETIC_CLAUSES["curvy"]) < positive.index(BODY_AESTHETIC_POSTURE_TAIL)
+    assert positive.index(BODY_AESTHETIC_POSTURE_TAIL) < positive.index(ANTI_GLOSS_POSITIVE)
     for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
         if body_type != "curvy":
             assert clause not in positive, f"unexpected {body_type!r} clause in curvy prompt"
@@ -195,6 +251,9 @@ def test_base_prompt_skips_body_clause_cleanly_for_unknown_body_type():
     # None of the known clauses appear ...
     for body_type, clause in BODY_AESTHETIC_CLAUSES.items():
         assert clause not in positive, f"unexpected {body_type!r} clause for an unknown body type"
+    # ... the shared posture tail never appears on its own either (it only ever
+    # rides along with a real per-type clause) ...
+    assert BODY_AESTHETIC_POSTURE_TAIL not in positive
     # ... and the skip left no dangling separator artifact.
     assert ", ," not in positive
     assert ANTI_GLOSS_POSITIVE in positive  # the rest of the assembly is unaffected
@@ -443,16 +502,17 @@ class _FakeStorage:
         return f"https://example.local/{relative_path}", None
 
 
-def _nude_base_request(character_id="c1"):
+def _nude_base_request(character_id="c1", variant=0):
     return NudeBaseGenerateRequest(
         persona=_persona(),
         hero_image_url="https://x.supabase.co/hero.png",
         character_id=character_id,
-        seed=stable_nude_base_seed(character_id),
+        seed=stable_nude_base_seed(character_id, variant),
+        variant=variant,
     )
 
 
-async def _run_nude_base_job(runpod_client, storage):
+async def _run_nude_base_job(runpod_client, storage, variant=0):
     """
     Build a real JobManager + NudeBaseWorker, enqueue one nude_base job exactly
     as the endpoint does (create_job), pop it exactly as _worker_loop does
@@ -470,7 +530,9 @@ async def _run_nude_base_job(runpod_client, storage):
     )
     worker._t2i_template = json.loads(_T2I_TEMPLATE_PATH.read_text())
 
-    created = await job_manager.create_job(_nude_base_request(), user_id="admin-1", job_type="nude_base")
+    created = await job_manager.create_job(
+        _nude_base_request(variant=variant), user_id="admin-1", job_type="nude_base"
+    )
     job_id = await job_manager.get_next_nude_base_job()
     assert job_id == created.job_id
     job = await job_manager.get_job(job_id)
@@ -506,6 +568,47 @@ def test_process_job_face_swap_off_by_default_submits_only_t2i_workflow():
         assert job.status == JobStatus.SUCCEEDED
         assert job.preview_url == f"https://example.local/nude_bases/{job.job_id}.png"
         assert job.image_hash == f"hash-{job.job_id}"
+    finally:
+        settings.NUDE_BASE_FACE_SWAP = prev
+
+
+# ---------------------------------------------------------------------------
+# Reroll — the job payload (NudeBaseGenerateRequest) carries `variant`, and the
+# worker runs a nonzero-variant job exactly like variant=0 (only the seed differs).
+# ---------------------------------------------------------------------------
+def test_nude_base_generate_request_variant_defaults_to_zero():
+    req = _nude_base_request("c1")
+    assert req.variant == 0
+    assert req.seed == zlib.crc32(b"c1")
+
+
+def test_nude_base_generate_request_carries_explicit_variant():
+    req = _nude_base_request("c1", variant=3)
+    assert req.variant == 3
+    assert req.seed == (zlib.crc32(b"c1") + 3) & 0xFFFFFFFF
+
+
+def test_process_job_with_nonzero_variant_succeeds_and_request_carries_variant():
+    prev = settings.NUDE_BASE_FACE_SWAP
+    settings.NUDE_BASE_FACE_SWAP = False
+    try:
+        t2i_bytes = b"T2I_BASE_BYTES_VARIANT"
+        runpod = _FakeRunPodClient(outputs=[t2i_bytes])
+        storage = _FakeStorage()
+
+        job = asyncio.run(_run_nude_base_job(runpod, storage, variant=4))
+
+        # Runs exactly like variant=0 (one t2i workflow, its bytes persisted) — the
+        # only difference is the seed baked into the request/workflow.
+        assert len(runpod.submitted) == 1
+        assert job.status == JobStatus.SUCCEEDED
+        assert job.request.variant == 4
+        assert job.request.seed == (zlib.crc32(b"c1") + 4) & 0xFFFFFFFF
+        assert job.request.seed == stable_nude_base_seed("c1", 4)
+
+        saved_bytes, saved_job_id = storage.saved[0]
+        assert saved_bytes == t2i_bytes
+        assert saved_job_id == job.job_id
     finally:
         settings.NUDE_BASE_FACE_SWAP = prev
 
@@ -645,6 +748,7 @@ def test_post_t2i_builds_nude_base_job_with_persona_hero_and_seed():
         assert request.hero_image_url == "https://x.supabase.co/hero.png"
         assert request.character_id == "c1"
         assert request.seed == zlib.crc32(b"c1")
+        assert request.variant == 0   # omitted -> canonical deterministic base
         assert request.persona.name == "Stella"
 
         # A pending base row was recorded against that job.
@@ -655,6 +759,84 @@ def test_post_t2i_builds_nude_base_job_with_persona_hero_and_seed():
         assert resp.status == "pending"
         assert resp.jobId == "nude_base_new"
         assert resp.imageUrl is None
+    finally:
+        settings.NUDE_BASE_T2I = prev
+
+
+# ---------------------------------------------------------------------------
+# Reroll — POST /{character_id}/nude-base's `variant` query param (t2i path).
+# ---------------------------------------------------------------------------
+def test_post_t2i_variant_rerolls_seed_and_is_carried_in_payload():
+    prev = settings.NUDE_BASE_T2I
+    settings.NUDE_BASE_T2I = True
+    try:
+        jm = _FakeJobManager()
+        nude = _FakeNudeStore(latest=None)
+        _wire(jm, _FakeCharStore(_character()), nude)
+
+        resp = asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}, variant=7))
+
+        assert len(jm.created) == 1
+        request, _user_id, job_type = jm.created[0]
+        assert job_type == "nude_base"
+        assert request.variant == 7
+        assert request.seed == (zlib.crc32(b"c1") + 7) & 0xFFFFFFFF
+        assert request.seed != zlib.crc32(b"c1")   # a genuinely different body from variant=0
+        assert resp.status == "pending"
+    finally:
+        settings.NUDE_BASE_T2I = prev
+
+
+def test_post_t2i_variant_upper_bound_99_is_accepted():
+    prev = settings.NUDE_BASE_T2I
+    settings.NUDE_BASE_T2I = True
+    try:
+        jm = _FakeJobManager()
+        nude = _FakeNudeStore(latest=None)
+        _wire(jm, _FakeCharStore(_character()), nude)
+
+        asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}, variant=99))
+
+        request, _user_id, _job_type = jm.created[0]
+        assert request.variant == 99
+        assert request.seed == (zlib.crc32(b"c1") + 99) & 0xFFFFFFFF
+    finally:
+        settings.NUDE_BASE_T2I = prev
+
+
+def test_post_t2i_variant_above_bound_raises_422_and_enqueues_nothing():
+    prev = settings.NUDE_BASE_T2I
+    settings.NUDE_BASE_T2I = True
+    try:
+        jm = _FakeJobManager()
+        nude = _FakeNudeStore(latest=None)
+        _wire(jm, _FakeCharStore(_character()), nude)
+
+        try:
+            asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}, variant=100))
+            assert False, "expected HTTPException"
+        except Exception as e:
+            assert getattr(e, "status_code", None) == 422
+        assert jm.created == []          # rejected before any job was enqueued
+        assert nude.created == []        # ... and before any pending row was written
+    finally:
+        settings.NUDE_BASE_T2I = prev
+
+
+def test_post_t2i_variant_negative_raises_422():
+    prev = settings.NUDE_BASE_T2I
+    settings.NUDE_BASE_T2I = True
+    try:
+        jm = _FakeJobManager()
+        nude = _FakeNudeStore(latest=None)
+        _wire(jm, _FakeCharStore(_character()), nude)
+
+        try:
+            asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}, variant=-1))
+            assert False, "expected HTTPException"
+        except Exception as e:
+            assert getattr(e, "status_code", None) == 422
+        assert jm.created == []
     finally:
         settings.NUDE_BASE_T2I = prev
 
@@ -678,6 +860,30 @@ def test_post_legacy_builds_pipeline_edit_job_when_flag_false():
         assert request.nudityLevel == NudityLevel.HIGH
         assert request.outfitPromptMode == "nude_base"
         assert request.source_image == "https://x.supabase.co/hero.png"
+        assert resp.status == "pending"
+    finally:
+        settings.NUDE_BASE_T2I = prev
+
+
+def test_post_legacy_accepts_but_ignores_variant_no_seed_reroll_concept():
+    # variant is still a valid (bounds-checked) param on the LEGACY path — it just
+    # has nothing to thread into, since PipelineEditRequest carries no seed-reroll
+    # concept. Asserts this doesn't raise/crash and the legacy job is unaffected.
+    prev = settings.NUDE_BASE_T2I
+    settings.NUDE_BASE_T2I = False
+    try:
+        jm = _FakeJobManager()
+        nude = _FakeNudeStore(latest=None)
+        pipeline_ep.set_job_manager(jm)
+        pipeline_ep.set_notification_service(None)
+        _wire(jm, _FakeCharStore(_character()), nude)
+
+        resp = asyncio.run(ep.generate_nude_base("c1", user={"sub": "admin-1"}, variant=5))
+
+        assert len(jm.created) == 1
+        request, _user_id, job_type = jm.created[0]
+        assert job_type == "pipeline_edit"
+        assert not hasattr(request, "variant")
         assert resp.status == "pending"
     finally:
         settings.NUDE_BASE_T2I = prev

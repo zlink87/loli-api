@@ -1214,5 +1214,18 @@ class NudeBaseGenerateRequest(BaseModel):
     character_id: str = Field(..., description="Owning character id (for logging/provenance).")
     seed: int = Field(
         ...,
-        description="Deterministic sampling seed for the base render (zlib.crc32 of character_id).",
+        description=(
+            "Deterministic sampling seed for the base render (zlib.crc32 of "
+            "character_id, offset by `variant` below — see "
+            "workers.nude_base_worker.stable_nude_base_seed)."
+        ),
+    )
+    variant: int = Field(
+        0,
+        description=(
+            "Reroll index (0..99) from POST /{character_id}/nude-base's `variant` "
+            "query param. 0 (default/omitted) is the canonical deterministic base. "
+            "`seed` above already encodes this value — carried here separately only "
+            "for job-payload provenance/logging (see NudeBaseWorker._process_job)."
+        ),
     )

@@ -105,21 +105,48 @@ ANTI_GLOSS_NEGATIVE = (
 NEUTRAL_BASE_OUTFIT_CLAUSE = (
     "completely nude, bare natural relaxed body, neutral reference posture, no arousal"
 )
-# Body-aesthetic clause (nude base v2), keyed by BodyType enum VALUES
-# (models/enums.py). A graceful, model-like framing of the persona's OWN body
-# type — never a slimming rewrite of it: curvy/bbw deliberately carry NO
-# slimming vocabulary (that would fight the admin's explicit body-type choice),
-# and none of the five carry gloss vocabulary (matte doctrine — see
-# ANTI_GLOSS_POSITIVE/NEGATIVE above). build_nude_base_prompt looks a persona's
-# body type up here and appends whatever comes back (empty string for an
-# unknown/missing body type is a clean skip, never a stray comma).
+# Body-aesthetic clause (nude base v3 — "beauty bar" pass, 2026-07-14), keyed by
+# BodyType enum VALUES (models/enums.py). Admin verdict on v2: the body read as
+# "plain natural" rather than the clearly more model-like beauty bar the product
+# wants, so each clause below is a stronger, more specific model-like framing of
+# the persona's OWN body type — still weight-truthful, never a slimming rewrite
+# of it: curvy/bbw deliberately carry NO slimming vocabulary (that would fight
+# the admin's explicit body-type choice), and none of the five carry gloss
+# vocabulary (matte doctrine — see ANTI_GLOSS_POSITIVE/NEGATIVE above).
+# build_nude_base_prompt looks a persona's body type up here and appends
+# whatever comes back plus the shared BODY_AESTHETIC_POSTURE_TAIL below (empty
+# string for an unknown/missing body type is a clean skip of BOTH — never a
+# stray comma).
 BODY_AESTHETIC_CLAUSES: Dict[str, str] = {
-    "skinny": "gracefully slim with elegant model-like proportions and poised posture",
-    "athletic": "gracefully toned, athletic model-like physique with poised posture",
-    "average": "naturally balanced proportions with a graceful model-like posture",
-    "curvy": "gracefully curvy hourglass proportions carried with model-like poise",
-    "bbw": "confidently full-figured with soft, graceful proportions and poised posture",
+    "skinny": (
+        "elegant slender figure, smooth flat stomach, gently defined waist, "
+        "long graceful legs, refined model-like proportions"
+    ),
+    "athletic": (
+        "beautifully toned athletic figure, sculpted flat stomach, elegant "
+        "defined legs, poised model-like proportions"
+    ),
+    "average": (
+        "beautifully balanced feminine figure, smooth soft stomach, graceful "
+        "legs, harmonious model-like proportions"
+    ),
+    "curvy": (
+        "stunning hourglass figure, smooth toned stomach, full graceful curves, "
+        "long elegant legs, carried with model poise"
+    ),
+    "bbw": (
+        "confidently full voluptuous figure, soft smooth curves, graceful "
+        "carriage, harmonious generous proportions"
+    ),
 }
+# Shared posture tail (nude base v3), appended immediately after whichever
+# per-type clause above fires — one constant instead of duplicating the same
+# posture framing five times. Kept free of gloss/slimming vocabulary same as the
+# clauses themselves — the banned-vocab test in test_nude_base_t2i.py checks
+# this constant too, not just BODY_AESTHETIC_CLAUSES.
+BODY_AESTHETIC_POSTURE_TAIL = (
+    "graceful poised posture, shoulders back, elongated elegant lines"
+)
 
 # ---------------------------------------------------------------------------
 # ReActor face-swap parameters — mirrored EXACTLY from the pose graphs' node 200
@@ -157,16 +184,26 @@ REACTOR_FACE_RESTORE_VISIBILITY = 0.65
 REACTOR_CODEFORMER_WEIGHT = 0.7
 
 
-def stable_nude_base_seed(character_id: str) -> int:
+def stable_nude_base_seed(character_id: str, variant: int = 0) -> int:
     """
-    Deterministic per-character sampling seed for the base render.
+    Deterministic per-character (+ per-reroll-``variant``) sampling seed for the
+    base render.
 
     ``zlib.crc32`` (NOT the built-in ``hash()``, which is salted per-process and
     would give a different base every restart) over the character id, so the same
-    character always regenerates the byte-identical base geometry. Range is
-    0..2**32-1, matching the sampler seed range char-gen already uses.
+    (character, variant) pair always regenerates the byte-identical base geometry.
+
+    ``variant`` is the REROLL index accepted by ``POST /{character_id}/nude-base``
+    (default/omitted 0 — see api/v1/endpoints/nude_base.py). It is added to the
+    crc32 term BEFORE the result is masked back into the sampler's 32-bit range,
+    so ``variant=0`` is BYTE-IDENTICAL to the original single-argument seed (every
+    caller that omits it — including every existing call site — keeps today's
+    canonical base unchanged), while each ``variant`` 1..99 draws a distinct but
+    still fully deterministic reroll of the same character. The ``& 0xFFFFFFFF``
+    mask isn't a no-op decoration: crc32 alone can already sit at the top of the
+    32-bit range, so ``+ variant`` must wrap around rather than overflow it.
     """
-    return zlib.crc32(character_id.encode("utf-8"))
+    return (zlib.crc32(character_id.encode("utf-8")) + variant) & 0xFFFFFFFF
 
 
 def build_nude_base_prompt(persona) -> tuple:
@@ -188,8 +225,9 @@ def build_nude_base_prompt(persona) -> tuple:
     ``NEUTRAL_BASE_OUTFIT_CLAUSE`` (the base is a neutral reference, not a scene) —
     everything else (identity block, pose, backdrop, quality tail) is untouched.
     Right after that swap, the persona's own ``BODY_AESTHETIC_CLAUSES`` phrase
-    (nude base v2) is appended — a graceful, model-like framing of whatever body
-    type she already has, never a slimming rewrite of it — and skipped cleanly
+    (nude base v3) plus the shared ``BODY_AESTHETIC_POSTURE_TAIL`` are appended —
+    a stronger, more specific model-like framing of whatever body type she
+    already has, never a slimming rewrite of it — and both are skipped cleanly
     for an unknown/missing body type. Returns ``(positive, negative, locked_block)``.
     """
     # Full-body NATURAL shot: an explicit shot suppresses the seeded shot rotation
@@ -216,14 +254,16 @@ def build_nude_base_prompt(persona) -> tuple:
     # (count=1) — the clause is a unique comma-joined part of the positive.
     naked_clause = generation_outfit_clause(OutfitType.NAKED, NudityLevel.HIGH)
     positive = positive.replace(naked_clause, NEUTRAL_BASE_OUTFIT_CLAUSE, 1)
-    # Body-aesthetic clause (nude base v2): same enum-or-str value extraction the
-    # rest of the codebase uses for persona fields (ap.phrase() -> ap._val()), so
-    # a raw string ("curvy") or a BodyType member both resolve. Unknown/missing
-    # body type -> "" -> ap.phrase's own default, so the comma-join below skips
-    # cleanly with no dangling ", ".
+    # Body-aesthetic clause (nude base v3) + its shared posture tail: same
+    # enum-or-str value extraction the rest of the codebase uses for persona
+    # fields (ap.phrase() -> ap._val()), so a raw string ("curvy") or a BodyType
+    # member both resolve. Unknown/missing body type -> "" -> ap.phrase's own
+    # default, so BOTH the clause and the tail are skipped cleanly with no
+    # dangling ", " — the tail only ever rides along with a real clause, it
+    # never appears on its own.
     body_clause = ap.phrase(BODY_AESTHETIC_CLAUSES, getattr(persona, "bodyType", None))
     if body_clause:
-        positive = f"{positive}, {body_clause}"
+        positive = f"{positive}, {body_clause}, {BODY_AESTHETIC_POSTURE_TAIL}"
     positive = f"{positive}, {ANTI_GLOSS_POSITIVE}"
     negative = f"{negative}, {ANTI_GLOSS_NEGATIVE}"
     return positive, negative, locked
@@ -458,7 +498,7 @@ class NudeBaseWorker:
             )
             logger.info(
                 f"[NUDE-BASE] {job.job_id} | RUNNING | character={request.character_id} "
-                f"seed={request.seed}"
+                f"seed={request.seed} variant={request.variant}"
             )
 
             # --- Step 1: text-to-image base (no input images — pure generation) ---

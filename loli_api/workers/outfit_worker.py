@@ -19,6 +19,12 @@ from api.v1.endpoints.outfit import (
     build_prompt,
     prepare_outfit_workflow,
 )
+# WS-N2: single source of truth for the natural/candid LoRA-scale decision (lives in the
+# pose endpoint). OutfitEditRequest carries no photoStyle today, so this resolves to None
+# (baked strengths untouched) — but threading it keeps the interactive outfit edit at batch
+# parity: if the request ever carries a natural/candid style, the outfit 2511/skinlora LoRA
+# stack dials down exactly as the batch path's does.
+from api.v1.endpoints.pose import _natural_lora_scales
 
 from workers.base_worker import BaseEditWorker
 
@@ -137,6 +143,11 @@ class OutfitBackgroundWorker(BaseEditWorker):
                 negative_prompt=request.negativePrompt,
                 head_mask_name=head_mask_name,
                 source_dressed=request.sourceDressed,
+                # WS-N2 parity with the batch outfit branch: dial the 2511/skinlora LoRA
+                # stack down for a natural/candid style. OutfitEditRequest has no photoStyle
+                # -> None -> baked strengths kept; a no-op on the V1 / plain crop-stitch
+                # graphs (no LoRA nodes) regardless.
+                lora_scales=_natural_lora_scales(getattr(request, "photoStyle", None)),
             )
 
             image_start = datetime.utcnow()

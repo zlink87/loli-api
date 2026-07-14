@@ -1,5 +1,6 @@
 """
-Pose reference assets — single source of truth for the 16 pose reference images.
+Pose reference assets — single source of truth for the pose reference images
+(one per PoseType).
 
 The pose edit workflow (``edit_pose_action.json``) is structurally dependent on a
 reference image: node 170 (LoadImage) loads it, its face is blacked out
@@ -61,6 +62,19 @@ POSE_DESCRIPTIONS: Dict[PoseType, str] = {
     PoseType.JOGGING: "jogging or running, dynamic motion pose",
     PoseType.OPENING_FRIDGE: "standing and reaching into an open refrigerator",
     PoseType.COOKING: "standing in a kitchen cooking, hands busy with food preparation",
+    # --- POSE PACK (07-14): active/lifestyle ---
+    PoseType.WALKING: "walking toward the camera with a relaxed natural stride",
+    PoseType.WALKING_AWAY: "walking away from the camera, glancing back over her shoulder",
+    PoseType.RUNNING: "running mid-stride, athletic dynamic motion",
+    PoseType.DANCING: "dancing freely, body in relaxed motion",
+    PoseType.STRETCHING: "stretching with arms raised overhead, elongated posture",
+    # --- POSE PACK (07-14): camera-aware provocative (the phrase carries the camera direction) ---
+    PoseType.ALL_FOURS_FROM_BEHIND: "on all fours facing away, photographed from behind, looking back over her shoulder at the camera",
+    PoseType.BENT_OVER_FROM_BEHIND: "bending forward at the waist, photographed from behind, glancing back at the camera",
+    PoseType.KNEELING_ARCHED_BACK: "kneeling upright with her back arched, chest lifted, hands resting on her thighs",
+    PoseType.LYING_ON_SIDE: "lying on her side, propped on one elbow, hip curve emphasized, facing the camera",
+    PoseType.OVER_SHOULDER_LOOK: "standing with her back to the camera, looking back over her shoulder",
+    PoseType.STRADDLING_CHAIR: "straddling a chair backwards, arms folded on the chairback, facing the camera",
 }
 
 
@@ -78,9 +92,34 @@ def asset_path(pose: PoseType) -> Path:
     return POSE_ASSETS_DIR / worker_filename(pose)
 
 
+def has_pose_ref(pose: PoseType) -> bool:
+    """
+    True iff this pose's reference PNG is installed on disk
+    (``loli_api/assets/poses/pose_ref_<value>.png``).
+
+    This is the POSE PACK "ref latch" predicate, the single safety piece that lets new
+    poses ship in the enum + descriptions before their reference images exist:
+
+      * the story planner filters its pose pools through it (services.story_planner.
+        _allowed_pose_pool / _controls_pose_vocab), so a batch NEVER picks a pose whose
+        reference is missing (``load_pose_reference_b64`` would raise) — a refless pose is
+        simply invisible to planning, which also keeps the effective pose vocabulary
+        byte-identical to before the pose was added (determinism preserved);
+      * the /v1/edit/pose endpoint calls it to 422 an interactive request naming a
+        not-yet-generated pose.
+
+    A pose stays "dark" (present in the enum, never rendered) until its PNG is generated +
+    committed via scripts/generate_pose_refs.py, at which point it lights up with no code
+    change. No caching: a bare stat is cheap, and existence flips exactly once (when the
+    PNG lands) so a cache would only add staleness risk (some tests point POSE_ASSETS_DIR
+    at a tmp dir).
+    """
+    return asset_path(pose).exists()
+
+
 def missing_pose_assets() -> List[PoseType]:
     """Return the list of PoseType members whose reference PNG is not installed."""
-    return [pose for pose in PoseType if not asset_path(pose).exists()]
+    return [pose for pose in PoseType if not has_pose_ref(pose)]
 
 
 def load_pose_reference_b64(pose: PoseType) -> Tuple[str, str]:
@@ -104,7 +143,7 @@ def load_pose_reference_b64(pose: PoseType) -> Tuple[str, str]:
         raise FileNotFoundError(
             f"Pose reference not installed for pose '{pose.value}': "
             f"expected file at {path}. "
-            f"Generate the 16 pose references with scripts/generate_pose_refs.py."
+            f"Generate the pose references with scripts/generate_pose_refs.py."
         )
 
     raw = path.read_bytes()

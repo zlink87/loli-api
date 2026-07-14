@@ -105,6 +105,14 @@ POSE_CLASS_LYING = "lying"
 POSE_CLASS_KNEELING = "kneeling"
 POSE_CLASS_ATHLETIC = "athletic"
 POSE_CLASS_OTHER = "other"
+# POSE PACK (07-14): active/lifestyle poses whose own description phrase carries the stance
+# (walking/dancing/stretching/a standing turn). Semantics differ from ATHLETIC: no sportswear
+# requirement (not in story_planner.ATHLETIC_POSES), expressions UNRESTRICTED (only ATHLETIC is
+# expression-gated — see story_planner._expression_allowed, which leaves every non-athletic class
+# permissive except the generic HIGH-nudity/exposed + public-intimate rules), and UNSTAGED: no
+# location authors a MOTION staging pool, so staging_options() returns () (a clean skip) and the
+# phrase alone carries the pose. Kept out of STAGING_PHRASES deliberately.
+POSE_CLASS_MOTION = "motion"
 
 # Every PoseType value -> its staging class (coverage-tested against PoseType). The
 # activity poses (eating/cooking/opening_fridge) and bending_over are OTHER: their own
@@ -113,6 +121,11 @@ POSE_CLASS_OTHER = "other"
 # grouped with KNEELING (a floor/bed pose); spread_legs reads as a reclining pose ->
 # LYING (its description leads "lying back or sitting…"), so it only anchors where a
 # lying surface exists (private interiors), else stays empty.
+# POSE PACK (07-14): the active/lifestyle poses (walking/walking_away/dancing/stretching +
+# the standing-turn over_shoulder_look) are the new MOTION class — unstaged, the phrase
+# carries the stance; running is ATHLETIC (like jogging); the camera-aware provocative poses
+# reuse KNEELING (all_fours_from_behind, kneeling_arched_back) / LYING (lying_on_side) / OTHER
+# (bent_over_from_behind + straddling_chair, both self-staging via their own description).
 _POSE_CLASS: Dict[str, str] = {
     PoseType.STANDING_LEANING.value: POSE_CLASS_STANDING,
     PoseType.SITTING.value: POSE_CLASS_SITTING,
@@ -130,6 +143,28 @@ _POSE_CLASS: Dict[str, str] = {
     PoseType.JOGGING.value: POSE_CLASS_ATHLETIC,
     PoseType.OPENING_FRIDGE.value: POSE_CLASS_OTHER,
     PoseType.COOKING.value: POSE_CLASS_OTHER,
+    # --- POSE PACK (07-14) ---
+    # MOTION: the phrase carries the stance; unstaged (no MOTION staging pools) and
+    # expression-unrestricted. over_shoulder_look is a standing turn -> MOTION too.
+    PoseType.WALKING.value: POSE_CLASS_MOTION,
+    PoseType.WALKING_AWAY.value: POSE_CLASS_MOTION,
+    PoseType.DANCING.value: POSE_CLASS_MOTION,
+    PoseType.STRETCHING.value: POSE_CLASS_MOTION,
+    PoseType.OVER_SHOULDER_LOOK.value: POSE_CLASS_MOTION,
+    # running is an exercise stance like jogging -> ATHLETIC (inherits jogging's wardrobe +
+    # location guard in story_planner: ATHLETIC_POSES / POSE_OUTFIT_COMPAT / _POSE_LOCATION_GUARD).
+    PoseType.RUNNING.value: POSE_CLASS_ATHLETIC,
+    # provocative camera-aware poses reuse the existing reclining/floor/kneel classes for staging:
+    # all_fours_from_behind + kneeling_arched_back are floor/kneel poses -> KNEELING; lying_on_side
+    # -> LYING (staged only where a reclining surface exists). bent_over_from_behind and
+    # straddling_chair name their OWN surface in the description (like bending_over / the activity
+    # poses), so they are OTHER — unstaged, so no second seat/anchor contradicts the pose's own
+    # "bending over" / "straddling a chair".
+    PoseType.ALL_FOURS_FROM_BEHIND.value: POSE_CLASS_KNEELING,
+    PoseType.KNEELING_ARCHED_BACK.value: POSE_CLASS_KNEELING,
+    PoseType.LYING_ON_SIDE.value: POSE_CLASS_LYING,
+    PoseType.BENT_OVER_FROM_BEHIND.value: POSE_CLASS_OTHER,
+    PoseType.STRADDLING_CHAIR.value: POSE_CLASS_OTHER,
 }
 
 

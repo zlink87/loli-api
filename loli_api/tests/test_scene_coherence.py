@@ -1,7 +1,7 @@
 """
 WS1 — real-world-coherence guards for the batch planner.
 
-Every planned photo must make real-world human sense. This covers the three guards and
+Every planned photo must make real-world human sense. This covers the four guards and
 the zero-violation meta-test that is the CI enforcement of that mandate:
 
   1a  time <-> location   — LOCATION_TIME_COMPAT covers every location; a night venue is
@@ -14,17 +14,27 @@ the zero-violation meta-test that is the CI enforcement of that mandate:
                             and candid share preserved.
   1c  provocative-pose propriety — the spread/all-fours poses (PRIVATE_ONLY_POSES) never
                             land in a public venue after planning.
+  1e  lighting <-> location (WS-LIGHT) — LIGHTING_LOCATION_COMPAT covers every location
+                            (>=2 allowed values each, always including natural_soft);
+                            studio softbox never leaves photo_studio/stage, candlelit
+                            never lands at a daytime cafe/office, etc.; the repair pass
+                            moves LIGHTING (never the location) onto the FIRST allowed
+                            value, additionally excluding dramatic/theatrical light on a
+                            natural/candid_phone-styled batch.
   1d  ZERO-violation meta-test — ~10 seeded 24-item plans across nudity ramps assert NO
                             violation of: time<->location, expression compat, private-only
                             poses in public, staging class-coherence, caption<->location,
-                            exposure caps, location nudity ceilings.
+                            exposure caps, location nudity ceilings, lighting<->location —
+                            and (every config is an explicit natural-style batch) no
+                            dramatic/theatrical lighting anywhere.
 
 Runs under pytest or directly: python loli_api/tests/test_scene_coherence.py
 """
 import math
 
 from models.enums import (
-    NudityLevel, OutfitType, LocationType, TimeOfDayType, PoseType,
+    NudityLevel, OutfitType, LocationType, TimeOfDayType, LightingType, PoseType,
+    PhotoStyleType,
 )
 from models.requests import PersonaOptions
 from models.batch import BatchControls
@@ -34,7 +44,8 @@ from services import story_planner as sp
 from services.outfit_vocab import outfit_exposure_cap
 from services.story_planner import (
     Character, DeterministicScenePlanner, validate_and_repair,
-    LOCATION_TIME_COMPAT, PRIVATE_ONLY_POSES, _location_ceiling, _nudity_index,
+    LOCATION_TIME_COMPAT, LIGHTING_LOCATION_COMPAT, PRIVATE_ONLY_POSES,
+    _location_ceiling, _nudity_index,
 )
 
 
@@ -123,6 +134,119 @@ def test_deterministic_pick_time_is_location_coherent_any_seed():
 
 
 # ---------------------------------------------------------------------------
+# 1e  lighting <-> location (WS-LIGHT)
+# ---------------------------------------------------------------------------
+# There was NO lighting<->venue rule at all before LIGHTING_LOCATION_COMPAT — candlelit
+# at a daytime cafe, or studio softbox lighting anywhere, was equally "legal". A related
+# bug this also covers: a photo_style=natural batch occasionally still landed moody_dim,
+# because three hand-authored beats (office/night_out/friends_and_date's "after hours"
+# beat) offer ONLY theatrical lighting, so filtering for "natural" used to empty the beat's
+# pool and the old fallback reinstated the raw, still-dramatic pool (see services/
+# story_planner.py's _allowed_lighting_pool + LIGHTING_LOCATION_COMPAT docstrings).
+def test_lighting_location_compat_covers_every_location():
+    for loc in LocationType:
+        assert loc.value in LIGHTING_LOCATION_COMPAT, f"no lighting-compat entry for {loc.value}"
+        allowed = LIGHTING_LOCATION_COMPAT[loc.value]
+        assert len(allowed) >= 2, f"{loc.value} has fewer than 2 allowed lighting values: {allowed}"
+        assert all(isinstance(li, LightingType) for li in allowed)
+        # natural_soft is the universal, always-safe value every location must carry — the
+        # ONLY value guaranteed to survive the natural-style dramatic filter, which is what
+        # makes the moody_dim-leak fallback chain always land somewhere sane (see
+        # _allowed_lighting_pool's docstring).
+        assert LightingType.NATURAL_SOFT in allowed, f"{loc.value} is missing natural_soft"
+
+
+def test_lighting_compat_covers_every_lighting_type():
+    # Every LightingType is reachable at at least one location (no orphaned value).
+    reachable = set()
+    for allowed in LIGHTING_LOCATION_COMPAT.values():
+        reachable.update(allowed)
+    assert reachable == set(LightingType)
+
+
+def test_lighting_compat_spot_rules():
+    L, Li = LocationType, LightingType
+    # studio_softbox: photo_studio + stage ONLY.
+    assert {loc for loc in L if Li.STUDIO_SOFTBOX in LIGHTING_LOCATION_COMPAT[loc.value]} == \
+        {L.PHOTO_STUDIO, L.STAGE}
+    # neon: nightclub/bar/stage ONLY.
+    assert {loc for loc in L if Li.NEON in LIGHTING_LOCATION_COMPAT[loc.value]} == \
+        {L.NIGHTCLUB, L.BAR, L.STAGE}
+    # candlelit never lands at a daytime/workplace/practical venue.
+    for loc in (L.OFFICE, L.CAFE, L.GYM, L.CLASSROOM, L.RESTAURANT_KITCHEN, L.BEACH):
+        assert Li.CANDLELIT not in LIGHTING_LOCATION_COMPAT[loc.value], loc
+    # candlelit DOES read as real at evening-capable interiors.
+    for loc in (L.RESTAURANT, L.HOME_BEDROOM, L.HOTEL_ROOM, L.LUXURY_LOUNGE, L.BAR):
+        assert Li.CANDLELIT in LIGHTING_LOCATION_COMPAT[loc.value], loc
+    # a mundane workplace never gets nightlife/theatrical light.
+    for loc in (L.OFFICE, L.CLASSROOM, L.LIBRARY, L.HOSPITAL_WARD, L.GYM):
+        assert not (LIGHTING_LOCATION_COMPAT[loc.value] &
+                    {Li.NEON, Li.MOODY_DIM, Li.STUDIO_SOFTBOX, Li.BACKLIT_RIM}), loc
+    # natural_soft: every location (repeats the coverage test's own check, spot-style).
+    assert all(Li.NATURAL_SOFT in LIGHTING_LOCATION_COMPAT[loc.value] for loc in L)
+
+
+def test_lighting_ok_at_spot_checks():
+    L, Li = LocationType, LightingType
+    assert sp._lighting_ok_at(Li.STUDIO_SOFTBOX, L.PHOTO_STUDIO)
+    assert not sp._lighting_ok_at(Li.STUDIO_SOFTBOX, L.HOME_BEDROOM)
+    assert sp._lighting_ok_at(Li.NATURAL_SOFT, L.NIGHTCLUB)  # universal
+    assert not sp._lighting_ok_at(Li.CANDLELIT, L.OFFICE)
+
+
+def test_first_allowed_lighting_is_natural_soft_everywhere():
+    # natural_soft is declared first in LightingType and belongs to every location's set,
+    # so the deterministic 'first allowed' snap resolves to it absent any other constraint.
+    for loc in LocationType:
+        assert sp._first_allowed_lighting(loc) == LightingType.NATURAL_SOFT
+
+
+def test_lighting_repair_moves_lighting_never_location():
+    # Location-only rule, isolated from the natural-style filter (POLISHED here; the
+    # natural-style-specific behavior is covered separately below).
+    scenes = [
+        SceneSpec(arc_id="a", arc_title="A", beat_index=0, global_index=0, beat_description="b",
+                  location=LocationType.OFFICE, lighting=LightingType.NEON),
+        SceneSpec(arc_id="a", arc_title="A", beat_index=1, global_index=1, beat_description="b",
+                  location=LocationType.HOME_KITCHEN, lighting=LightingType.CANDLELIT),
+    ]
+    sp._enforce_lighting_location_compat(
+        scenes, BatchControls(base_seed=1, photo_style=PhotoStyleType.POLISHED)
+    )
+    assert scenes[0].location == LocationType.OFFICE           # never relocated
+    assert scenes[0].lighting == LightingType.NATURAL_SOFT      # neon not allowed @ office
+    assert scenes[1].location == LocationType.HOME_KITCHEN
+    assert scenes[1].lighting == LightingType.CANDLELIT          # already allowed, untouched
+
+
+def test_lighting_repair_excludes_dramatic_on_natural_style_even_at_nightlife_venue():
+    # A nightclub scene carrying neon on a NATURAL-style batch: neon reads real at a
+    # nightclub (LIGHTING_LOCATION_COMPAT allows it) but the natural-style contract wins
+    # outright — the repair must never leave a dramatic value standing.
+    scenes = [
+        SceneSpec(arc_id="a", arc_title="A", beat_index=0, global_index=0, beat_description="b",
+                  location=LocationType.NIGHTCLUB, lighting=LightingType.NEON),
+    ]
+    sp._enforce_lighting_location_compat(
+        scenes, BatchControls(base_seed=1, photo_style=PhotoStyleType.NATURAL)
+    )
+    assert scenes[0].location == LocationType.NIGHTCLUB
+    assert scenes[0].lighting == LightingType.NATURAL_SOFT
+
+
+def test_deterministic_pick_time_lighting_is_location_coherent_any_seed():
+    # The deterministic planner's OWN pick (pre-repair) is already lighting<->location
+    # coherent too (mirrors the time<->location pick-time test above).
+    for seed in range(1, 7):
+        for occ in ("bartender", "boss_ceo", "model", "nurse"):
+            scenes = DeterministicScenePlanner().plan_scenes_sync(
+                _character(occupation=occ), 16, BatchControls(base_seed=seed, escalation="building")
+            )
+            for s in scenes:
+                assert sp._lighting_ok_at(s.lighting, s.location), (occ, seed, s.lighting, s.location)
+
+
+# ---------------------------------------------------------------------------
 # 1b  expression <-> situation
 # ---------------------------------------------------------------------------
 def test_every_pool_expression_is_tagged():
@@ -199,22 +323,37 @@ def test_private_only_poses_never_in_public_venue_after_planning():
 
 
 def test_private_only_pose_set_is_the_spread_all_fours_class():
+    # The original spread/all-fours trio PLUS the POSE PACK explicit camera-aware poses
+    # (all_fours_from_behind, kneeling_arched_back, straddling_chair). bent_over_from_behind is
+    # deliberately absent (public-legal; guarded only against formal workplaces).
     assert PRIVATE_ONLY_POSES == frozenset({
         PoseType.SPREAD_LEGS, PoseType.SITTING_LEGS_WIDE_OPEN, PoseType.ALL_FOURS,
+        PoseType.ALL_FOURS_FROM_BEHIND, PoseType.KNEELING_ARCHED_BACK, PoseType.STRADDLING_CHAIR,
     })
 
 
 # ---------------------------------------------------------------------------
 # 1d  ZERO-violation meta-test — the CI enforcement of "makes real-world sense".
 # ---------------------------------------------------------------------------
-def _violations(scene) -> list:
-    """Every real-world-coherence rule this scene must satisfy; returns the failures."""
+def _violations(scene, *, natural: bool = True) -> list:
+    """
+    Every real-world-coherence rule this scene must satisfy; returns the failures.
+    ``natural`` (default True — every config in the seeded matrix below is an explicit
+    photo_style=NATURAL batch) additionally requires no dramatic/theatrical lighting
+    (the reported moody_dim leak).
+    """
     v = []
     low = (scene.beat_description or "").lower()
     final = scene.location.value
     # time <-> location
     if not sp._time_ok_at(scene.time_of_day, scene.location):
         v.append(("time_location", scene.time_of_day.value, final))
+    # lighting <-> location (WS-LIGHT)
+    if not sp._lighting_ok_at(scene.lighting, scene.location):
+        v.append(("lighting_location", scene.lighting.value, final))
+    # natural-style batches must never carry dramatic/theatrical lighting
+    if natural and sp._is_dramatic_lighting(scene.lighting):
+        v.append(("dramatic_lighting_on_natural_batch", scene.lighting.value, final))
     # expression compat
     if not sp._expression_allowed(scene.expression, scene.pose, scene.nudityLevel,
                                   scene.location, scene.outfit):
@@ -246,6 +385,13 @@ def _violations(scene) -> list:
 def test_zero_coherence_violations_across_seeded_24_item_plans():
     # ~10 seeded 24-item plans spanning occupations, nudity ceilings and escalation styles.
     # EVERY item must satisfy EVERY real-world-sense rule — this is the mandate's CI gate.
+    # photo_style is pinned to NATURAL explicitly (matching BatchControls' own default) so
+    # this same matrix doubles as the "natural batches carry no dramatic lighting"
+    # regression lock (WS-LIGHT); boss_ceo/secretary/student below already exercise two of
+    # the three fully-theatrical beats the moody_dim leak came from (office, night_out) —
+    # the third (friends_and_date, only reachable via a multi-day leisure rotation) has its
+    # own dedicated coverage in test_story_planner.py's test_natural_batches_never_carry_
+    # dramatic_lighting_across_problem_arcs, so the matrix here is left otherwise unchanged.
     configs = [
         ("nurse", NudityLevel.HIGH, "building", 1, 1),
         ("model", NudityLevel.HIGH, "building", 2, 3),
@@ -260,12 +406,13 @@ def test_zero_coherence_violations_across_seeded_24_item_plans():
     ]
     total = 0
     for occ, max_nud, esc, days, seed in configs:
-        controls = BatchControls(max_nudity=max_nud, escalation=esc, period_days=days, base_seed=seed)
+        controls = BatchControls(max_nudity=max_nud, escalation=esc, period_days=days, base_seed=seed,
+                                 photo_style=PhotoStyleType.NATURAL)
         scenes = _planned(_character(occupation=occ), 24, controls)
         assert len(scenes) == 24
         total += len(scenes)
         for s in scenes:
-            bad = _violations(s)
+            bad = _violations(s, natural=True)
             assert not bad, f"{occ}/{max_nud.value}/{esc}/d{days}/seed{seed} item {s.global_index}: {bad}"
     assert total == 240
 

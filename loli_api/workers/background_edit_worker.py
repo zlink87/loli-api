@@ -99,7 +99,17 @@ class BackgroundEditWorker(BaseEditWorker):
                 prompt_used=prompt, seed_used=seed,
             )
 
-            # Step 4: Prepare workflow and run on RunPod
+            # Step 4: Prepare workflow and run on RunPod.
+            #
+            # PARITY NOTE (WS-N2 / ReActor / output-MP knobs deliberately NOT threaded here):
+            # the background graph masks the PERSON OUT (node 204 InvertMask) and samples with
+            # noise_mask=true so only the background region is re-diffused, then composites the
+            # untouched person back; ReActorFaceSwap (node 210) is disabled on this path. None
+            # of the pose/outfit render-quality knobs apply to the subject because the subject
+            # is never regenerated — the person's pixels, skin, and face pass through byte-for-
+            # byte. There are also no URP/NSFW/skin LoRA nodes (304/305/306) on this graph. So
+            # a background edit has nothing to bring to parity; threading those kwargs would be
+            # a pure no-op at best (and would relight the discarded scene pixels at worst).
             workflow = prepare_background_workflow(
                 self._workflow_template,
                 source_name,

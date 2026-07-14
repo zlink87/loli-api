@@ -1449,9 +1449,10 @@ def _planned_without_ws_p(char, n, controls):
 
 
 def test_ws_p_athletic_pose_set_and_compat_map():
-    # The athletic set is exactly jogging + squatting; POSE_OUTFIT_COMPAT is keyed by those
-    # values and every athletic pose requires the {sporty, streetwear, casual_minimal} styles.
-    assert sp.ATHLETIC_POSES == frozenset({PoseType.JOGGING, PoseType.SQUATTING})
+    # The athletic set is jogging + squatting + running (POSE PACK); POSE_OUTFIT_COMPAT is keyed
+    # by those values and every athletic pose requires the {sporty, streetwear, casual_minimal}
+    # styles — running inherits jogging's compat verbatim (same required style set).
+    assert sp.ATHLETIC_POSES == frozenset({PoseType.JOGGING, PoseType.SQUATTING, PoseType.RUNNING})
     wanted = {WardrobeStyleType.SPORTY, WardrobeStyleType.STREETWEAR, WardrobeStyleType.CASUAL_MINIMAL}
     assert set(sp.POSE_OUTFIT_COMPAT) == {p.value for p in sp.ATHLETIC_POSES}
     for required in sp.POSE_OUTFIT_COMPAT.values():
@@ -1908,6 +1909,147 @@ def test_validate_and_repair_lighting_excludes_dramatic_for_natural_style():
     )
     out = validate_and_repair([bad], char, 1, controls)
     assert out[0].lighting == LightingType.STUDIO_SOFTBOX
+
+
+# ---------------------------------------------------------------------------
+# WS-LIGHT: lighting <-> location coherence (LIGHTING_LOCATION_COMPAT) — there was NO
+# venue rule for lighting at all before this (candlelit at a daytime cafe was "legal").
+# It also closes a sneakier hole: three hand-authored beats (office/night_out/
+# friends_and_date's "after hours" beat — see test_allowed_lighting_pool_fallback_
+# matches_real_fully_theatrical_beats above) offer ONLY theatrical lighting, so on a
+# natural-style batch the OLD "a theatrical light beats no light" fallback in
+# _allowed_lighting_pool reinstated a dramatic value even though the natural-style
+# filter had just excluded it — the reported moody_dim leak. Location-aware
+# _allowed_lighting_pool (services/story_planner.py) closes both holes at once.
+# ---------------------------------------------------------------------------
+def test_allowed_lighting_pool_location_narrows_to_venue_compat():
+    # A beat authoring (candlelit, bright_daylight) at OFFICE: candlelit isn't in
+    # office's LIGHTING_LOCATION_COMPAT set, so it's dropped; bright_daylight survives.
+    tmpl = SimpleNamespace(lighting_pool=(LightingType.CANDLELIT, LightingType.BRIGHT_DAYLIGHT))
+    pool = sp._allowed_lighting_pool(
+        tmpl, BatchControls(photo_style=PhotoStyleType.POLISHED), location=LocationType.OFFICE
+    )
+    assert pool == [LightingType.BRIGHT_DAYLIGHT], pool
+
+
+def test_allowed_lighting_pool_location_fallback_prefers_location_set_over_raw_pool():
+    # A beat authoring ONLY (neon, moody_dim) landing at OFFICE: neither survives office's
+    # compat set (zero overlap) -> venue sanity wins, falling back to office's FULL
+    # allowed set rather than the raw (still fully theatrical) beat pool.
+    tmpl = SimpleNamespace(lighting_pool=(LightingType.NEON, LightingType.MOODY_DIM))
+    pool = sp._allowed_lighting_pool(
+        tmpl, BatchControls(photo_style=PhotoStyleType.POLISHED), location=LocationType.OFFICE
+    )
+    assert set(pool) == sp.LIGHTING_LOCATION_COMPAT[LocationType.OFFICE.value]
+    assert LightingType.NEON not in pool and LightingType.MOODY_DIM not in pool
+
+
+def test_allowed_lighting_pool_location_accepts_iterable_of_candidates():
+    # The Venice per-beat menu hasn't settled on ONE location yet -> passing several
+    # candidates unions what each allows (a permissive superset; the real narrowing
+    # happens later, once a provider settles on one, via _enforce_lighting_location_compat).
+    tmpl = SimpleNamespace(
+        lighting_pool=(LightingType.NATURAL_SOFT, LightingType.CANDLELIT, LightingType.NEON)
+    )
+    pool = sp._allowed_lighting_pool(
+        tmpl, BatchControls(photo_style=PhotoStyleType.POLISHED),
+        location=[LocationType.OFFICE, LocationType.NIGHTCLUB],
+    )
+    # office allows natural_soft (not candlelit/neon); nightclub allows natural_soft+neon
+    # (not candlelit) -> the union keeps natural_soft and neon, drops candlelit.
+    assert set(pool) == {LightingType.NATURAL_SOFT, LightingType.NEON}
+
+
+def test_allowed_lighting_pool_natural_at_fully_theatrical_real_beats_never_dramatic():
+    # THE reported bug, reproduced directly against the three real hand-authored beats
+    # whose ENTIRE lighting_pool is theatrical: with location context AND a natural-style
+    # batch, none of their location candidates (nor the Venice-menu union of them) can
+    # ever resolve to a dramatic value now.
+    fully_theatrical = [
+        (_st.NIGHT_OUT_ARC, "Owning the club"),
+        (_st.OFFICE_ARC, "Late at the office, tie loosened"),
+        (_st.FRIENDS_DATE_NIGHT_ARC, "Drinks and laughter with friends"),
+    ]
+    natural = BatchControls(photo_style=PhotoStyleType.NATURAL)
+    for arc, desc in fully_theatrical:
+        beat = next(b for b in arc.beats if b.beat_description == desc)
+        for loc in beat.location_pool:
+            pool = sp._allowed_lighting_pool(beat, natural, location=loc)
+            assert pool, (desc, loc)  # never stranded with zero options
+            assert not any(_has_dramatic_lighting(SimpleNamespace(lighting=li)) for li in pool), \
+                (desc, loc, pool)
+        menu_pool = sp._allowed_lighting_pool(beat, natural, location=list(beat.location_pool))
+        assert not any(_has_dramatic_lighting(SimpleNamespace(lighting=li)) for li in menu_pool), \
+            (desc, menu_pool)
+
+
+def test_natural_batches_never_carry_dramatic_lighting_across_problem_arcs():
+    # Full-pipeline regression lock: period_days=4 reliably rotates a multi-day story
+    # through EVERY leisure arc (including friends_and_date — see _day_sizes/
+    # leisure_arcs_for_day), and each occupation below has office_arc or night_out_arc as
+    # its own work arc — together the three fully-theatrical beats are ALWAYS in play. On
+    # a natural-style batch none of them may ever surface a dramatic/theatrical light.
+    for occ in ("boss_ceo", "secretary", "tech_engineer", "student", "movie_star_actress"):
+        for seed in (1, 4, 9):
+            controls = BatchControls(base_seed=seed, photo_style=PhotoStyleType.NATURAL,
+                                     max_nudity=NudityLevel.HIGH, escalation="building",
+                                     period_days=4)
+            char = _character(occupation=occ)
+            scenes = DeterministicScenePlanner().plan_scenes_sync(char, 24, controls)
+            out = validate_and_repair(scenes, char, 24, controls)
+            assert len(out) == 24
+            bad = [(s.global_index, s.lighting.value, s.location.value)
+                   for s in out if _has_dramatic_lighting(s)]
+            assert not bad, (occ, seed, bad)
+
+
+# ---------------------------------------------------------------------------
+# apply_item_scene_edit: lighting <-> location snap (WS-LIGHT)
+# ---------------------------------------------------------------------------
+def _edit_spec(location="home_kitchen", lighting="natural_soft"):
+    return {
+        "arc_id": "a", "arc_title": "A", "beat_index": 0, "global_index": 0,
+        "beat_description": "b", "location": location, "lighting": lighting,
+    }
+
+
+def test_edit_lighting_incoherent_for_location_is_snapped_not_rejected():
+    out = sp.apply_item_scene_edit(_edit_spec(), {"lighting": "neon"}, BatchControls())
+    assert out.lighting == LightingType.NATURAL_SOFT  # first allowed at home_kitchen
+    assert out.location == LocationType.HOME_KITCHEN  # never relocated
+
+
+def test_edit_lighting_coherent_for_location_is_kept():
+    out = sp.apply_item_scene_edit(_edit_spec(), {"lighting": "candlelit"}, BatchControls())
+    assert out.lighting == LightingType.CANDLELIT
+
+
+def test_edit_lighting_snap_uses_the_same_edit_new_location():
+    # location and lighting edited together -> the snap validates against the NEW
+    # location, not the stale stored one.
+    out = sp.apply_item_scene_edit(
+        _edit_spec(), {"location": "office", "lighting": "moody_dim"}, BatchControls(),
+    )
+    assert out.location == LocationType.OFFICE
+    assert out.lighting == LightingType.NATURAL_SOFT  # moody_dim isn't allowed at office
+
+
+def test_edit_location_only_leaves_existing_lighting_untouched():
+    # A location-only edit does NOT retroactively re-validate the item's existing
+    # lighting — narrow, intentional scope (see apply_item_scene_edit docstring): only an
+    # edit that itself sets lighting triggers the snap.
+    out = sp.apply_item_scene_edit(
+        _edit_spec(lighting="candlelit"), {"location": "office"}, BatchControls(),
+    )
+    assert out.location == LocationType.OFFICE
+    assert out.lighting == LightingType.CANDLELIT  # untouched, even though now incoherent
+
+
+def test_edit_lighting_snap_is_deterministic():
+    spec = _edit_spec(location="nightclub", lighting="neon")
+    a = sp.apply_item_scene_edit(spec, {"lighting": "candlelit"}, BatchControls())
+    b = sp.apply_item_scene_edit(spec, {"lighting": "candlelit"}, BatchControls())
+    assert a.lighting == b.lighting == LightingType.NATURAL_SOFT  # candlelit not allowed @ nightclub
 
 
 if __name__ == "__main__":

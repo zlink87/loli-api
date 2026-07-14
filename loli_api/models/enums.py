@@ -292,7 +292,18 @@ class OutfitType(str, Enum):
 
 
 class PoseType(str, Enum):
-    """Available pose types for pose editing."""
+    """
+    Available pose types for pose editing.
+
+    APPEND-ONLY, DEGRADE-SAFE (mirrors EthnicityType/CultureType): members and their
+    snake_case string values are never renamed or reordered, only appended — stored text
+    columns keep parsing, nothing serializes positionally, and every value-keyed consumer
+    degrades safely on a value it doesn't recognize. Each pose is single-sourced to a text
+    description + reference PNG in services/pose_assets.py; a member whose PNG is not yet
+    installed is "dark" (the planner ref latch, services.pose_assets.has_pose_ref, keeps it
+    out of every batch pool, and the /v1/edit/pose endpoint 422s it) until the reference is
+    generated + committed via scripts/generate_pose_refs.py.
+    """
     STANDING_LEANING = "standing_leaning"
     SITTING = "sitting"
     SITTING_LEGS_WIDE_OPEN = "sitting_legs_wide_open"
@@ -309,6 +320,20 @@ class PoseType(str, Enum):
     JOGGING = "jogging"
     OPENING_FRIDGE = "opening_fridge"
     COOKING = "cooking"
+    # --- POSE PACK (07-14): active/lifestyle poses (richer, less-static selection) ---
+    WALKING = "walking"
+    WALKING_AWAY = "walking_away"
+    RUNNING = "running"
+    DANCING = "dancing"
+    STRETCHING = "stretching"
+    # --- POSE PACK (07-14): camera-aware provocative poses (the description phrase itself
+    # carries the camera direction — "photographed from behind", "looking back at the camera") ---
+    ALL_FOURS_FROM_BEHIND = "all_fours_from_behind"
+    BENT_OVER_FROM_BEHIND = "bent_over_from_behind"
+    KNEELING_ARCHED_BACK = "kneeling_arched_back"
+    LYING_ON_SIDE = "lying_on_side"
+    OVER_SHOULDER_LOOK = "over_shoulder_look"
+    STRADDLING_CHAIR = "straddling_chair"
 
 
 class MotionType(str, Enum):

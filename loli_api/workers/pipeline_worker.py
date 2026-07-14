@@ -29,7 +29,16 @@ from models.enums import JobStatus
 
 # Import helpers from existing endpoint modules
 from api.v1.endpoints.outfit import build_prompt, prepare_outfit_workflow, outfit_continuity_text
-from api.v1.endpoints.pose import build_pose_prompt, prepare_pose_workflow
+from api.v1.endpoints.pose import (
+    build_pose_prompt,
+    prepare_pose_workflow,
+    pose_template_has_face_ref_conditioning,
+    # WS-N2: single source of truth for the natural/candid LoRA-scale decision now lives
+    # in the pose endpoint (alongside build_pose_prompt / prepare_pose_workflow) so the
+    # batch pipeline, the interactive pose worker, and the interactive outfit worker all
+    # share one implementation instead of importing worker->worker.
+    _natural_lora_scales,
+)
 from api.v1.endpoints.background import build_background_prompt, prepare_background_workflow
 
 from services import head_mask as head_mask_service
@@ -162,6 +171,27 @@ def _extract_step_prompts(step_name: str, workflow: dict) -> Dict[str, Optional[
         "positive": _truncate_debug_prompt(positive),
         "negative": _truncate_debug_prompt(negative),
     }
+
+
+def _extract_applied_lora_scales(workflow: dict, photo_style) -> Optional[Dict[str, float]]:
+    """
+    Read back the LoRA strengths WS-N2 actually wrote onto this JUST-BUILT pose workflow —
+    mirroring ``_extract_step_prompts``' read-after-build approach. Returns the {node_id:
+    strength_model} pairs that natural/candid scaling targeted AND that exist on this graph
+    (so the v1 Rapid pose graph, which carries none of those LoRA nodes, yields None),
+    else None. Used only to populate the step ``_debug`` meta; never affects the render.
+    """
+    scales = _natural_lora_scales(photo_style)
+    if not scales:
+        return None
+    applied = {
+        nid: workflow[nid]["inputs"]["strength_model"]
+        for nid in scales
+        if nid in workflow
+        and isinstance(workflow[nid].get("inputs"), dict)
+        and "strength_model" in workflow[nid]["inputs"]
+    }
+    return applied or None
 
 
 class PipelineBackgroundWorker:
@@ -470,6 +500,21 @@ class PipelineBackgroundWorker:
                     # background". Both no-ops (default) on the legacy multi-step path.
                     dress_mode=single_pass_edit,
                     scene_text=(request.prompt if single_pass_edit else None),
+                    # WS-F: only the faceref pose graph wires the hero donor (node 210)
+                    # into the prompt ENCODERS as image3, so only there does the extra
+                    # "render that same face" clause have a conditioning image to bind to.
+                    # GUARD (both-conditions): the clause is added ONLY when the template
+                    # exposes the image3 encoder input AND a DEDICATED hero donor was
+                    # actually staged (face_ref_name). Without a staged donor, node 210
+                    # falls back to the step source image for the ReActor stamp only — there
+                    # is no separate hero face for "image 3" to point at — so the clause
+                    # would be a lie. A batch item whose scene_mapper set faceRefImage stages
+                    # one (clause on); an item / interactive request without one does not
+                    # (clause off), even on the faceref graph.
+                    face_ref_conditioning=(
+                        pose_template_has_face_ref_conditioning(self._pose_template)
+                        and face_ref_name is not None
+                    ),
                 ),
                 photo_style,
             )
@@ -507,6 +552,12 @@ class PipelineBackgroundWorker:
                 # for node 200. Empty setting (default, until ops stages the file on
                 # the volume and flips it) -> None -> prepare_pose_workflow no-ops.
                 face_restore_model=settings.POSE_REACTOR_FACE_RESTORE_MODEL or None,
+                # WS-N2: dial the LoRA stack (304/305/306) DOWN for natural/candid so the
+                # render stops looking editorial; None for polished/studio/None (baked
+                # strengths kept). photo_style here is request.photoStyle (the pose branch
+                # never nulls it — only background does). No-op on a graph without those
+                # LoRA nodes (v1 Rapid pose graph).
+                lora_scales=_natural_lora_scales(photo_style),
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(
@@ -540,6 +591,12 @@ class PipelineBackgroundWorker:
                 head_mask_name=head_mask_name,
                 source_dressed=getattr(request, "sourceDressed", False),
                 denoise=getattr(request, "outfitDenoise", None),
+                # WS-N2 parity: the outfit 2511/skinlora crop-stitch graphs carry the SAME
+                # URP/NSFW/skin LoRA stack (nodes 304/305/306) as the pose graph, so dial it
+                # DOWN for natural/candid here too. photo_style is request.photoStyle (the
+                # outfit branch, unlike background, never nulls it). No-op on the legacy V1 /
+                # plain crop-stitch graphs, which carry none of those LoRA nodes.
+                lora_scales=_natural_lora_scales(photo_style),
             )
         if step_name == "background":
             # WS-T: interiorStyle/colorPalette (populated by populate_home_style for a
@@ -665,6 +722,18 @@ class PipelineBackgroundWorker:
         # the engine (self) is shared across concurrent BatchPipelineWorker
         # instances/jobs.
         step_prompts = _extract_step_prompts(step_name, workflow)
+
+        # WS-N2 observability: record the style-scaled LoRA strengths actually written to
+        # this pose step's workflow (natural/candid only; absent otherwise so the debug
+        # entry shape stays backward-compatible). Read straight off the built workflow,
+        # like the prompt read-back above, and folded into step_prompts so it rides the
+        # existing return channel up to the loop that assembles job.debug_meta["steps"].
+        if step_name == "pose":
+            applied_scales = _extract_applied_lora_scales(
+                workflow, getattr(request, "photoStyle", None)
+            )
+            if applied_scales:
+                step_prompts["loraScales"] = applied_scales
 
         outputs = await runpod_runner.run_workflow(
             self.runpod_client, self.job_manager, job_id, workflow,
@@ -832,14 +901,20 @@ class PipelineBackgroundWorker:
                 # text (from _run_step's step_prompts) so a bad image is
                 # attributable to planner (scene_spec) vs. render (this) in one look.
                 step_meta = self.workflow_meta.get(step_name, {})
-                job.debug_meta.setdefault("steps", []).append({
+                step_debug = {
                     "step": step_name,
                     "workflow_path": step_meta.get("path"),
                     "tier": step_meta.get("tier"),
                     "seed": seed,
                     "positive_prompt": step_prompts.get("positive"),
                     "negative_prompt": step_prompts.get("negative"),
-                })
+                }
+                # WS-N2: only present when natural/candid scaling actually wrote LoRA
+                # strengths this step — keeps the debug entry shape backward-compatible.
+                lora_scales_applied = step_prompts.get("loraScales")
+                if lora_scales_applied:
+                    step_debug["loraScales"] = lora_scales_applied
+                job.debug_meta.setdefault("steps", []).append(step_debug)
 
                 logger.info(
                     f"[PIPELINE] {job.job_id} | {step_name} complete, "

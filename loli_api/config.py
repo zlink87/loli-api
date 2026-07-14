@@ -114,6 +114,19 @@ class Settings(BaseSettings):
     # resolution (prod sets 1.74 ~ 1080x1620). No-op when the graph lacks node 93.
     POSE_OUTPUT_MEGAPIXELS: float = 0.0
 
+    # WS-N2 (Natural de-synthetic): per-style LoRA strengths for the pose graph's LoRA
+    # stack — node 304 (URP realism), 305 (NSFW), 306 (skin) on the skinlora tier. The
+    # baked strengths (0.8 / 0.65 / 1.0) apply identically to EVERY style, so natural and
+    # candid_phone batches still render editorial/contrasty. For those two styles the
+    # pipeline dials the whole stack DOWN with these values; polished/studio/None leave
+    # the baked strengths untouched. The -1.0 sentinel means "leave that node's baked
+    # strength alone" (same convention as the POSE_REACTOR_* knobs above — 0.0 is itself a
+    # valid strength, so None can't double as the no-override marker on a typed float).
+    # No-op on the v1 Rapid pose graph, which carries none of these LoRA nodes.
+    NATURAL_LORA_URP: float = 0.6
+    NATURAL_LORA_NSFW: float = 0.5
+    NATURAL_LORA_SKIN: float = 0.7
+
     # GPU execution backend: "runpod" (serverless) or "local" (legacy WebSocket)
     GPU_BACKEND: str = "runpod"
 

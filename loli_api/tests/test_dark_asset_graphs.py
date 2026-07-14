@@ -38,7 +38,11 @@ Runs under pytest or directly: python loli_api/tests/test_dark_asset_graphs.py
 import json
 from pathlib import Path
 
-from api.v1.endpoints.pose import prepare_pose_workflow, _is_pose_2511_template
+from api.v1.endpoints.pose import (
+    prepare_pose_workflow,
+    _is_pose_2511_template,
+    pose_template_has_face_ref_conditioning,
+)
 
 _WF_DIR = Path(__file__).resolve().parent.parent / "workflows"
 
@@ -344,6 +348,85 @@ def test_face_restore_model_works_on_new_pose_variant_graphs():
             g, "src.png", "ref.png", face_restore_model="GPEN-BFR-512.onnx"
         )
         assert wf["200"]["inputs"]["face_restore_model"] == "GPEN-BFR-512.onnx", name
+
+
+# ---------------------------------------------------------------------------
+# WS-F: pose_2511_skinlora_faceref_API.json — the skinlora pose graph plus the hero
+# face donor (node 210) wired into BOTH prompt encoders (114 positive, 115 negative) as
+# a third conditioning image (image3), so the diffusion itself locks facial structure to
+# the real hero (the face-slip fix). A byte-clone of pose_2511_skinlora_API.json + the two
+# image3 inputs, nothing else.
+# ---------------------------------------------------------------------------
+_FACEREF_GRAPH = "pose_2511_skinlora_faceref_API.json"
+
+
+def test_faceref_graph_parses_and_has_no_dangling_refs():
+    g = _load(_FACEREF_GRAPH)
+    assert isinstance(g, dict) and g
+    assert _dangling_refs(g) == [], _dangling_refs(g)
+
+
+def test_faceref_image3_wired_to_node_210_on_both_encoders():
+    g = _load(_FACEREF_GRAPH)
+    for nid in ("114", "115"):
+        ins = g[nid]["inputs"]
+        assert g[nid]["class_type"] == "TextEncodeQwenImageEditPlus", nid
+        # image3 mirrors the image1/image2 wiring already present on this encoder.
+        assert ins["image1"] == ["109", 0], nid
+        assert ins["image2"] == ["170", 0], nid
+        assert ins["image3"] == ["210", 0], nid
+
+
+def test_faceref_detection_true_only_for_faceref_graph():
+    assert pose_template_has_face_ref_conditioning(_load(_FACEREF_GRAPH)) is True
+    # The non-faceref skinlora base and the v1 Rapid graph have no image3 encoder input.
+    assert pose_template_has_face_ref_conditioning(_load("pose_2511_skinlora_API.json")) is False
+    assert pose_template_has_face_ref_conditioning(_load("edit_pose_action.json")) is False
+
+
+def test_faceref_keeps_2511_marker():
+    g = _load(_FACEREF_GRAPH)
+    assert _is_pose_2511_template(g) is True
+    assert g["301"]["class_type"] == "UNETLoader"
+
+
+def test_faceref_lora_chain_and_node_contracts_intact():
+    # The image3 addition must not disturb the LoRA chain 301->304->305->306->3 or the
+    # node 200/210/93 contract inherited byte-for-byte from the skinlora base graph.
+    g = _load(_FACEREF_GRAPH)
+    assert g["304"]["inputs"]["model"] == ["301", 0]
+    assert g["305"]["inputs"]["model"] == ["304", 0]
+    assert g["306"]["inputs"]["model"] == ["305", 0]
+    assert g["306"]["inputs"]["lora_name"] == "qwen-edit-skin.safetensors"
+    assert g["306"]["inputs"]["strength_model"] == 1.0
+    assert g["305"]["inputs"]["strength_model"] == 0.65
+    assert g["3"]["class_type"] == "KSampler"
+    assert g["3"]["inputs"]["model"] == ["306", 0]
+    # node 210 (ReActor face donor) + node 200 (ReActor swap reading it) contract.
+    assert g["210"]["class_type"] == "LoadImage"
+    assert g["200"]["inputs"]["source_image"] == ["210", 0]
+    assert g["200"]["inputs"]["input_image"] == ["8", 0]
+    assert g["200"]["inputs"]["codeformer_weight"] == 0.7
+    assert g["200"]["inputs"]["face_restore_visibility"] == 0.65
+    # node 93 output-size contract preserved.
+    assert g["93"]["class_type"] == "ImageScaleToTotalPixels"
+
+
+def test_faceref_is_byte_clone_of_skinlora_plus_two_image3_edits():
+    # Structural guarantee: the faceref graph differs from its skinlora base ONLY by the
+    # two image3 inputs (nodes 114 + 115). Strip them and it must equal the base exactly.
+    g = _load(_FACEREF_GRAPH)
+    base = _load("pose_2511_skinlora_API.json")
+    for nid in ("114", "115"):
+        assert g[nid]["inputs"].pop("image3") == ["210", 0]
+    assert json.dumps(g, sort_keys=True) == json.dumps(base, sort_keys=True)
+
+
+def test_faceref_is_valid_prepare_pose_workflow_input():
+    # Sanity: the new graph is a real, loadable prepare_pose_workflow input too.
+    g = _load(_FACEREF_GRAPH)
+    wf = prepare_pose_workflow(g, "src.png", "ref.png", face_restore_model="GPEN-BFR-512.onnx")
+    assert wf["200"]["inputs"]["face_restore_model"] == "GPEN-BFR-512.onnx"
 
 
 if __name__ == "__main__":

@@ -160,6 +160,21 @@ def test_edit_nudity_above_max_rejected():
         story_planner.apply_item_scene_edit(_scene_spec(), {"nudity_level": "high"}, controls)
 
 
+def test_edit_refless_pose_rejected(monkeypatch):
+    # The refless-pose latch must gate item PATCH edits exactly like the
+    # planner pools and the interactive pose endpoint -- otherwise the edit
+    # persists and the rerun only fails later at the worker (missing PNG).
+    monkeypatch.setattr(story_planner, "has_pose_ref", lambda p: False)
+    with pytest.raises(story_planner.SceneEditError, match="not available yet"):
+        story_planner.apply_item_scene_edit(_scene_spec(), {"pose": "sitting"}, BatchControls())
+
+
+def test_edit_pose_with_ref_accepted(monkeypatch):
+    monkeypatch.setattr(story_planner, "has_pose_ref", lambda p: True)
+    updated = story_planner.apply_item_scene_edit(_scene_spec(), {"pose": "sitting"}, BatchControls())
+    assert updated.pose is not None
+
+
 def test_edit_nudity_at_max_allowed():
     controls = BatchControls(max_nudity=NudityLevel.MEDIUM, blocked_outfits=[])
     updated = story_planner.apply_item_scene_edit(_scene_spec(), {"nudity_level": "medium"}, controls)

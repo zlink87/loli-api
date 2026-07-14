@@ -256,14 +256,17 @@ changes. Only `necklace` sits low enough (below the head-mask's chin/jaw padding
 to land in the editable region and actually render. Don't promise an accessories
 control for head items.
 
-**Poses can look stiff/repetitive.** Each of the 16 `PoseType` values is driven by
-exactly one fixed reference image (`assets/poses/pose_ref_<value>.png`) that the
-pose workflow instructs the model to copy closely ("Make the person in image 1 do
-the exact same pose of the person in image 2 ... match image 2 accurately"). Every
-photo using a given pose type therefore looks near-identical to every other photo
-using that same type, and the achievable variety across a whole batch is capped at
-16 silhouettes total. Fixing this needs more/varied reference images per pose, or a
-pose-generation model — a backend change, not something an admin input can reach.
+**Poses can look stiff/repetitive.** Each `PoseType` value is driven by exactly one
+fixed reference image (`assets/poses/pose_ref_<value>.png`) that the pose workflow
+instructs the model to copy closely ("Make the person in image 1 do the exact same
+pose of the person in image 2 ... match image 2 accurately"). Every photo using a
+given pose type therefore looks near-identical to every other photo using that same
+type, and the achievable variety across a whole batch is capped at the number of
+*installed* silhouettes (16 today; the 2026-07-14 **POSE PACK** addendum adds 11 more —
+walking/running/dancing and camera-aware provocative poses — that go live once their
+reference PNGs are generated). Getting *more* variety per pose (not just more types)
+still needs varied reference images per pose or a pose-generation model — a backend
+change, not something an admin input can reach.
 
 **"Generate" re-plans; "Launch this plan" reproduces the preview.**
 `POST /v1/characters/{id}/batches` — what the "Generate {count}" button calls,
@@ -405,13 +408,28 @@ Two new admin endpoints (both `require_admin`, item must be status
   "pose": "standing_relaxed",      // null clears (skip pose step)
   "nudity_level": "high",          // 422 if above the batch's max_nudity or sfw_only
   "time_of_day": "evening",
-  "lighting": "warm_lamplight",
+  "lighting": "candlelit",
   "setting": "…", "activity": "…", // free text — server scrubs identity/companions
   "pose_detail": "…", "outfit_detail": "…", "expression": "…"
 }
 ```
 422 on blocked/unknown enum values (allow/block lists still apply); returns
 the updated item.
+
+> **The Lighting field MUST be prefilled from `scene_spec.lighting`, never
+> hardcoded.** Lighting is already varied and venue-correct per photo, server-side —
+> `studio_softbox` only ever appears at `photo_studio`/`stage`, `candlelit` only at
+> evening-capable interiors (bedroom, restaurant, hotel room, …), `neon`/`moody_dim`
+> only at nightlife venues, and so on (the full `LocationType -> LightingType[]` map
+> is `LIGHTING_LOCATION_COMPAT`, enforced on every planned/edited item). A build whose
+> Edit-scene dialog defaults the Lighting dropdown to one fixed option regardless of
+> the item (e.g. always showing "Studio Softbox") is an admin-FE bug: it misrepresents
+> what that photo actually is, **and it fails silently** — if the admin saves without
+> touching the field, the API does not reject the mismatched value with a 422; it
+> deterministically **snaps** it to the first lighting value the item's location
+> allows (`apply_item_scene_edit`), so the item quietly changes to something the
+> operator never chose or saw. Always read+prefill Lighting (and every other
+> scene-fact field) from the item's own `scene_spec`, not a form default.
 
 `POST /v1/batches/{batch_id}/items/{item_id}/rerun` — body `BatchItemRerun`:
 
@@ -465,8 +483,8 @@ scenes, so heated moods stop leaking onto clothed / at-work photos. Purely a ren
 prompt-composition change — nothing on the card to build. Automatic.
 
 **Global pose caps.** Pose repetition is now bounded across the whole batch (not just
-locally), so an 8-photo set spreads across more of the 16 pose silhouettes instead of
-recycling two. This is a planner constraint; see the §7 "poses can look
+locally), so an 8-photo set spreads across more of the installed pose silhouettes instead
+of recycling two. This is a planner constraint; see the §7 "poses can look
 stiff/repetitive" limit for the ceiling it works within. Automatic.
 
 **Trait-profile batch consumption + `use_trait_profile`.** `BatchCreate` now accepts
@@ -478,3 +496,107 @@ launch-form values always win; the profile can never raise nudity above the batc
 settings. Optional single checkbox in the launch form (default on) — full contract in
 [`ADMIN_TRAIT_PROFILE_INTEGRATION.md`](./ADMIN_TRAIT_PROFILE_INTEGRATION.md) §6. Automatic
 otherwise.
+
+---
+
+## 11. Addendum (2026-07-14) — nude base beauty + reroll
+
+**Panel impact: small, optional.** No new fields on the WI-9 card's status response
+(`NudeBaseStatusResponse` is unchanged); this only adds one query param to the
+existing "Generate nude base" `POST`.
+
+**Stronger body-aesthetic prompting.** The t2i base's per-body-type framing
+(`BODY_AESTHETIC_CLAUSES`, `workers/nude_base_worker.py`) was raised from a "plain
+natural" bar to a clearly more model-like one — still weight-truthful per her own
+`bodyType` (no slimming rewrite of curvy/bbw), still matte/no-gloss. Nothing to
+build; existing/regenerated bases just render better.
+
+**Reroll the base.** The base's sampler seed is otherwise pinned per-character
+(`stable_nude_base_seed`), so regenerating used to reproduce the exact same body
+byte-for-byte. `POST /v1/characters/{id}/nude-base` now accepts an optional
+`variant` query param (integer, `0`–`99`; out-of-range → `422`):
+
+```
+POST /v1/characters/{id}/nude-base?variant=1
+POST /v1/characters/{id}/nude-base?variant=2
+...
+```
+
+- `variant` omitted or `0` = the **canonical deterministic base** (today's
+  behavior, byte-identical).
+- `variant=1, 2, ...` each draw a **different, still fully deterministic** body
+  from the same locked identity/pose/backdrop — reroll by POSTing again with an
+  incremented value until the rendered body looks right, then stop (no need to
+  track which variant "won"; the panel doesn't need to store it anywhere).
+- Same async contract as every other `POST` here — 202, poll status via `GET`
+  as usual.
+
+**Optional build:** a small "Reroll" affordance next to the WI-9 "Generate nude
+base" action (e.g. a button that resends `POST` with an incrementing `variant`)
+saves the admin from re-clicking through a confirmation each time. Not required —
+POSTing the same URL with `?variant=N` from anywhere already works.
+
+**Face reminder:** the nude base's face is intentionally **not** the hero's — it's
+a body reference only (ReActor face lock stays OFF by default,
+`NUDE_BASE_FACE_SWAP`). Every published batch photo's face still comes from the
+hero at the pose/render step, regardless of which variant the base was generated
+from. Don't read a mismatched face on the base card as a bug.
+
+---
+
+## Addendum — 2026-07-14 · POSE PACK (11 new poses, dark until reference PNGs are generated)
+
+**What shipped (backend).** `PoseType` gains **11 new values** — richer, less-static pose
+selection (the prior set skewed to standing/sitting/lying). They are additive and
+append-only; nothing was renamed or reordered, so stored batches and the current panel keep
+working unchanged.
+
+- **Active / lifestyle:** `walking`, `walking_away`, `running`, `dancing`, `stretching`
+- **Camera-aware provocative** (the pose description itself carries the camera direction —
+  "photographed from behind", "looking back at the camera"): `all_fours_from_behind`,
+  `bent_over_from_behind`, `kneeling_arched_back`, `lying_on_side`, `over_shoulder_look`,
+  `straddling_chair`
+
+They appear automatically in `/openapi.json → components.schemas.PoseType` (and the
+`/v1/options` list), so a panel that renders the pose enum dynamically already surfaces them
+with title-cased labels — **no panel change is required.**
+
+**The "dark until ref" rule (why they won't render yet).** Every pose is driven by one fixed
+reference image at `loli_api/assets/poses/pose_ref_<value>.png`. The 11 new poses ship
+**without** those PNGs, so a safety **latch** keeps them *dark*:
+
+- **Story batches never pick a refless pose.** The planner filters its pose pools through a
+  `has_pose_ref()` check, so today's batches behave byte-identically to before the pack — the
+  11 new poses simply don't appear in any generated batch until their PNGs exist. (They also
+  stay excluded from the global pose-cap variety spread until then.)
+- **Interactive `POST /v1/edit/pose` with a not-yet-generated pose returns `422`** with a
+  clear message ("Pose reference not installed for pose '…'. Run scripts/generate_pose_refs.py.").
+  If you list all enum values in an interactive pose picker, expect a 422 on the new ones until
+  the refs are committed — either wait to expose them, or handle the 422 as "coming soon".
+
+Once the reference PNGs are generated + committed, all 11 light up automatically — **no code or
+config change** is needed.
+
+**One-time action to make them live (run once against prod, then commit the PNGs).** Generate
+every new pose's reference image via the running API and save it under `loli_api/assets/poses/`:
+
+```bash
+python loli_api/scripts/generate_pose_refs.py \
+  --api-base https://<prod-host> --token "$ADMIN_JWT" \
+  --pose walking --pose walking_away --pose running --pose dancing --pose stretching \
+  --pose all_fours_from_behind --pose bent_over_from_behind --pose kneeling_arched_back \
+  --pose lying_on_side --pose over_shoulder_look --pose straddling_chair
+```
+
+Then review the generated silhouettes (the script prints a checklist) and **commit the new
+`loli_api/assets/poses/pose_ref_*.png` files**. The pose count in the boot log
+(`Pose references: N/27 installed`) moves from 16/27 to 27/27 once they land.
+
+**Propriety (planner-enforced, automatic).** `all_fours_from_behind`, `kneeling_arched_back`
+and `straddling_chair` are **private-only** — the planner never places them in a public venue
+(club/bar/cafe/office/beach/…), only somewhere private (home/hotel/studio and solitary outdoor
+spots). `bent_over_from_behind` is public-legal but never lands in a formal workplace
+(office/classroom/library/hospital_ward). `running` follows the same rules as `jogging`: it
+only appears on activewear/streetwear/casual (never a formal dress) and only at a runnable
+venue (park/city street/beach/forest trail/gym). These are backend constraints — nothing to
+build.

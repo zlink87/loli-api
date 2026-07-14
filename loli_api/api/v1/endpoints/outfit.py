@@ -467,6 +467,32 @@ def _is_cropstitch_template(template: dict) -> bool:
     return bool(node and node.get("class_type") == "InpaintCropImproved")
 
 
+def _apply_lora_scales(wf: dict, lora_scales: Optional[Dict[str, float]]) -> None:
+    """
+    WS-N2 (outfit parity): in-place override of the outfit graph's LoRA strengths.
+
+    For each {node_id: strength_model} pair present in BOTH ``lora_scales`` AND ``wf``,
+    write ``wf[nid]["inputs"]["strength_model"] = float(v)``. The outfit 2511/skinlora
+    crop-stitch graphs carry the same URP/NSFW/skin LoRA stack (nodes 304/305/306) as the
+    pose graph, so the batch pipeline / interactive outfit worker dial it DOWN for
+    natural/candid styles via ``_natural_lora_scales`` (the single source of truth in
+    ``api.v1.endpoints.pose``). Guarded on node presence, so it is a true no-op on graphs
+    without those nodes (the legacy V1 ``test_final_API.json`` and the plain
+    ``outfit_cropstitch_API.json``) and never raises. None/empty (the default, and every
+    polished/studio/interactive caller) touches nothing.
+
+    Mirrors ``prepare_pose_workflow``'s inline LoRA-scale loop exactly, extracted here so
+    BOTH outfit preparers (V1 legacy and V2 crop-stitch) share one implementation.
+    """
+    if not lora_scales:
+        return
+    for nid, v in lora_scales.items():
+        node = wf.get(nid)
+        if node and isinstance(node.get("inputs"), dict):
+            node["inputs"]["strength_model"] = float(v)
+            logger.debug(f"Set outfit node {nid} strength_model: {float(v)}")
+
+
 def prepare_outfit_cropstitch_workflow(
     template: dict,
     image_name: str,
@@ -478,6 +504,7 @@ def prepare_outfit_cropstitch_workflow(
     head_mask_name: Optional[str] = None,
     source_dressed: bool = False,
     denoise: Optional[float] = None,
+    lora_scales: Optional[Dict[str, float]] = None,
 ) -> dict:
     """
     Prepare the V2 crop-and-stitch outfit graph (``outfit_cropstitch_API.json``).
@@ -548,6 +575,11 @@ def prepare_outfit_cropstitch_workflow(
     # itself. None (default / interactive callers) keeps the 0.80 baseline.
     wf["106"]["inputs"]["denoise"] = denoise or 0.80
 
+    # WS-N2 parity: dial the URP/NSFW/skin LoRA stack (304/305/306) DOWN for natural/candid.
+    # Present only on the 2511full / skinlora crop-stitch graphs; a true no-op on the plain
+    # crop-stitch graph (no LoRA nodes). None (default) touches nothing.
+    _apply_lora_scales(wf, lora_scales)
+
     logger.debug(
         f"V2 outfit graph prepared: mode={'GARMENT' if use_garment else 'BODY'}, "
         f"outfit={getattr(outfit, 'value', outfit)}"
@@ -566,6 +598,7 @@ def prepare_outfit_workflow(
     head_mask_name: Optional[str] = None,
     source_dressed: bool = False,
     denoise: Optional[float] = None,
+    lora_scales: Optional[Dict[str, float]] = None,
 ) -> dict:
     """
     Prepare the outfit workflow with injected parameters.
@@ -576,6 +609,12 @@ def prepare_outfit_workflow(
     the template's baked value regardless of this argument (see the NOTE on the
     mask-feather block further down: aggressive denoise is only safe once
     regeneration is crop-confined, which V1 is not).
+
+    ``lora_scales`` (WS-N2, {node_id: strength_model}, None = untouched) dials the
+    2511/skinlora LoRA stack (nodes 304/305/306) down for natural/candid styles —
+    see ``_apply_lora_scales``. Applied on BOTH the V2 crop-stitch path (where those
+    LoRA nodes live) and the legacy V1 path (a no-op there — no LoRA nodes), so the
+    caller threads it uniformly regardless of which template loaded.
 
     Identity is preserved in layers:
       1. Node 202 segments the PERSON — the edit region. The person mask (not
@@ -635,7 +674,7 @@ def prepare_outfit_workflow(
         return prepare_outfit_cropstitch_workflow(
             template, image_name, prompt, seed=seed, nudity_level=nudity_level,
             outfit=outfit, negative_prompt=negative_prompt, head_mask_name=head_mask_name,
-            source_dressed=source_dressed, denoise=denoise,
+            source_dressed=source_dressed, denoise=denoise, lora_scales=lora_scales,
         )
 
     wf = copy.deepcopy(template)
@@ -698,6 +737,11 @@ def prepare_outfit_workflow(
         wf["119"]["inputs"]["expand"] = 8
         wf["119"]["inputs"]["blur_radius"] = 4
         logger.debug("Set mask grow=8/blur=4 (reduced from 20/10 to cut edge bleed)")
+
+    # WS-N2 parity: honor lora_scales on the legacy path too. The V1 whole-frame graph
+    # (test_final_API.json) carries none of nodes 304/305/306, so this is a guarded no-op
+    # here — but it keeps the kwarg's behavior uniform across both preparers.
+    _apply_lora_scales(wf, lora_scales)
 
     return wf
 

@@ -7,7 +7,9 @@ import random
 import traceback
 import logging
 from datetime import datetime
+from typing import Optional, Tuple
 
+from config import settings
 from services.job_manager import Job
 from services.prompt_constants import apply_edit_photo_style
 from models.enums import JobStatus, PhotoStyleType
@@ -15,6 +17,8 @@ from models.enums import JobStatus, PhotoStyleType
 from api.v1.endpoints.pose import (
     build_pose_prompt,
     prepare_pose_workflow,
+    pose_template_has_face_ref_conditioning,
+    _natural_lora_scales,
 )
 
 from workers.base_worker import BaseEditWorker
@@ -49,6 +53,89 @@ class PoseBackgroundWorker(BaseEditWorker):
     def _mark_job_done(self) -> None:
         self.job_manager.mark_pose_done()
 
+    def _build_edit_workflow(
+        self,
+        request,
+        source_name: str,
+        reference_image: str,
+        seed: int,
+        face_ref_name: Optional[str] = None,
+    ) -> Tuple[str, dict]:
+        """
+        Build the ``(prompt, workflow)`` for a standalone pose edit — the interactive-path
+        twin of ``pipeline_worker._build_step_workflow``'s pose branch. Threads the SAME
+        settings-driven render-quality knobs so an interactive ``/v1/edit/pose`` renders at
+        batch parity:
+
+          * ReActor node-200 tuning — ``face_restore_visibility`` / ``codeformer_weight``
+            from ``settings.POSE_REACTOR_*`` (the -1.0 sentinel = leave the graph's baked
+            value untouched), plus the optional sharper
+            ``settings.POSE_REACTOR_FACE_RESTORE_MODEL``;
+          * output canvas size — node 93 megapixels from ``settings.POSE_OUTPUT_MEGAPIXELS``
+            (0.0 = keep the template's baked size);
+          * natural/candid LoRA scaling — nodes 304/305/306 dialed down via
+            ``_natural_lora_scales(request.photoStyle)``. PoseEditRequest carries no
+            photoStyle, so this is None (baked strengths) today, but stays parity-correct if
+            the request ever gains one;
+          * the live 2511 negative (``negativePrompt``) — inert on the v1 cfg-1 graph.
+
+        ``face_ref_conditioning`` gates on BOTH the loaded template exposing the image3
+        encoder input (the faceref graph) AND a dedicated hero donor actually being staged
+        (``face_ref_name``). The interactive pose path stages no dedicated donor — a
+        PoseEditRequest carries no hero image and the endpoint resolves only identityAnchors
+        (text), not a face URL — so ``face_ref_name`` is None here and the "render that same
+        face" clause stays absent even on the faceref graph (node 210 there falls back to the
+        source for the ReActor stamp only). Kept as a parameter so the guard reads identically
+        to the pipeline's and is directly unit-testable.
+
+        Pure/synchronous and side-effect-free (no I/O), so it is unit-testable without the
+        full RunPod round-trip.
+        """
+        face_ref_conditioning = (
+            pose_template_has_face_ref_conditioning(self._workflow_template)
+            and face_ref_name is not None
+        )
+        prompt = apply_edit_photo_style(
+            # Trait-aware edit: identityAnchors (skin tone/hair/build) is populated in the
+            # endpoint from characterId. The pose step fully re-diffuses the frame, so this
+            # anchor keeps the character's real skin tone. None (no character) leaves the
+            # prompt unchanged.
+            build_pose_prompt(
+                request.pose,
+                identity_anchors=getattr(request, "identityAnchors", None),
+                face_ref_conditioning=face_ref_conditioning,
+            ),
+            PhotoStyleType.POLISHED,
+        )
+        # D3: negativePrompt goes LIVE only on the Tier-A 2511 pose graph
+        # (prepare_pose_workflow gates the injection on the template marker); on the v1 cfg-1
+        # graph it stays inert, matching PoseEditRequest.negativePrompt's documented "IGNORED
+        # on v1" contract. PoseEditRequest carries no nudity level, so the negative uses
+        # edit_negative's 'low' default.
+        workflow = prepare_pose_workflow(
+            self._workflow_template, source_name, reference_image, prompt=prompt, seed=seed,
+            negative_prompt=getattr(request, "negativePrompt", None),
+            # ReActor node-200 knobs from the server-wide settings (batch parity). The -1.0
+            # sentinel default on both means "leave the graph's baked 0.65/0.7 alone".
+            reactor_restore_visibility=settings.POSE_REACTOR_RESTORE_VISIBILITY,
+            reactor_codeformer_weight=settings.POSE_REACTOR_CODEFORMER_WEIGHT,
+            # Dark asset (ships OFF): sharper face-restore model for node 200. Empty setting
+            # -> None -> prepare_pose_workflow no-ops (baked CodeFormer kept).
+            face_restore_model=settings.POSE_REACTOR_FACE_RESTORE_MODEL or None,
+            # Output canvas size (node 93). 0.0 (default) -> None -> baked size kept.
+            output_megapixels=(
+                settings.POSE_OUTPUT_MEGAPIXELS
+                if settings.POSE_OUTPUT_MEGAPIXELS > 0
+                else None
+            ),
+            # Natural/candid LoRA scaling (nodes 304/305/306). None for POLISHED / no style.
+            lora_scales=_natural_lora_scales(getattr(request, "photoStyle", None)),
+            # Dedicated ReActor face donor (node 210). None on the interactive path -> node
+            # 210 falls back to the source image (donor == source), unchanged behavior.
+            face_ref_image=face_ref_name,
+        )
+        return prompt, workflow
+
     async def _process_job(self, job: Job) -> None:
         start_time = datetime.utcnow()
         request = job.request
@@ -72,36 +159,23 @@ class PoseBackgroundWorker(BaseEditWorker):
             reference_image = await self.stage_pose_reference(request.pose)
             logger.info(f"[POSE] {job.job_id} | Reference image: {reference_image}")
 
-            # Step 4: Prepare seed and prompt
+            # Step 4/5: Prepare seed, prompt, and workflow with the SAME batch-parity
+            # render-quality knobs (ReActor node-200 tuning, sharper face-restore model,
+            # output resolution, natural/candid LoRA scaling, live 2511 negative — see
+            # _build_edit_workflow). The interactive pose path stages no dedicated hero donor
+            # (PoseEditRequest carries no faceRefImage), so face_ref_name is None -> node 210
+            # falls back to the source and the faceref "render that same face" clause stays
+            # absent even if prod points this worker at the faceref graph.
             seed = request.seed if request.seed is not None else random.randint(1, 999_999_999)
-            prompt = apply_edit_photo_style(
-            # Trait-aware edit: identityAnchors (skin tone/hair/build) is populated in
-            # the endpoint from characterId. The pose step fully re-diffuses the frame,
-            # so this anchor keeps the character's real skin tone. None (no character)
-            # leaves the prompt unchanged.
-            build_pose_prompt(
-                request.pose,
-                identity_anchors=getattr(request, "identityAnchors", None),
-            ),
-            PhotoStyleType.POLISHED,
-        )
+            prompt, workflow = self._build_edit_workflow(
+                request, source_name, reference_image, seed, face_ref_name=None,
+            )
             logger.info(f"[POSE] {job.job_id} | Pose: {request.pose.value} | Seed: {seed}")
             logger.info(f"[POSE] {job.job_id} | Prompt: {prompt[:80]}...")
 
             await self.job_manager.update_job_status(
                 job.job_id, JobStatus.RUNNING, progress=0.3,
                 prompt_used=prompt, seed_used=seed
-            )
-
-            # Step 5: Prepare workflow and run on RunPod. D3: negativePrompt goes LIVE
-            # only when the pose worker is pointed at the Tier-A 2511 pose graph
-            # (prepare_pose_workflow gates the injection on the template marker); on the
-            # v1 cfg-1 graph it stays inert, matching PoseEditRequest.negativePrompt's
-            # documented "IGNORED on v1" contract. PoseEditRequest carries no nudity
-            # level, so the negative uses edit_negative's 'low' default.
-            workflow = prepare_pose_workflow(
-                self._workflow_template, source_name, reference_image, prompt=prompt, seed=seed,
-                negative_prompt=getattr(request, "negativePrompt", None),
             )
 
             image_start = datetime.utcnow()

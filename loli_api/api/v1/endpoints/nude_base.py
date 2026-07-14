@@ -49,6 +49,15 @@ Routes (all require_admin, character-scoped):
     POST /v1/characters/{character_id}/nude-base   -> start generation (returns a job_id)
     GET  /v1/characters/{character_id}/nude-base   -> status; finalizes on the job's success
 
+REROLL (t2i path only, 2026-07-14): POST accepts an optional `variant` query param
+(0..99, default 0). The base render's sampler seed is otherwise pinned per-character
+(stable_nude_base_seed, workers/nude_base_worker.py), so without this knob every
+regeneration reproduced the byte-identical body. `variant=0`/omitted keeps that exact
+canonical seed; `variant=1, 2, ...` each draw a different, still fully deterministic
+body from the same locked identity/pose/backdrop — POST again with an incremented
+variant until the rendered body looks right. Out-of-range values 422. No effect on the
+LEGACY edit-based path (flag off) — that path has no seed-reroll concept.
+
 MODERATION / CONSENT: this deliberately creates and stores an explicit nude asset per
 character. Only run it for characters where that is intended and permitted.
 
@@ -59,9 +68,9 @@ Calling POST again after a `failed` (or to regenerate after `succeeded`) status 
 normal retry — it is only short-circuited while a job is still genuinely in flight.
 """
 import logging
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from auth.admin import require_admin
 from api.v1.endpoints.pipeline import submit_pipeline_edit_job
@@ -104,6 +113,12 @@ _NUDE_BASE_BACKGROUND_PROMPT = (
     "no furniture, props, or distracting objects, she is the only person in the "
     "frame, no other people anywhere, empty backdrop"
 )
+# Reroll bound for POST's `variant` query param (t2i path only — see
+# _submit_t2i_nude_base / stable_nude_base_seed). Enforced with a manual check in
+# generate_nude_base rather than relying solely on the Query(ge=/le=) annotation
+# below, because this endpoint is also called directly (bypassing FastAPI's own
+# request parsing) throughout tests/test_nude_base_t2i.py and tests/test_nude_base.py.
+_NUDE_BASE_VARIANT_MAX = 99
 
 # ---------------------------------------------------------------------------
 # Global service instances (set from main.py via router.configure_services)
@@ -197,27 +212,32 @@ async def _finalize_if_ready(nb: NudeBaseRead) -> NudeBaseRead:
     return nb  # queued / running — still pending
 
 
-async def _submit_t2i_nude_base(character, character_id: str, nude_base_store, user_id: str):
+async def _submit_t2i_nude_base(
+    character, character_id: str, nude_base_store, user_id: str, variant: int = 0
+):
     """
     NEW default path (settings.NUDE_BASE_T2I=True): a deterministic text-to-image
     base render, run as ONE `nude_base` job (workers/nude_base_worker.py). The ReActor
     face lock from the ORIGINAL hero is OPTIONAL and OFF by default
     (settings.NUDE_BASE_FACE_SWAP=False), so by default the t2i output IS the base — the
     published batch faces always come from the hero via the pose-step ReActor anyway. The
-    seed is a stable zlib.crc32 of the character id, so a regenerate reproduces the exact
-    same base body geometry. Records a `pending` base row against the created job.
+    seed is a stable zlib.crc32 of the character id offset by `variant` (the REROLL
+    index — see generate_nude_base below), so `variant=0` (default) reproduces the exact
+    same base body geometry every call and `variant=1..99` each draw a distinct but
+    still deterministic reroll. Records a `pending` base row against the created job.
     """
     if get_job_manager().is_queue_full(job_type="nude_base"):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Nude base generation queue is full. Please try again later.",
         )
-    seed = stable_nude_base_seed(character_id)
+    seed = stable_nude_base_seed(character_id, variant)
     request = NudeBaseGenerateRequest(
         persona=character.persona,
         hero_image_url=character.hero_image_url,
         character_id=character_id,
         seed=seed,
+        variant=variant,
     )
     job = await get_job_manager().create_job(request, user_id, job_type="nude_base")
     nb = await nude_base_store.create(
@@ -225,7 +245,8 @@ async def _submit_t2i_nude_base(character, character_id: str, nude_base_store, u
     )
     logger.info(
         f"[NUDE-BASE] character {character_id} -> job {job.job_id} "
-        f"(t2i base; face lock optional via NUDE_BASE_FACE_SWAP, default off, seed={seed})"
+        f"(t2i base; face lock optional via NUDE_BASE_FACE_SWAP, default off, "
+        f"seed={seed}, variant={variant})"
     )
     return nb
 
@@ -298,8 +319,31 @@ async def _submit_legacy_nude_base(character, character_id: str, nude_base_store
 )
 async def generate_nude_base(
     character_id: str,
+    variant: Annotated[
+        int,
+        Query(
+            ge=0,
+            le=_NUDE_BASE_VARIANT_MAX,
+            description=(
+                "Reroll index (0..99). 0/omitted reproduces the canonical "
+                "deterministic base byte-for-byte; POST again with an incremented "
+                "value to draw a different, still deterministic body from the same "
+                "identity (t2i path only — see stable_nude_base_seed)."
+            ),
+        ),
+    ] = 0,
     user: Dict[str, Any] = Depends(require_admin),
 ):
+    # Belt-and-suspenders: Query(ge=/le=) already 422s this over real HTTP, but this
+    # endpoint is also called directly (bypassing FastAPI's request parsing) all
+    # through tests/test_nude_base_t2i.py and tests/test_nude_base.py, where the
+    # annotation's bounds are never evaluated.
+    if not (0 <= variant <= _NUDE_BASE_VARIANT_MAX):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"variant must be between 0 and {_NUDE_BASE_VARIANT_MAX}",
+        )
+
     character_store, nude_base_store = _require_stores()
     user_id = user.get("sub", "admin")
 
@@ -329,8 +373,10 @@ async def generate_nude_base(
     #   * LEGACY (flag False): the edit-based undressing on the hero (outfit step in
     #     "nude_base" prompt mode + background step, via the pipeline engine) — UNCHANGED.
     # Both record a `pending` base row against the created job; GET reconciles it on read.
+    # `variant` (the reroll index) only means anything on the t2i path's seed math —
+    # the legacy path has no seed-reroll concept, so it's simply not threaded there.
     if settings.NUDE_BASE_T2I:
-        nb = await _submit_t2i_nude_base(character, character_id, nude_base_store, user_id)
+        nb = await _submit_t2i_nude_base(character, character_id, nude_base_store, user_id, variant)
     else:
         nb = await _submit_legacy_nude_base(character, character_id, nude_base_store, user_id)
     return _status_response(nb)

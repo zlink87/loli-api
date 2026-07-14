@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from config import settings
 from auth.dependencies import get_current_user
 from models.enums import PoseType, JobStatus, NudityLevel, OutfitType
 from models.requests import PoseEditRequest
@@ -144,6 +145,7 @@ def build_pose_prompt(
     staging: Optional[str] = None,
     nudity_level: Optional[NudityLevel] = None,
     outfit_enum: Optional[str] = None,
+    face_ref_conditioning: bool = False,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
@@ -285,6 +287,15 @@ def build_pose_prompt(
             by prose-prefix — robust even when outfit_continuity_text prepends a caption
             detail ("a sheer open wrap, topless…") that a prefix sniff would miss. None
             (interactive callers) falls back to sniffing ``outfit_text``, unchanged behavior.
+        face_ref_conditioning: WS-F. True ONLY when the loaded pose template feeds the
+            hero face donor (node 210) into the prompt ENCODERS as a third conditioning
+            image (image3) — i.e. ``pose_2511_skinlora_faceref_API.json``, detected by
+            ``pose_template_has_face_ref_conditioning``. On that graph the hero's facial
+            structure is available to the diffusion itself (not just the downstream ReActor
+            stamp), so this adds one sentence binding the rendered face to image 3, fixing
+            the identity slip where facial structure derived from the random-face nude base.
+            False (default; the 3-step and interactive graphs have no image3 encoder input)
+            appends nothing, so their prompt stays byte-identical.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
@@ -310,6 +321,16 @@ def build_pose_prompt(
         f"Make the person in image 1 do the exact same pose of the person in image 2. "
         f"The target pose is: {desc}. "
     )
+    # WS-F: on the faceref graph the hero face donor (node 210) is wired into the prompt
+    # ENCODERS as image3, so the diffusion itself can lock facial structure/hairline to
+    # the real hero instead of deriving it from the (now random-faced) nude base — the
+    # face-slip fix. Inserted right after the target-pose sentence, exactly once; the flag
+    # is False on graphs without an image3 encoder input, so nothing is appended there.
+    if face_ref_conditioning:
+        prompt += (
+            f"Her face, facial structure, and hairline are exactly those of the person "
+            f"in image 3; render that same face. "
+        )
     # WS-S de-bloat (5a): concrete per-character anchors (skin/hair/eyes/build) bind
     # far better than the generic pose_identity_clause() on this distilled model, and
     # they carry the SAME content specifically — so when present they REPLACE that
@@ -451,6 +472,63 @@ def _is_pose_2511_template(template: dict) -> bool:
     return bool(node and node.get("class_type") == "UNETLoader")
 
 
+def pose_template_has_face_ref_conditioning(template: dict) -> bool:
+    """
+    WS-F: True when this pose template feeds the hero face donor (node 210) into the
+    prompt ENCODERS as a third conditioning image — i.e. node 114's inputs carry an
+    ``image3`` wire (``pose_2511_skinlora_faceref_API.json``). On such a graph the
+    diffusion itself can lock facial structure to the real hero, so the caller
+    (pipeline_worker) flips ``build_pose_prompt(face_ref_conditioning=True)`` to add the
+    matching "render that same face" sentence. Every other pose graph — the 3-step
+    skinlora/faceboost variants and the interactive v1/2511 graphs — has no image3
+    encoder input (node 210 there feeds ONLY the downstream ReActor stamp, node 200), so
+    this returns False and their prompt is unchanged. Detected off node 114 specifically
+    (the positive encoder) — the single node whose image3 presence gates the clause.
+    """
+    return "image3" in template.get("114", {}).get("inputs", {})
+
+
+# WS-N2: style-scaled LoRA strengths. Natural/candid_phone renders otherwise look
+# editorial/contrasty because the pose graph's LoRA stack (node 304 URP / 305 NSFW /
+# 306 skin) applies its baked strengths identically to every style. For those two styles
+# ONLY, the stack is dialed DOWN to the settings.NATURAL_LORA_* values; the -1.0 sentinel
+# on any one leaves that node's baked strength alone (skipped from the override dict).
+# polished/studio/None -> None (baked strengths untouched). Keyed by ComfyUI node id so
+# the result drops straight into prepare_pose_workflow(lora_scales=...) / the outfit
+# preparer's lora_scales kwarg — the SAME map drives the pose AND outfit 2511 graphs,
+# whose 304/305/306 LoRA nodes are the identical URP/NSFW/skin stack.
+#
+# Lives HERE (the pose endpoint that already owns build_pose_prompt / prepare_pose_workflow)
+# as the single source of truth: pipeline_worker, pose_worker, and outfit_worker all import
+# it from here rather than duplicating the decision or importing worker->worker.
+_NATURAL_LORA_STYLES = ("natural", "candid_phone")
+_NATURAL_LORA_NODE_SETTINGS = (
+    ("304", "NATURAL_LORA_URP"),
+    ("305", "NATURAL_LORA_NSFW"),
+    ("306", "NATURAL_LORA_SKIN"),
+)
+
+
+def _natural_lora_scales(photo_style) -> Optional[Dict[str, float]]:
+    """
+    Return the {node_id: strength_model} LoRA overrides for a de-synthetic natural/candid
+    render, or None for any other style. Accepts a PhotoStyleType or its string value
+    (normalized the same way ``apply_edit_photo_style`` normalizes it). Each LoRA node is
+    included only when its ``settings.NATURAL_LORA_*`` value is a real strength (>= 0); the
+    -1.0 sentinel means "leave that node's baked strength alone" and skips it. A non-natural
+    style, or an all-sentinel config, yields None (nothing overridden).
+    """
+    key = getattr(photo_style, "value", photo_style)
+    if key not in _NATURAL_LORA_STYLES:
+        return None
+    scales: Dict[str, float] = {}
+    for nid, attr in _NATURAL_LORA_NODE_SETTINGS:
+        v = getattr(settings, attr, -1.0)
+        if v is not None and float(v) >= 0:
+            scales[nid] = float(v)
+    return scales or None
+
+
 # NOTE (W7 / D3): The v1 pose graph (edit_pose_action.json) has NO negative
 # conditioning BY DESIGN — it runs the KSampler at cfg=1 and routes the negative
 # branch through ConditioningZeroOut, so any negative-prompt text is mathematically
@@ -476,6 +554,7 @@ def prepare_pose_workflow(
     face_ref_image: Optional[str] = None,
     output_megapixels: Optional[float] = None,
     face_restore_model: Optional[str] = None,
+    lora_scales: Optional[Dict[str, float]] = None,
 ) -> dict:
     """
     Prepare the pose workflow with injected parameters.
@@ -560,6 +639,15 @@ def prepare_pose_workflow(
             A truthy value (e.g. "GPEN-BFR-512.onnx") overrides it — REQUIRES that
             file to exist in facerestore_models/ on the RunPod volume first. No-op
             when the template has no node 200.
+        lora_scales: WS-N2. Optional {node_id: strength_model} overrides for the pose
+            graph's LoRA stack (node 304 URP / 305 NSFW / 306 skin on the skinlora tier).
+            For each node id present in BOTH this dict AND the workflow, writes
+            ``wf[nid]["inputs"]["strength_model"] = float(v)`` — used by the batch pipeline
+            to dial the whole stack DOWN for natural/candid styles (which otherwise render
+            editorial/contrasty because the baked strengths apply identically to every
+            style). None/empty (default, and every polished/studio/interactive caller)
+            touches nothing. A true no-op on graphs lacking those nodes (the v1 Rapid pose
+            graph has none of them), so it never raises there.
 
     Returns:
         Prepared workflow dict
@@ -594,6 +682,19 @@ def prepare_pose_workflow(
     if output_megapixels is not None and output_megapixels > 0 and "93" in wf:
         wf["93"]["inputs"]["megapixels"] = float(output_megapixels)
         logger.debug(f"Set node 93 megapixels: {float(output_megapixels)}")
+
+    # WS-N2: style-scaled LoRA strengths. For each {node_id: strength} pair present in
+    # BOTH the dict and this workflow, override that LoRA node's strength_model — the
+    # batch path dials the URP/NSFW/skin stack (304/305/306) DOWN for natural/candid so
+    # the render stops looking editorial. Guarded on node presence, so it is a true
+    # no-op on graphs without those nodes (e.g. the v1 Rapid pose graph); None/empty
+    # (the default and every polished/studio/interactive caller) skips the loop entirely.
+    if lora_scales:
+        for nid, v in lora_scales.items():
+            node = wf.get(nid)
+            if node and isinstance(node.get("inputs"), dict):
+                node["inputs"]["strength_model"] = float(v)
+                logger.debug(f"Set node {nid} strength_model: {float(v)}")
 
     # Node 114: Text prompt
     if prompt is not None and "114" in wf:
@@ -730,10 +831,12 @@ async def edit_pose(
                 detail=str(e),
             )
 
-        # Validate the pose reference asset is actually installed on disk.
-        # References ship per-request as base64; a missing PNG means the
-        # generator has not been run yet, so fail fast with a clear 422.
-        if not pose_assets.asset_path(request.pose).exists():
+        # Validate the pose reference asset is actually installed on disk (the POSE PACK ref
+        # latch). References ship per-request as base64; a missing PNG means the generator has
+        # not been run for this pose yet (e.g. a newly added "dark" pose), so fail fast with a
+        # clear 422 instead of a later worker crash. Single-sourced via has_pose_ref so the
+        # endpoint gate and the planner pool latch use the exact same predicate.
+        if not pose_assets.has_pose_ref(request.pose):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(

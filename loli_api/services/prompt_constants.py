@@ -68,7 +68,8 @@ IDENTITY_NEGATIVE = (
 EDIT_SKIN_NEGATIVE = (
     "airbrushed skin, waxy skin, waxy smooth skin, over-smoothed skin, overprocessed, "
     "blurry skin texture, blurred facial features, porcelain doll skin, oily skin, "
-    "glossy skin, glistening skin, shiny skin, wet-look skin, oiled body, greasy sheen"
+    "glossy skin, glistening skin, shiny skin, wet-look skin, oiled body, greasy sheen, "
+    "oversaturated colors, HDR, crushed blacks, harsh high contrast"
 )
 
 # Positive identity-preservation clause appended to edit prompts. {what} is the
@@ -295,7 +296,8 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
         "Shoot this as a real, unstaged photo: accurate natural exposure, "
         "true-to-life color, light that matches the scene's own light sources, "
         "and realistic skin with visible fine texture and pores, skin tone even "
-        "and consistent with the face; light everyday makeup, not a styled photoshoot."
+        "and consistent with the face; light everyday makeup, not a styled photoshoot, "
+        "soft balanced contrast, unboosted true-to-life colors, no HDR look."
     ),
     "polished": (
         "Give this a professional photographic retouch of light only: balanced "
