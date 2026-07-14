@@ -26,20 +26,27 @@ _NUDITY_LADDER = [
     NudityLevel.HIGH,
 ]
 
-# WS-S: more faithful, less airbrushed pose-step ReActor defaults for the "as-shot"
-# styles (natural / candid_phone) when the admin hasn't set an explicit value — so
-# the face reads real instead of plastic on top of the now-sharp, hero-sourced face
-# swap (node 210). CodeFormer semantics are the OPPOSITE of the intuitive reading: a
-# HIGH codeformer_weight stays FAITHFUL to the swapped input face (less hallucinated
-# repaint), while a LOW weight lets CodeFormer smooth/hallucinate more (the plastic
-# look); restore_visibility is how strongly the CodeFormer-restored face is blended
-# over the raw swap, so a LOWER visibility leaves more of the raw swap's real skin
-# texture. So the "as-shot" styles RAISE codeformer_weight (0.75, truer to the swap)
-# and LOWER restore_visibility (0.55, more raw-swap texture). Explicit controls always
+# WS-S: pose-step ReActor defaults for the "as-shot" styles (natural / candid_phone)
+# when the admin hasn't set an explicit per-batch value. CodeFormer semantics are the
+# OPPOSITE of the intuitive reading: a HIGH codeformer_weight stays FAITHFUL to the
+# swapped input face (less hallucinated repaint), while a LOW weight lets CodeFormer
+# smooth/hallucinate more (the plastic look); restore_visibility is how strongly the
+# restored face is blended over the raw swap, so a LOWER visibility leaves more of the
+# raw swap's real skin texture.
+# HISTORY — visibility softening retired (07-14): the original 0.55 was designed to
+# keep raw-swap texture (anti-plastic), but it was INERT on the production faceboost
+# pose graph — the boost stage owned the restore and ignored node-200 dials — until
+# the 07-14 dial-mirror fix (93ad7b0e, mirrors the dials onto the live boost node 215)
+# made it real. A same-day three-arm A/B (1.0 / 0.75 / 0.55, laugh + chin-down poses
+# included) was judged by the operator: 1.0 full restore wins on sharpness/detail.
+# Visibility therefore stays at FULL strength; the per-batch dial
+# (controls.reactor_restore_visibility) and the settings env remain the tuning path.
+# codeformer_weight keeps 0.75: it only matters on CodeFormer-restore paths — inert
+# under the GPEN boost — and still prevents smoothing there. Explicit controls always
 # win; every other style keeps the settings default.
 _SOFT_PHOTO_STYLES = ("natural", "candid_phone")
 _SOFT_STYLE_CODEFORMER_WEIGHT = 0.75
-_SOFT_STYLE_RESTORE_VISIBILITY = 0.55
+_SOFT_STYLE_RESTORE_VISIBILITY = 1.0
 
 
 def _val(v):
@@ -388,11 +395,10 @@ def scene_to_pipeline_request(
         seed = scene.seed if scene.seed is not None else resolve_seed(controls, scene.global_index)
 
     # WS-S codeformer dial: on the "as-shot" styles (natural / candid_phone) default
-    # the pose-step ReActor to a more faithful, less airbrushed restoration so the face
-    # reads real instead of plastic — RAISE codeformer_weight (0.75, truer to the swapped
-    # face) and LOWER restore_visibility (0.55, more of the raw swap's skin texture). See
-    # the semantics note by the constants above. ONLY when the admin left the knob unset
-    # (an explicit control always wins); every other style keeps None -> engine default.
+    # the pose-step ReActor to codeformer_weight 0.75 (truer to the swapped face) and
+    # restore_visibility 1.0 (full restore — the 07-14 A/B verdict; see the HISTORY
+    # note by the constants above). ONLY when the admin left the knob unset (an
+    # explicit control always wins); every other style keeps None -> engine default.
     soft_style = _val(controls.photo_style) in _SOFT_PHOTO_STYLES
     reactor_codeformer = controls.reactor_codeformer_weight
     if reactor_codeformer is None and soft_style:
@@ -480,8 +486,8 @@ def scene_to_pipeline_request(
         pipeline_order=controls.pipeline_order,
         photoStyle=controls.photo_style,
         # D2 + WS-S: admin-tunable pose-step ReActor knobs (node 200). An explicit
-        # control wins; otherwise natural/candid_phone get the more-faithful WS-S
-        # defaults (0.75 weight / 0.55 visibility) and every other style stays None ->
+        # control wins; otherwise natural/candid_phone get the WS-S defaults (0.75
+        # weight / 1.0 visibility, post-A/B) and every other style stays None ->
         # engine/settings default.
         reactorRestoreVisibility=reactor_visibility,
         reactorCodeformerWeight=reactor_codeformer,

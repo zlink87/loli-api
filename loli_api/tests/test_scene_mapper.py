@@ -761,15 +761,18 @@ def test_single_pass_scene_text_drops_time_and_lighting_duplication():
 
 
 def test_soft_style_reactor_dial_uses_faithful_values():
-    # WS-S dial after the semantics correction: natural/candid_phone RAISE codeformer_weight
-    # (0.75, truer to the swap) and LOWER restore_visibility (0.55, more raw-swap texture).
+    # WS-S dial after the 07-14 A/B verdict: natural/candid_phone RAISE codeformer_weight
+    # (0.75, truer to the swap) and keep restore_visibility at 1.0 — the 0.55 softening
+    # lost to full restore on sharpness once the dial-mirror fix made it live (see the
+    # HISTORY note by the scene_mapper constants). Still proves the soft-style default
+    # APPLIES when the admin left the knobs unset (explicit-wins is covered elsewhere).
     char = _character()
     for style in (PhotoStyleType.NATURAL, PhotoStyleType.CANDID_PHONE):
         req = scene_to_pipeline_request(
             char, _scene(pose=PoseType.SITTING), BatchControls(photo_style=style)
         )
         assert req.reactorCodeformerWeight == 0.75, style
-        assert req.reactorRestoreVisibility == 0.55, style
+        assert req.reactorRestoreVisibility == 1.0, style
 
 
 if __name__ == "__main__":
