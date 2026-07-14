@@ -623,6 +623,11 @@ def prepare_pose_workflow(
         8    VAEDecode        -> the PRE-ReActor frame (raw pose regen)
         200  ReActorFaceSwap  -> inputs.face_restore_visibility / codeformer_weight;
                                   source_image (face donor) rewired to node 210
+        215  ReActorFaceBoost -> inputs.boost_model / visibility / codeformer_weight
+                                  (faceboost graphs ONLY): enabled=True +
+                                  restore_with_main_after=False makes the boost OWN
+                                  the face restore (node 200's is skipped upstream),
+                                  so the WS4.2 dials are mirrored onto it
         164  SaveImage        -> the POST-ReActor final output (images=["200",0])
         300  SaveImage        -> WS4.1 debug-only node, injected when
                                   debug_save_pre_reactor=True (images=["8",0])
@@ -651,13 +656,18 @@ def prepare_pose_workflow(
             override). When >= 0, overrides node 200's
             ``face_restore_visibility`` (template default ~0.65) — how strongly
             the CodeFormer-restored face is blended over the raw swap, so a
-            LOWER value keeps more of the raw swap's real skin texture.
+            LOWER value keeps more of the raw swap's real skin texture. Also
+            mirrored onto node 215's ``visibility`` when a live boost stage owns
+            the restore (see the boost-mirror block) — otherwise inert on
+            faceboost graphs.
         reactor_codeformer_weight: WS4.2 tuning knob (default -1.0 = no
             override). When >= 0, overrides node 200's ``codeformer_weight``
             (template default ~0.7). CodeFormer weight is easy to get backwards:
             a HIGHER value stays faithful to the swapped input face (less
             hallucinated repaint), a LOWER value smooths/hallucinates more (the
-            plastic look).
+            plastic look). Also mirrored onto node 215's ``codeformer_weight``
+            when a live boost stage owns the restore (CodeFormer-only dial —
+            inert there while boost_model is a GPEN model).
         negative_prompt: D3, 2511-tier ONLY. Optional extra negative terms folded
             into ``pc.edit_negative(...)`` and written to node 115's prompt. On the
             v1 graph this is ignored entirely (no node 115; cfg 1 makes negatives
@@ -689,7 +699,8 @@ def prepare_pose_workflow(
             leaves the template's baked model (``codeformer-v0.1.0.pth``) untouched.
             A truthy value (e.g. "GPEN-BFR-512.onnx") overrides it — REQUIRES that
             file to exist in facerestore_models/ on the RunPod volume first. No-op
-            when the template has no node 200.
+            when the template has no node 200. Also mirrored onto node 215's
+            ``boost_model`` when a live boost stage owns the restore.
         lora_scales: WS-N2. Optional {node_id: strength_model} overrides for the pose
             graph's LoRA stack (node 304 URP / 305 NSFW / 306 skin on the skinlora tier).
             For each node id present in BOTH this dict AND the workflow, writes
@@ -911,6 +922,47 @@ def prepare_pose_workflow(
         if face_restore_model:
             wf["200"]["inputs"]["face_restore_model"] = face_restore_model
             logger.debug(f"Overrode node 200 face_restore_model: {face_restore_model}")
+
+    # Faceboost mirror (07-14): on graphs with a LIVE boost stage (node 215
+    # ReActorFaceBoost, enabled=True, restore_with_main_after=False — exactly the
+    # shipped pose_2511*_faceboost graphs), upstream ReActor SKIPS node 200's main
+    # restore entirely — nodes.py:
+    #     if self.restore or not self.face_boost_enabled:
+    #         result = reactor.restore_face(...)
+    # where self.restore = face_boost["restore_with_main_after"]. In that config the
+    # boost node restores the face CROP pre-paste using ITS OWN inputs, so every
+    # node-200 dial written above lands on inputs the runtime never reads — the
+    # root cause of "the ReActor dials do nothing" on the faceboost graph (07-14).
+    # Mirror the SAME three overrides onto node 215 whenever the boost owns the
+    # restore. Dial semantics on the boost: ``visibility`` = blend of the
+    # GPEN/CodeFormer-restored crop over the raw swap (same knob as node 200's
+    # face_restore_visibility, applied pre-paste); ``codeformer_weight`` only
+    # matters for CodeFormer models — inert while boost_model is GPEN — but
+    # mirrored anyway so a face_restore_model override to CodeFormer picks it up.
+    # The node-200 writes above are kept intact: dead-but-harmless while the boost
+    # owns the restore, and live again the moment ops flips restore_with_main_after.
+    n215 = wf.get("215")
+    boost_owns_restore = bool(
+        n215
+        and n215.get("class_type") == "ReActorFaceBoost"
+        and isinstance(n215.get("inputs"), dict)
+        and n215["inputs"].get("enabled", False)
+        and not n215["inputs"].get("restore_with_main_after", False)
+    )
+    if boost_owns_restore:
+        if face_restore_model:
+            wf["215"]["inputs"]["boost_model"] = face_restore_model
+            logger.debug(f"Overrode node 215 boost_model: {face_restore_model}")
+        if reactor_restore_visibility >= 0:
+            wf["215"]["inputs"]["visibility"] = reactor_restore_visibility
+            logger.debug(
+                f"Overrode node 215 visibility: {reactor_restore_visibility}"
+            )
+        if reactor_codeformer_weight >= 0:
+            wf["215"]["inputs"]["codeformer_weight"] = reactor_codeformer_weight
+            logger.debug(
+                f"Overrode node 215 codeformer_weight: {reactor_codeformer_weight}"
+            )
 
     return wf
 

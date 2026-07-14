@@ -11,6 +11,14 @@ tuning knobs) plumbing:
       codeformer_weight ONLY when >= 0 (0.0 is a valid override, distinct
       from the -1.0 "no override" sentinel); a template missing node "200"
       degrades to a no-op instead of crashing.
+  g2b faceboost mirror: on graphs where node 215 (ReActorFaceBoost) OWNS the
+      restore (enabled=True, restore_with_main_after=False — the shipped
+      faceboost graphs), upstream skips node 200's main restore
+      ("if self.restore or not self.face_boost_enabled"), so the same three
+      dials MUST also land on node 215 (boost_model/visibility/
+      codeformer_weight) or they are inert — the 07-14 "dials do nothing"
+      root cause. Boost disabled / main-after=True -> node 215 untouched;
+      graphs without node 215 behave exactly as before.
   g3  _select_primary_output (workers.pipeline_worker) picks the
       "pose_edit"-prefixed entry over "pose_preface" regardless of list
       order, falls back to outputs[0] when nothing matches the prefix, and
@@ -164,6 +172,99 @@ def test_debug_and_reactor_overrides_combine():
     assert wf["300"]["inputs"]["images"] == ["8", 0]
     assert wf["200"]["inputs"]["face_restore_visibility"] == 1.0
     assert wf["200"]["inputs"]["codeformer_weight"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# g2b — faceboost mirror (node 215). When the boost stage OWNS the restore
+# (enabled=True, restore_with_main_after=False), upstream ReActor skips node
+# 200's main restore ("if self.restore or not self.face_boost_enabled"), so
+# the WS4.2 dials must ALSO be written to node 215 — otherwise they are inert,
+# which is exactly what happened on the live faceboost graph (07-14).
+# ---------------------------------------------------------------------------
+# The LIVE production batch pose graph — ships node 215 enabled + main-after=False.
+_FACEBOOST_TEMPLATE = "pose_2511_skinlora_faceboost_API.json"
+
+
+def test_faceboost_mirror_writes_both_node_200_and_node_215():
+    template = _load(_FACEBOOST_TEMPLATE)
+    # Sanity: the real graph ships the boost owning the restore (the exact
+    # config under which node 200's restore is skipped upstream).
+    assert template["215"]["class_type"] == "ReActorFaceBoost"
+    assert template["215"]["inputs"]["enabled"] is True
+    assert template["215"]["inputs"]["restore_with_main_after"] is False
+
+    wf = prepare_pose_workflow(
+        template, "src.png", "ref.png",
+        reactor_restore_visibility=0.7, reactor_codeformer_weight=0.4,
+        face_restore_model="codeformer-v0.1.0.pth",
+    )
+    # Node 200 keeps the existing writes — dead-but-harmless while the boost
+    # owns the restore, live again if ops flips restore_with_main_after.
+    assert wf["200"]["inputs"]["face_restore_visibility"] == 0.7
+    assert wf["200"]["inputs"]["codeformer_weight"] == 0.4
+    assert wf["200"]["inputs"]["face_restore_model"] == "codeformer-v0.1.0.pth"
+    # Node 215 — the inputs the runtime actually reads in this config —
+    # mirrors all three dials onto the boost's own input names.
+    assert wf["215"]["inputs"]["visibility"] == 0.7
+    assert wf["215"]["inputs"]["codeformer_weight"] == 0.4
+    assert wf["215"]["inputs"]["boost_model"] == "codeformer-v0.1.0.pth"
+    # Non-dial boost inputs untouched.
+    assert wf["215"]["inputs"]["enabled"] is True
+    assert wf["215"]["inputs"]["restore_with_main_after"] is False
+    assert wf["215"]["inputs"]["interpolation"] == "Bicubic"
+
+
+def test_faceboost_mirror_skipped_when_main_restore_runs_after():
+    # restore_with_main_after=True -> self.restore is truthy upstream -> node
+    # 200's main restore DOES run -> its dials are live and the boost's
+    # restore inputs must stay exactly as baked.
+    template = _load(_FACEBOOST_TEMPLATE)
+    template["215"]["inputs"]["restore_with_main_after"] = True
+    wf = prepare_pose_workflow(
+        template, "src.png", "ref.png",
+        reactor_restore_visibility=0.7, reactor_codeformer_weight=0.4,
+        face_restore_model="codeformer-v0.1.0.pth",
+    )
+    assert wf["215"]["inputs"] == template["215"]["inputs"]  # untouched
+    assert wf["200"]["inputs"]["face_restore_visibility"] == 0.7  # node 200 as before
+
+
+def test_faceboost_mirror_skipped_when_boost_disabled():
+    # enabled=False -> "not self.face_boost_enabled" -> main restore runs and
+    # the boost stage is inert; writing it would be dead config churn.
+    template = _load(_FACEBOOST_TEMPLATE)
+    template["215"]["inputs"]["enabled"] = False
+    wf = prepare_pose_workflow(
+        template, "src.png", "ref.png",
+        reactor_restore_visibility=0.7, reactor_codeformer_weight=0.4,
+        face_restore_model="codeformer-v0.1.0.pth",
+    )
+    assert wf["215"]["inputs"] == template["215"]["inputs"]  # untouched
+    assert wf["200"]["inputs"]["face_restore_model"] == "codeformer-v0.1.0.pth"
+
+
+def test_faceboost_mirror_noop_on_graphs_without_node_215():
+    # Existing graphs (no boost stage): behavior byte-identical to before the
+    # mirror existed — no node 215 materialized, node 200 written as always.
+    template = _load("edit_pose_action.json")
+    assert "215" not in template
+    wf = prepare_pose_workflow(
+        template, "src.png", "ref.png",
+        reactor_restore_visibility=0.7, reactor_codeformer_weight=0.4,
+        face_restore_model="codeformer-v0.1.0.pth",
+    )
+    assert "215" not in wf
+    assert wf["200"]["inputs"]["face_restore_visibility"] == 0.7
+    assert wf["200"]["inputs"]["codeformer_weight"] == 0.4
+    assert wf["200"]["inputs"]["face_restore_model"] == "codeformer-v0.1.0.pth"
+
+
+def test_faceboost_mirror_defaults_leave_node_215_untouched():
+    # Sentinels (-1.0 / -1.0 / None) mean "no override" on the boost node too:
+    # the live faceboost template's baked 215 survives byte-identical.
+    template = _load(_FACEBOOST_TEMPLATE)
+    wf = prepare_pose_workflow(template, "src.png", "ref.png")
+    assert wf["215"] == template["215"]
 
 
 # ---------------------------------------------------------------------------
