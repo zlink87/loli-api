@@ -294,6 +294,7 @@ on the volume AND one of the env vars below is set.
 |---|---|---|
 | `qwen-edit-skin.safetensors` | `loras/` | Skin realism LoRA (node `306` on the new `*_skinlora` graphs) — fights the plastic/waxy skin look, stacked after the realism LoRA (node 304) + softened NSFW LoRA (node 305 @ 0.65) |
 | `GPEN-BFR-512.onnx` | `facerestore_models/` | Sharper, less-waxy face-restore model than the baked CodeFormer, for the pose ReActor pass (node 200, or node `215` `ReActorFaceBoost`) |
+| `workflows/pose_2511_skinlora_faceboost_API.json` | repo (already committed) | Combined pose graph — skin LoRA (node 306 @ 1.0) + GPEN `ReActorFaceBoost` (node 215) together; **recommended pose path** now that both files above are staged on the volume (confirmed 07-14) |
 
 **Activation levers** — flip **ONE at a time**, verify a batch, and keep rollback
 simple: revert the env var and restart (no worker-image change needed, same as
@@ -316,13 +317,20 @@ POSE_REACTOR_FACE_RESTORE_MODEL=GPEN-BFR-512.onnx
 # swap (node 215 feeds node 200's optional face_boost input). This is an ALTERNATE
 # pose graph, mutually exclusive with (A)'s pose graph — both set the same env var.
 COMFYUI_POSE_WORKFLOW_PATH_2511=workflows/pose_2511_faceboost_API.json
+
+# (D) RECOMMENDED once both volume files above are staged (confirmed 07-14): the
+# combined pose graph carries (A)'s skin LoRA (node 306 @ 1.0) AND (C)'s
+# ReActorFaceBoost (node 215 -> node 200 face_boost) at once. Also sets the same
+# env var as (A)/(C) — pick ONE pose graph.
+COMFYUI_POSE_WORKFLOW_PATH_2511=workflows/pose_2511_skinlora_faceboost_API.json
 ```
 
 Notes:
-- (A) and (C) both set `COMFYUI_POSE_WORKFLOW_PATH_2511` — pick ONE pose graph at a
-  time; there is no combined skinlora+faceboost graph yet. (B) is independent and
-  layers on top of whichever pose graph is loaded, since it only overrides node
-  200's `face_restore_model` field.
+- (A), (C), and (D) all set `COMFYUI_POSE_WORKFLOW_PATH_2511` — pick ONE pose graph
+  at a time. (D) is the combined skinlora+faceboost graph and is the recommended
+  pose path now that both volume files above are staged (07-14) — prefer it over
+  running (A) or (C) alone. (B) is independent and layers on top of whichever pose
+  graph is loaded, since it only overrides node 200's `face_restore_model` field.
 - **Assumption flagged for verification**: `ReActorFaceBoost`'s node/input names
   (`boost_model`, `interpolation`, `visibility`, `codeformer_weight`,
   `restore_with_main_after`, and the main `ReActorFaceSwap` node's optional

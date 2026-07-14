@@ -23,7 +23,7 @@ import models.requests as _mr
 _mr.validate_source_image = lambda u: u  # type: ignore
 
 from config import settings
-from models.enums import JobStatus, NudityLevel, OutfitType, LocationType
+from models.enums import JobStatus, NudityLevel, OutfitType, LocationType, PoseType
 from models.nude_base import NudeBaseRead
 from models.requests import PersonaOptions
 from models.batch import BatchControls
@@ -360,10 +360,13 @@ def _settings():
 
 
 def _scene_spec():
+    # A POSED item: the nude base is only used as the swap source when a pose step runs (the
+    # pose step stamps the hero face onto it). A pose-less item falls back to the hero photo —
+    # see scene_mapper's no-pose face guard and test_scene_mapper's coverage.
     return SceneSpec(
         arc_id="morning", arc_title="Slow morning", beat_index=0, global_index=0,
         beat_description="by the window", outfit=OutfitType.COCKTAIL_DRESS,
-        location=LocationType.HOME_BEDROOM,
+        pose=PoseType.SITTING, location=LocationType.HOME_BEDROOM,
     ).model_dump(mode="json")
 
 
@@ -424,7 +427,8 @@ def test_batch_uses_nude_base_when_present():
         async def get_active_url(self, cid):
             return "https://x/nude.png"
     req = _run_reconcile(_Store())
-    assert req.source_image == "https://x/nude.png"  # additive dressing engaged
+    # A posed item (the scene has a pose) sources from the nude base -> additive dressing engaged.
+    assert req.source_image == "https://x/nude.png"
 
 
 def test_batch_falls_back_to_hero_when_no_nude_base():

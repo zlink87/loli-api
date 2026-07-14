@@ -109,6 +109,48 @@ def _run(trait_store, body):
         bo.story_planner.plan_scenes = orig
 
 
+def _run_with_direction_spy(body) -> int:
+    """Launch a batch while spying on scene_direction.apply_scene_directions; return its call
+    count (the writer is the one network call the dry-run path must NOT make)."""
+    calls = {"n": 0}
+
+    async def _fake_plan_scenes(character, count, controls, *, settings, **kw):
+        scenes = DeterministicScenePlanner().plan_scenes_sync(character, count, controls)
+        return scenes, "deterministic"
+
+    async def _spy_apply(scenes, controls, *, settings):
+        calls["n"] += 1
+        return scenes
+
+    orig_plan = bo.story_planner.plan_scenes
+    orig_apply = bo.scene_direction.apply_scene_directions
+    bo.story_planner.plan_scenes = _fake_plan_scenes
+    bo.scene_direction.apply_scene_directions = _spy_apply
+    try:
+        orch = BatchOrchestrator(
+            job_manager=None, character_store=_FakeCharStore(), batch_store=_FakeBatchStore(),
+            settings=_SETTINGS, trait_profile_store=None,
+        )
+        asyncio.run(orch.launch_batch("char-1", body))
+    finally:
+        bo.story_planner.plan_scenes = orig_plan
+        bo.scene_direction.apply_scene_directions = orig_apply
+    return calls["n"]
+
+
+def test_dry_run_never_invokes_scene_direction_writer():
+    # A dry-run preview must stay network-free — the scene-direction writer is the batch's one
+    # live enrichment call, so it must NOT run for a preview.
+    body = BatchCreate(count=6, controls=BatchControls(max_nudity="medium", base_seed=1), dry_run=True)
+    assert _run_with_direction_spy(body) == 0
+
+
+def test_real_launch_invokes_scene_direction_writer_once():
+    # A real launch runs the (fallback-safe) enrichment pass exactly once.
+    body = BatchCreate(count=6, controls=BatchControls(max_nudity="medium", base_seed=1), dry_run=False)
+    assert _run_with_direction_spy(body) == 1
+
+
 def test_profile_is_merged_before_create_batch():
     body = BatchCreate(count=6, controls=BatchControls(max_nudity="medium", base_seed=1), dry_run=True)
     store = _run(_FakeTraitStore(), body)

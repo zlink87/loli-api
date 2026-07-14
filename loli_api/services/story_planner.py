@@ -25,6 +25,7 @@ import logging
 import math
 import random
 import re
+import zlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -112,6 +113,84 @@ _BATCH_EXPRESSIONS_CANDID: Tuple[str, ...] = (
 _BATCH_EXPRESSION_POOL: Tuple[str, ...] = (
     _BATCH_EXPRESSIONS_CAMERA_AWARE + _BATCH_EXPRESSIONS_CANDID
 )
+
+
+# ---------------------------------------------------------------------------
+# Expression <-> situation compatibility (WS1b real-world-sense guard)
+# ---------------------------------------------------------------------------
+# Reported failures: bright grins in an intimate scene; bedroom-eyes lowered lids "mid-jog".
+# An expression must suit the scene's pose ENERGY, its EXPOSURE and its VENUE. Every pool
+# string carries one REGISTER tag; the rules below filter the candidate pool by tag (both at
+# pick time in _assign_batch_expressions and in the _enforce_expression_compat repair pass).
+# Coverage-tested: every _BATCH_EXPRESSION_POOL string has a tag.
+_EXPR_CHEERFUL = "cheerful"   # bright, high-energy grins & laughs
+_EXPR_SOFT = "soft"           # gentle, warm smiles
+_EXPR_SULTRY = "sultry"       # lowered-lid / intimate
+_EXPR_CANDID = "candid"       # camera-unaware, mid-activity
+_EXPR_NEUTRAL = "neutral"     # composed, register-flexible
+
+_EXPRESSION_TAGS: Dict[str, str] = {
+    # camera-aware register
+    "soft smile at the camera": _EXPR_SOFT,
+    "playful grin": _EXPR_CHEERFUL,
+    "warm, easy smile": _EXPR_SOFT,
+    "confident look to the camera": _EXPR_NEUTRAL,
+    "bright, open smile": _EXPR_CHEERFUL,
+    "relaxed, faint smile": _EXPR_SOFT,
+    "amused half-smile": _EXPR_NEUTRAL,
+    "cheerful laugh": _EXPR_CHEERFUL,
+    # candid register
+    "soft smile looking away": _EXPR_SOFT,
+    "caught mid-laugh": _EXPR_CHEERFUL,
+    "calm, lids lowered": _EXPR_SULTRY,
+    "absorbed in her phone, unaware of the camera": _EXPR_CANDID,
+    "glancing over her shoulder": _EXPR_CANDID,
+    "focused on what she's doing": _EXPR_CANDID,
+    "quietly lost in thought": _EXPR_NEUTRAL,
+    "gazing off to the side": _EXPR_CANDID,
+}
+
+# ATHLETIC pose-class (jogging/squatting) reads wrong with a soft/sultry face -> only the
+# high-energy / candid / composed registers.
+_ATHLETIC_EXPRESSION_TAGS: frozenset = frozenset({_EXPR_CHEERFUL, _EXPR_CANDID, _EXPR_NEUTRAL})
+# HIGH nudity or a NAKED outfit reads wrong with a bright open grin -> only the soft/intimate/
+# composed registers.
+_EXPOSED_EXPRESSION_TAGS: frozenset = frozenset({_EXPR_SOFT, _EXPR_SULTRY, _EXPR_NEUTRAL})
+# The single most intimate state — bedroom-eyes — is out of place in a PUBLIC venue once the
+# scene is even mildly revealing (SUGGESTIVE+). Minimal and defensible (one string).
+_INTIMATE_EXPRESSIONS: frozenset = frozenset({"calm, lids lowered"})
+
+
+def _expression_allowed(expr, pose, nudity, location, outfit=None) -> bool:
+    """
+    Does `expr` suit this scene's pose energy, exposure and venue (WS1b)? An UNTAGGED
+    expression (an LLM's free-text — only the curated batch pool is classified) is never
+    gated (returns True). Rules:
+      * ATHLETIC pose-class -> cheerful/candid/neutral only (no soft/sultry lids mid-jog);
+      * HIGH nudity OR a NAKED outfit -> soft/sultry/neutral only (no bright open grins);
+      * PUBLIC venue at SUGGESTIVE+ nudity -> exclude the most intimate state(s);
+      * everything else unrestricted.
+    Pure function of the four scene facts, so both the pick-time filter and the repair pass
+    read it the same way.
+    """
+    tag = _EXPRESSION_TAGS.get(expr)
+    if tag is None:
+        return True
+    if sv.pose_class(pose) == sv.POSE_CLASS_ATHLETIC and tag not in _ATHLETIC_EXPRESSION_TAGS:
+        return False
+    exposed = (
+        _nudity_index(nudity) >= _nudity_index(NudityLevel.HIGH)
+        or _val(outfit) == OutfitType.NAKED.value
+    )
+    if exposed and tag not in _EXPOSED_EXPRESSION_TAGS:
+        return False
+    if (
+        sv.is_public_venue(location)
+        and _nudity_index(nudity) >= _nudity_index(NudityLevel.SUGGESTIVE)
+        and expr in _INTIMATE_EXPRESSIONS
+    ):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +548,13 @@ class DeterministicScenePlanner(StoryPlanner):
                 outfit = self._pick_outfit(tmpl, rng, like_kw, dislike_kw, controls)
                 location = self._pick_location(tmpl, rng, like_kw, dislike_kw, controls)
                 nudity = ramp[gidx] if gidx < len(ramp) else NudityLevel.LOW
+                # WS1a pick-time coherence: narrow the beat's time_pool to what reads as
+                # real at THIS scene's (already-picked) location BEFORE the RNG-free
+                # nearest-time snap, so e.g. a night venue never lands at midday. Falls back
+                # to the full pool if the intersection is empty (see _time_compat_pool).
+                time_pool = _time_compat_pool(location, tmpl.time_pool)
                 time_of_day = _nearest_time_in_pool(
-                    time_ramp[gidx] if gidx < len(time_ramp) else tmpl.time_pool[0], tmpl.time_pool
+                    time_ramp[gidx] if gidx < len(time_ramp) else time_pool[0], time_pool
                 )
                 narrative = None
                 if story_mode:
@@ -738,6 +822,121 @@ def _nearest_time_in_pool(target: TimeOfDayType, pool: Tuple[TimeOfDayType, ...]
     return min(pool, key=lambda t: (abs(_time_index(t) - ti), _time_index(t)))
 
 
+# ---------------------------------------------------------------------------
+# Time-of-day <-> location coherence (WS1a real-world-sense guard)
+# ---------------------------------------------------------------------------
+# The reported failure: a "vibrant nightclub" scene set "in the middle of the day".
+# The nudity/time ramps and the repair passes pick time and location INDEPENDENTLY (and
+# can relocate a scene after its time was set), so a night venue can land at midday and a
+# beach at night. LOCATION_TIME_COMPAT is the coherence table: the set of TimeOfDayType
+# each place reads as real at. Grouped by named time-sets below; EVERY LocationType value
+# is covered (coverage-tested). Enforced two ways, mirroring the nudity ceiling: at pick
+# time the deterministic planner snaps time into this set (filtered BEFORE the — RNG-free
+# — nearest-time pick, so determinism holds), and _enforce_time_location_compat repairs
+# any provider's output on the FINAL location. The rule NEVER relocates — it moves the
+# TIME to the nearest allowed value (chronological distance), because the location was
+# chosen for scene coherence and the pose/outfit/nudity all hang off it.
+_T = TimeOfDayType
+# daylight only (dawn -> midday)
+_TIME_DAYLIGHT = frozenset({_T.EARLY_MORNING, _T.MORNING, _T.DAYTIME})
+# outdoor daylight + the pretty end-of-day light, but no dusk/night (a beach/park at
+# "night" reads wrong; golden_hour/sunset are the late boundary).
+_TIME_OUTDOOR = _TIME_DAYLIGHT | {_T.GOLDEN_HOUR, _T.SUNSET}
+# indoor public/business that closes by night: everything EXCEPT night.
+_TIME_NO_NIGHT = _TIME_OUTDOOR | {_T.EVENING}
+# dining venues run midday into the night (dinner service), but not pre-dawn.
+_TIME_DINING = frozenset({_T.MORNING, _T.DAYTIME, _T.GOLDEN_HOUR, _T.SUNSET, _T.EVENING, _T.NIGHT})
+# nightlife only lights up in the evening/night.
+_TIME_NIGHTLIFE = frozenset({_T.EVENING, _T.NIGHT})
+# anytime — private/flexible interiors that read fine day or night.
+_TIME_ANY = frozenset(_T)
+
+LOCATION_TIME_COMPAT: Dict[str, frozenset] = {
+    # --- private / flexible interiors + rooftop/stage (day or night both read fine) ---
+    LocationType.HOME_BEDROOM.value: _TIME_ANY,
+    LocationType.HOME_LIVING_ROOM.value: _TIME_ANY,
+    LocationType.HOME_KITCHEN.value: _TIME_ANY,
+    LocationType.HOME_BATHROOM.value: _TIME_ANY,
+    LocationType.HOME_BALCONY.value: _TIME_ANY,
+    LocationType.HOME_OFFICE.value: _TIME_ANY,
+    LocationType.HOTEL_ROOM.value: _TIME_ANY,
+    LocationType.PHOTO_STUDIO.value: _TIME_ANY,      # closed set, artificial light
+    LocationType.LUXURY_LOUNGE.value: _TIME_ANY,     # exclusive VIP interior
+    LocationType.CAR_INTERIOR.value: _TIME_ANY,
+    LocationType.ROOFTOP.value: _TIME_ANY,           # rooftop terrace/bar works dawn->night
+    LocationType.STAGE.value: _TIME_ANY,             # daytime rehearsal or night show
+    # --- indoor public / business: no night (closes) ---
+    LocationType.OFFICE.value: _TIME_NO_NIGHT,
+    LocationType.HOSPITAL_WARD.value: _TIME_NO_NIGHT,
+    LocationType.CLASSROOM.value: _TIME_NO_NIGHT,
+    LocationType.LIBRARY.value: _TIME_NO_NIGHT,
+    LocationType.LAB.value: _TIME_NO_NIGHT,
+    LocationType.SALON.value: _TIME_NO_NIGHT,
+    LocationType.GYM.value: _TIME_NO_NIGHT,
+    LocationType.YOGA_STUDIO.value: _TIME_NO_NIGHT,
+    LocationType.CAFE.value: _TIME_NO_NIGHT,
+    # --- dining (open into the night) ---
+    LocationType.RESTAURANT.value: _TIME_DINING,
+    LocationType.RESTAURANT_KITCHEN.value: _TIME_DINING,
+    # --- outdoors: daylight + golden/sunset, no deep night ---
+    LocationType.BEACH.value: _TIME_OUTDOOR,
+    LocationType.PARK.value: _TIME_OUTDOOR,
+    LocationType.POOLSIDE.value: _TIME_OUTDOOR,
+    LocationType.FOREST_TRAIL.value: _TIME_OUTDOOR,
+    LocationType.GARDEN.value: _TIME_OUTDOOR,
+    LocationType.CITY_STREET.value: _TIME_OUTDOOR,
+    # --- nightlife: evening/night only ---
+    LocationType.NIGHTCLUB.value: _TIME_NIGHTLIFE,
+    LocationType.BAR.value: _TIME_NIGHTLIFE,
+}
+
+
+def _times_allowed_at(location) -> frozenset:
+    """Allowed TimeOfDayType set for a location (enum or value); unmapped/unknown ->
+    _TIME_ANY (permissive default, so a new location degrades to 'anytime' not a crash)."""
+    return LOCATION_TIME_COMPAT.get(_val(location), _TIME_ANY)
+
+
+def _time_ok_at(time, location) -> bool:
+    """True iff `time` reads as real at `location` (LOCATION_TIME_COMPAT)."""
+    try:
+        t = TimeOfDayType(_val(time))
+    except (ValueError, TypeError):
+        return True
+    return t in _times_allowed_at(location)
+
+
+def _nearest_allowed_time(target, location) -> TimeOfDayType:
+    """The location-allowed time closest to `target` by chronological distance (ties ->
+    earlier), used by both the pick-time snap and _enforce_time_location_compat. `target`
+    already allowed -> returned unchanged. Empty allow-set (never happens — every entry is
+    non-empty) -> `target` coerced. Coerces `target` and delegates to _nearest_time_in_pool
+    over the location's allowed set — the SAME nearest-in-pool logic the beat-time snap uses."""
+    try:
+        tgt = TimeOfDayType(_val(target))
+    except (ValueError, TypeError):
+        tgt = _TIME_LADDER[0]
+    return _nearest_time_in_pool(tgt, tuple(_times_allowed_at(location)))
+
+
+def _time_compat_pool(
+    location, pool: Tuple[TimeOfDayType, ...]
+) -> Tuple[TimeOfDayType, ...]:
+    """
+    A beat's time_pool narrowed to the times that also read as real at `location`
+    (LOCATION_TIME_COMPAT) — the pick-time coherence filter. Applied BEFORE the RNG-free
+    _nearest_time_in_pool snap in the deterministic planner, so a beat that authored a
+    location+time pair the compat table forbids (the one authored case is "late at the
+    office" @ night, which this trims to evening) never emits the incoherent value. Falls
+    back to the ORIGINAL pool if the intersection is empty (a beat whose whole time_pool is
+    disallowed at a location) — coherence is then finished by the repair pass; a partial
+    filter never strands the pick. No-op (returns the pool unchanged, same object order)
+    whenever every time already fits, so a coherent beat is byte-identical.
+    """
+    filtered = tuple(t for t in pool if _time_ok_at(t, location))
+    return filtered or tuple(pool)
+
+
 def _compress_photo_runs(values, *, start_photo: int = 0) -> List[str]:
     """
     Run-compress a per-photo list into human ranges numbered from start_photo+1,
@@ -881,6 +1080,19 @@ def _assign_batch_expressions(scenes: List[SceneSpec], controls: BatchControls) 
         rng = random.Random((controls.base_seed or 0) + 1900009 * (i + 1))
         candid = (i % 3) == 2
         pool = list(_BATCH_EXPRESSIONS_CANDID if candid else _BATCH_EXPRESSIONS_CAMERA_AWARE)
+        # WS1b compat (HARD constraint, applied BEFORE the demeanor bias and the seeded
+        # shuffle so determinism holds): drop expressions that don't suit THIS scene's pose
+        # energy, exposure and venue. Keep the filtered register only when >=2 survive (so
+        # the adjacency/variety machinery still has room); otherwise fall back to the full
+        # register and let _enforce_expression_compat — the authoritative net on the FINAL
+        # scene state — fix it. Uses the scene's CURRENT (pick-time) pose/nudity/location.
+        s = scenes[i]
+        compat = [
+            e for e in pool
+            if _expression_allowed(e, s.pose, s.nudityLevel, s.location, s.outfit)
+        ]
+        if len(compat) >= 2:
+            pool = compat
         # Demeanor bias: keep only demeanor-consistent entries when >=2 survive in this
         # register (fallback to the full register otherwise — never starves a register).
         if favor:
@@ -1700,6 +1912,35 @@ _UNIFORM_OUTFITS = {
 
 
 # ---------------------------------------------------------------------------
+# Provocative-pose propriety (WS1c): spread/all-fours poses need a private venue.
+# ---------------------------------------------------------------------------
+# The reported failure: a "Sitting Legs Wide Open" (spread) pose planned ON nightclub
+# furniture — an explicitly sexual floor/spread pose in an inherently-populated PUBLIC
+# venue. These three poses read as coherent ONLY somewhere private (is_public_venue is
+# False): the explicit spread poses (spread_legs, sitting_legs_wide_open) and the
+# all-fours floor pose. Chosen defensibly from PoseType: the suggestive-but-not-explicit
+# reclining/floor poses (lying_back/lying_stomach/kneeling) stay handled by the existing
+# _POSE_LOCATION_GUARD (which already keeps them to lounging/private spots); these three
+# are the ones whose own POSE_DESCRIPTIONS read as overtly sexual and so must never land
+# in a public place. Folded into _pose_ok_at (below), so the SAME swap-first pose-repair
+# machinery (_enforce_pose_compat / usage-cap + variety re-picks, full-vocab fallback)
+# that fixes pose<->location and pose<->outfit incoherence also relocates these off a
+# public venue by SWAPPING THE POSE — never the location. is_public_venue treats a
+# forest trail / private garden / lab as private (solitary by nature), so a secluded
+# outdoor spread pose is permitted.
+#
+# ONE PRECEDENCE CAVEAT (see _pose_ok_at): an explicit _POSE_LOCATION_GUARD allowlist entry
+# WINS over this private-only rule. all_fours's guard entry deliberately lists gym/yoga_studio
+# (a coherent post-workout stretch), so all_fours IS allowed at those two public venues;
+# spread_legs and sitting_legs_wide_open have NO guard entry and so stay private-only at every
+# other public crowd venue (club/bar/cafe/office/beach/…).
+PRIVATE_ONLY_POSES: frozenset = frozenset({
+    PoseType.SPREAD_LEGS, PoseType.SITTING_LEGS_WIDE_OPEN, PoseType.ALL_FOURS,
+})
+_PRIVATE_ONLY_POSE_VALUES: frozenset = frozenset(p.value for p in PRIVATE_ONLY_POSES)
+
+
+# ---------------------------------------------------------------------------
 # Pose <-> outfit coherence (athletic-attire guard) — WS-P
 # ---------------------------------------------------------------------------
 # The ATHLETIC poses (running/exercise) read as incoherent on formal/elegant attire — the
@@ -1943,8 +2184,24 @@ def _reconcile_outfit(scene: SceneSpec, controls: BatchControls) -> None:
 
 
 def _pose_ok_at(pose, location) -> bool:
+    # PRECEDENCE: an explicit _POSE_LOCATION_GUARD allowlist entry is the AUTHORITATIVE answer
+    # for where a pose may go, and it WINS over the WS1c private-only rule below. This is what
+    # lets all_fours read as a coherent post-workout stretch at the gym/yoga_studio (both in
+    # its guard entry) even though those are public venues — the private-only rule must not
+    # silently override an explicit, deliberate allowance.
     allowed = _POSE_LOCATION_GUARD.get(_val(pose))
-    return allowed is None or _val(location) in allowed
+    if allowed is not None:
+        return _val(location) in allowed
+    # WS1c provocative-pose propriety: a spread/all-fours pose (PRIVATE_ONLY_POSES) that has NO
+    # explicit guard entry is incoherent in an inherently-populated PUBLIC venue
+    # (is_public_venue) — rejected here so the pose-repair machinery swaps the POSE (never the
+    # location). spread_legs and sitting_legs_wide_open have no guard entry, so they stay
+    # private-only at EVERY public venue; a private venue (home/hotel/studio, or a solitary-by-
+    # nature forest trail/garden/lab) is allowed. Every consumer of _pose_ok_at — the variety/
+    # usage-cap re-picks, _cap_location_candidates, and _enforce_pose_compat — honors this.
+    if _val(pose) in _PRIVATE_ONLY_POSE_VALUES and sv.is_public_venue(location):
+        return False
+    return True
 
 
 def _outfit_ok_at(outfit, location) -> bool:
@@ -2778,10 +3035,19 @@ def _enforce_expression_adjacency(scenes: List[SceneSpec], controls: BatchContro
     assigned them adjacency-free on the ORIGINAL order); this restores the invariant on the
     FINAL order by swapping the expression field between positions. A field swap preserves the
     expression multiset, so the ~1/3 candid share and per-expression usage cap are kept.
-    Expression has no location coherence, so a donor only needs to avoid creating a new
-    adjacency at either site. Leaves the pair as-is if no donor fits.
+
+    WS1b: this runs right AFTER _enforce_expression_compat, so a donor swap must also keep BOTH
+    ends situation-COMPATIBLE (_expression_allowed) — otherwise breaking an adjacency could
+    re-introduce a bright grin on a HIGH scene the compat pass just fixed. Compat is the hard
+    rule and adjacency the soft one: a pair with no compat-preserving donor is left as-is
+    (adjacency was already best-effort). Leaves the pair unchanged if no valid donor fits.
     """
     n = len(scenes)
+
+    def ok(expr, idx) -> bool:
+        s = scenes[idx]
+        return _expression_allowed(expr, s.pose, s.nudityLevel, s.location, s.outfit)
+
     for i in range(1, n):
         a, b = scenes[i - 1].expression, scenes[i].expression
         if not a or not b or a != b:
@@ -2800,9 +3066,104 @@ def _enforce_expression_adjacency(scenes: List[SceneSpec], controls: BatchContro
                 continue
             if j + 1 < n and scenes[j + 1].expression and b == scenes[j + 1].expression:
                 continue
+            # WS1b: the swap must not violate expression<->situation compat at either new home.
+            if not ok(ej, i) or not ok(b, j):
+                continue
             scenes[i].expression, scenes[j].expression = ej, b
             break
     return scenes
+
+
+# ---------------------------------------------------------------------------
+# Expression <-> situation compat repair (WS1b) — the authoritative net.
+# ---------------------------------------------------------------------------
+def _enforce_expression_compat(scenes: List[SceneSpec], controls: BatchControls) -> List[SceneSpec]:
+    """
+    Every scene's expression must suit its FINAL pose energy / exposure / venue
+    (_expression_allowed). The deterministic planner assigns expressions up front, but the
+    ceiling/exposure SWAPS reorder scenes and the WS-P pose moves change pose-class
+    AFTERWARD — so a bright grin can end on a now-HIGH scene, or a sultry look on a
+    now-jogging one. This restores the invariant on the settled state (Venice/deterministic
+    alike).
+
+    Runs AFTER _enforce_pose_compat (poses final) and BEFORE _enforce_expression_adjacency
+    (which re-clears any adjacency a move here introduces). Swap-first, mirroring the other
+    guards, so the expression MULTISET — hence the ~1/3 candid share and the per-expression
+    usage cap — is preserved wherever possible:
+      1) SWAP the expression with a partner whose expression is allowed HERE and whose slot
+         can take OURS (multiset-preserving);
+      2) else RE-PICK from the full pool (allowed here, least-used first, seeded offset RNG).
+    An UNTAGGED expression is never gated; a scene with no expression is skipped. A NEUTRAL
+    expression ('confident look'/'amused half-smile'/'quietly lost in thought') is allowed
+    under every rule, so a compatible option always exists and the pass never strands a scene.
+    """
+    n = len(scenes)
+    if n == 0:
+        return scenes
+    cap = max(2, math.ceil(n / 8))
+
+    def ok(expr, idx) -> bool:
+        s = scenes[idx]
+        return _expression_allowed(expr, s.pose, s.nudityLevel, s.location, s.outfit)
+
+    counts: Dict[str, int] = {}
+    for s in scenes:
+        if s.expression:
+            counts[s.expression] = counts.get(s.expression, 0) + 1
+
+    for i in range(n):
+        e = scenes[i].expression
+        if not e or ok(e, i):
+            continue
+        # (1) multiset-preserving swap: a partner whose expression suits HERE and whose slot
+        #     can take OURS (the FIRST such, deterministic).
+        swapped = False
+        for j in range(n):
+            if j == i or not scenes[j].expression:
+                continue
+            ej = scenes[j].expression
+            if ej == e:
+                continue
+            if ok(ej, i) and ok(e, j):
+                scenes[i].expression, scenes[j].expression = ej, e
+                swapped = True
+                break
+        if swapped:
+            continue
+        # (2) re-pick from the whole pool (allowed here), least-used first, seeded.
+        cands = [x for x in _BATCH_EXPRESSION_POOL if x != e and ok(x, i)]
+        if not cands:
+            continue
+        rng = random.Random((controls.base_seed or 0) + 2700001 * (i + 1))
+        rng.shuffle(cands)
+        under = [x for x in cands if counts.get(x, 0) < cap]
+        new_e = min(under or cands, key=lambda x: counts.get(x, 0))
+        counts[e] = counts.get(e, 0) - 1
+        counts[new_e] = counts.get(new_e, 0) + 1
+        scenes[i].expression = new_e
+    return scenes
+
+
+# ---------------------------------------------------------------------------
+# Time-of-day <-> location compat repair (WS1a) — the authoritative net.
+# ---------------------------------------------------------------------------
+def _enforce_time_location_compat(scenes: List[SceneSpec], controls: BatchControls) -> None:
+    """
+    Every scene's time_of_day must read as real at its FINAL location (_time_ok_at /
+    LOCATION_TIME_COMPAT). The ramp and the repair passes pick time and location
+    independently and can relocate a scene AFTER its time was set (a night venue landing at
+    midday, a beach at night), so this is the authoritative net on the settled state.
+
+    It NEVER relocates — the location was chosen for scene coherence and the pose/outfit/
+    nudity all hang off it — it moves the TIME to the nearest allowed value by chronological
+    distance (ties -> earlier). That choice is fully DETERMINISTIC (no RNG needed, so no
+    seeded stream is consumed and reproducibility of every other field is byte-identical).
+    Runs BEFORE _reconcile_captions so the facts are settled before any caption rebuild.
+    No-op for a scene whose time already fits (byte-identical).
+    """
+    for s in scenes:
+        if not _time_ok_at(s.time_of_day, s.location):
+            s.time_of_day = _nearest_allowed_time(s.time_of_day, s.location)
 
 
 # ---------------------------------------------------------------------------
@@ -2934,6 +3295,41 @@ def _reconcile_captions(scenes: List[SceneSpec]) -> None:
             s.beat_description = _rewrite_caption(s)
 
 
+# ---------------------------------------------------------------------------
+# Scene staging (WS-STAGE Part A): anchor each scene to a concrete surface.
+# ---------------------------------------------------------------------------
+# Offset for the staging RNG — distinct from every other dedicated-RNG offset in this
+# module (expressions 1900009, moods 2300003, fill 700001, exposure 1500007) so the
+# staging draw never perturbs those existing seeded picks. Staging is a NEW field assigned
+# AFTER all existing draws with its OWN rng, so same-seed reproducibility of every prior
+# field is byte-identical; only this field is newly populated.
+_STAGING_SEED_OFFSET = 5100011
+
+
+def _assign_staging(scenes: List[SceneSpec], controls: BatchControls) -> None:
+    """
+    Assign a scenery-anchored staging fragment to every scene (mutates in place), derived
+    DETERMINISTICALLY from (base_seed, scene index, FINAL location, FINAL pose) so a re-run
+    with the same seed yields identical stagings. Runs LAST in validate_and_repair, after
+    every location/pose repair has settled, so the phrase always matches the scene's FINAL
+    location + pose class.
+
+    Coherence guard: the phrase is drawn ONLY from the scene's own pose-class pool at its
+    location (scene_vocab.staging_options buckets the pose FIRST), so a sitting scene never
+    gets a lying/standing anchor. A (location, class) combo with no pool leaves ``staging``
+    None — a clean skip. In particular a lying pose that lands in a location with no lying
+    staging is left unanchored (NOT relocated — location repair already ran). A scene with
+    no pose (pose step skipped) buckets to OTHER, which is unstaged everywhere -> None.
+    """
+    for i, s in enumerate(scenes):
+        options = sv.staging_options(s.location, s.pose)
+        if not options:
+            s.staging = None
+            continue
+        rng = random.Random((controls.base_seed or 0) + _STAGING_SEED_OFFSET * (i + 1))
+        s.staging = rng.choice(list(options))
+
+
 def validate_and_repair(
     scenes: List[SceneSpec],
     character: Character,
@@ -3036,11 +3432,17 @@ def validate_and_repair(
         # chronological ramp so the day flows forward and resets per day (the safety
         # net for LLM output that ignored the TIME PLAN, parallel to the nudity ramp).
         # When the beat pool is enforced, snap to the nearest ramp target THIS beat's
-        # own time_pool permits — coherence beats a perfect curve, so a daytime-only
-        # beat is never forced to night; with no pool (director path) set it outright.
+        # own time_pool permits — additionally narrowed (WS1a) to the times that read as
+        # real at the scene's current location, so coherence beats a perfect curve (a
+        # daytime-only beat is never forced to night, and a night venue never to midday);
+        # with no pool (director path) set it outright. The FINAL location can still change
+        # in the later ceiling/exposure passes, so _enforce_time_location_compat gets the
+        # last word below.
         if enforce_time_ramp and i < len(time_ramp):
             if i < len(slots):
-                s.time_of_day = _nearest_time_in_pool(time_ramp[i], slots[i].tmpl.time_pool)
+                s.time_of_day = _nearest_time_in_pool(
+                    time_ramp[i], _time_compat_pool(s.location, slots[i].tmpl.time_pool)
+                )
             else:
                 s.time_of_day = time_ramp[i]
 
@@ -3163,31 +3565,53 @@ def validate_and_repair(
         repaired = _enforce_location_nudity_ceiling(repaired, ramp, controls)
         repaired = _enforce_outfit_exposure_cap(repaired, ramp, controls)
 
-    # Conscious-model variety net + WS-P pose coherence (ride the variety gate, so the manual
-    # path is untouched). FINAL PASS ORDER (each pass sees the previous one's output):
+    # Conscious-model variety net + WS-P pose coherence + WS1 real-world-sense guards (ride
+    # the variety gate, so the manual path is untouched). FINAL PASS ORDER (each pass sees the
+    # previous one's output):
     #   1. _enforce_variety                 — pair-dedup + consecutive (pose,location)
     #   2. _enforce_usage_caps              — per-batch pose/location usage caps
     #   3. _enforce_location_nudity_ceiling — scenes swap so the ramp never over-exposes a place
     #   4. _enforce_outfit_exposure_cap     — outfits swap/re-pick to the label they can render
     #   5. _strip_ineligible_moods          — drop mood tags left on now-LOW/public scenes
-    #   6. _enforce_pose_compat  (WS-P)     — pose<->outfit + pose<->location, swap-first/re-pick;
-    #                                         runs AFTER 3+4 (locations+outfits FINAL) and BEFORE
-    #                                         7+8 so any adjacency a pose move makes is cleaned up
+    #   6. _enforce_pose_compat  (WS-P+1c)  — pose<->outfit + pose<->location (incl. provocative-
+    #                                         pose-needs-a-private-venue via _pose_ok_at), swap-
+    #                                         first/re-pick; runs AFTER 3+4 (locations+outfits
+    #                                         FINAL) so it sees the final facts
     #   7. _enforce_pose_adjacency          — no identical pose in consecutive items
-    #   8. _enforce_expression_adjacency    — no identical expression in consecutive items
-    #   9. _reconcile_captions              — rewrite captions the moves above falsified
-    # 6 touches ONLY pose/pose_detail (multiset-preserving swaps + cap-aware re-picks), so the
-    # nudity ramp, location ceilings, exposure caps, mood strip and — critically — the A2
-    # expression pool / demeanor bias and its adjacency invariant are all left intact (8 still
-    # runs last on an untouched expression multiset). 9 runs LAST, once location/outfit/pose are
-    # final, and only rewrites a beat_description that names a location the item no longer
-    # occupies (a coherent caption stays byte-identical).
+    #   8. _enforce_expression_compat (1b)  — expression suits FINAL pose energy/exposure/venue;
+    #                                         swap-first so the candid share + usage cap survive,
+    #                                         runs BEFORE 9 so 9 re-clears any adjacency it makes
+    #   9. _enforce_expression_adjacency    — no identical expression in consecutive items
+    #  10. _enforce_time_location_compat(1a)— snap each time onto the FINAL location's allowed set
+    #                                         (never relocates; deterministic), BEFORE captions
+    #  11. _reconcile_captions              — rewrite captions the moves above falsified
+    # 6 touches ONLY pose/pose_detail (multiset-preserving swaps + cap-aware re-picks); 8 touches
+    # ONLY expression (swap-first, so the candid share + usage cap hold and 9 still runs last on
+    # the settled multiset); 10 touches ONLY time_of_day (deterministic nearest-allowed, no RNG).
+    # So the nudity ramp, location ceilings, exposure caps and mood strip are all left intact. 11
+    # runs LAST, once location/outfit/pose/time are final, and only rewrites a beat_description
+    # that names a location the item no longer occupies (a coherent caption stays byte-identical).
     if enforce_variety:
         _strip_ineligible_moods(repaired)
         repaired = _enforce_pose_compat(repaired, slots, controls)
         repaired = _enforce_pose_adjacency(repaired, controls)
+        # WS1b: fix any expression the pose/ceiling/exposure moves left incompatible with the
+        # FINAL pose energy / exposure / venue, THEN restore expression adjacency on the result.
+        repaired = _enforce_expression_compat(repaired, controls)
         repaired = _enforce_expression_adjacency(repaired, controls)
+        # WS1a: snap any time_of_day the location moves left incoherent onto the nearest value
+        # the FINAL location allows (never relocates), before the caption rebuild.
+        _enforce_time_location_compat(repaired, controls)
         _reconcile_captions(repaired)
+
+    # SCENE STAGING (WS-STAGE, final enrichment): anchor every scene to a concrete
+    # surface/furniture in its FINAL location, matched to its FINAL pose class, so the
+    # full-frame pose re-diffusion never improvises an absurd seat (the "sitting
+    # cross-legged barefoot on the bar counter" bug). Runs UNCONDITIONALLY (both the
+    # auto planners and the manual path) since poses/locations are authoritative by this
+    # point in every path; derived deterministically from (seed, index, location, pose)
+    # with its own RNG so no prior seeded pick shifts.
+    _assign_staging(repaired, controls)
 
     # Re-index global order so downstream ordering is contiguous.
     for i, s in enumerate(repaired):
@@ -3360,6 +3784,30 @@ def _scrub_edit_field(field: str, value):
     return value
 
 
+# Scene FACT edit keys — changing any of these invalidates the fields the planner DERIVED
+# from the old facts (the Venice scene_direction, and the staging drawn from the old
+# (location, pose-class)), so they are recomputed. Free-text / mood-only edits do not.
+_EDIT_FACT_KEYS = ("location", "pose", "outfit", "nudity_level")
+
+
+def _restage_after_edit(spec: dict) -> Optional[str]:
+    """Deterministically re-derive the staging anchor from a spec's NEW (location, pose) after
+    a fact edit. NO RNG (a repeated identical edit is byte-stable): the phrase is picked by a
+    crc32 of the item's own seed/index + the new location/pose. Mirrors _assign_staging's
+    coherence guard — the phrase is drawn ONLY from the scene's own (location, pose-class) pool
+    (scene_vocab.staging_options buckets the pose FIRST), so a sitting scene never gets a lying
+    anchor — but keyed off the item itself since a PATCH re-derives ONE item in isolation.
+    None when the pose step is skipped (pose None) or the (location, class) combo has no pool."""
+    pose = spec.get("pose")
+    if pose is None:
+        return None
+    options = sv.staging_options(spec.get("location"), pose)
+    if not options:
+        return None
+    key = f"{spec.get('seed') or spec.get('global_index') or 0}:{spec.get('location')}:{pose}"
+    return options[zlib.crc32(key.encode()) % len(options)]
+
+
 def apply_item_scene_edit(
     scene_spec: dict, edit: dict, controls: BatchControls
 ) -> SceneSpec:
@@ -3397,6 +3845,17 @@ def apply_item_scene_edit(
     for key in ("setting", "activity", "pose_detail", "outfit_detail", "expression"):
         if key in edit:
             spec[key] = _scrub_edit_field(key, edit[key])
+
+    # A scene FACT edit (location/pose/outfit/nudity_level) invalidates the fields the planner
+    # derived from the OLD facts: a Venice scene_direction authored against the old place/pose
+    # may now describe absent furniture or a foreign crowd, and the staging anchor was drawn
+    # from the old (location, pose-class). Clear the direction (the mapper then falls back to
+    # the bare staging phrase) and re-derive staging deterministically from the NEW facts. A
+    # free-text-only or mood-only edit leaves all three untouched.
+    if any(k in edit for k in _EDIT_FACT_KEYS):
+        spec["scene_direction"] = None
+        spec["direction_source"] = None
+        spec["staging"] = _restage_after_edit(spec)
 
     return SceneSpec(**spec)
 

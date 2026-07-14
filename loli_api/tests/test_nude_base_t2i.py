@@ -14,12 +14,17 @@ Covers the NEW default path (settings.NUDE_BASE_T2I=True):
     GENERATED base, with the gentle restore params mirrored from pose node 200,
     a settings-driven restore model (NUDE_BASE_FACE_RESTORE_MODEL), and an
     optional ReActorFaceBoost pass (NUDE_BASE_FACE_BOOST).
+  * NudeBaseWorker._process_job — settings.NUDE_BASE_FACE_SWAP gates the ReActor
+    step entirely: OFF (default) submits ONLY the t2i workflow and persists its
+    output verbatim; True submits the t2i workflow THEN the faceswap workflow
+    (GPEN/FaceBoost params intact) and persists the swapped output.
   * POST /nude-base builds a `nude_base` job carrying the persona + hero URL +
     deterministic seed (flag True), and the LEGACY pipeline_edit job (flag False).
 
 Runs under pytest or directly: python loli_api/tests/test_nude_base_t2i.py
 """
 import asyncio
+import base64
 import json
 import zlib
 from pathlib import Path
@@ -34,8 +39,11 @@ from config import settings
 from models.enums import JobStatus, NudityLevel, OutfitType, PhotoStyleType
 from models.requests import PersonaOptions, NudeBaseGenerateRequest
 from services import prompt_constants as pc
+from services.job_manager import JobManager
 from services.prompt_generator import locked_tokens
+import workers.nude_base_worker as nbw
 from workers.nude_base_worker import (
+    NudeBaseWorker,
     stable_nude_base_seed,
     build_nude_base_prompt,
     build_t2i_workflow,
@@ -226,9 +234,15 @@ def test_t2i_workflow_natural_style_untouched_resolution_hires():
 # Face-swap workflow wiring
 # ---------------------------------------------------------------------------
 def test_faceswap_sources_hero_onto_generated_base():
-    # Pin the two settings this test asserts against explicitly, rather than relying
+    # Pin the settings this test asserts against explicitly, rather than relying
     # on ambient defaults, so it can't flake if another test's override leaks.
+    # build_faceswap_workflow() itself is unconditional (NUDE_BASE_FACE_SWAP only
+    # gates whether NudeBaseWorker._process_job calls it — see the run-flow tests
+    # below); pinning it True here just documents that this test describes the
+    # graph the "swap enabled" path submits.
+    prev_swap = settings.NUDE_BASE_FACE_SWAP
     prev_model = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    settings.NUDE_BASE_FACE_SWAP = True
     settings.NUDE_BASE_FACE_RESTORE_MODEL = "GPEN-BFR-512.onnx"
     try:
         wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
@@ -271,6 +285,7 @@ def test_faceswap_sources_hero_onto_generated_base():
         assert len(save_items) == 1
         assert save_items[0]["inputs"]["images"][0] == reactor_id
     finally:
+        settings.NUDE_BASE_FACE_SWAP = prev_swap
         settings.NUDE_BASE_FACE_RESTORE_MODEL = prev_model
 
 
@@ -279,19 +294,24 @@ def test_faceswap_sources_hero_onto_generated_base():
 # BOTH the main ReActorFaceSwap node and (when enabled) the ReActorFaceBoost node.
 # ---------------------------------------------------------------------------
 def test_faceswap_restore_model_empty_setting_keeps_baked_codeformer_fallback():
+    prev_swap = settings.NUDE_BASE_FACE_SWAP
     prev = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    settings.NUDE_BASE_FACE_SWAP = True  # documents the "swap enabled" scenario
     settings.NUDE_BASE_FACE_RESTORE_MODEL = ""
     try:
         wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
         assert wf["12"]["inputs"]["face_restore_model"] == REACTOR_FACE_RESTORE_MODEL
         assert REACTOR_FACE_RESTORE_MODEL == "codeformer-v0.1.0.pth"
     finally:
+        settings.NUDE_BASE_FACE_SWAP = prev_swap
         settings.NUDE_BASE_FACE_RESTORE_MODEL = prev
 
 
 def test_faceswap_restore_model_gpen_applied_to_main_and_boost_nodes():
+    prev_swap = settings.NUDE_BASE_FACE_SWAP
     prev_model = settings.NUDE_BASE_FACE_RESTORE_MODEL
     prev_boost = settings.NUDE_BASE_FACE_BOOST
+    settings.NUDE_BASE_FACE_SWAP = True  # documents the "swap enabled" scenario
     settings.NUDE_BASE_FACE_RESTORE_MODEL = "GPEN-BFR-512.onnx"
     settings.NUDE_BASE_FACE_BOOST = True
     try:
@@ -301,6 +321,7 @@ def test_faceswap_restore_model_gpen_applied_to_main_and_boost_nodes():
         assert len(boost_items) == 1
         assert boost_items[0]["inputs"]["boost_model"] == "GPEN-BFR-512.onnx"
     finally:
+        settings.NUDE_BASE_FACE_SWAP = prev_swap
         settings.NUDE_BASE_FACE_RESTORE_MODEL = prev_model
         settings.NUDE_BASE_FACE_BOOST = prev_boost
 
@@ -310,8 +331,10 @@ def test_faceswap_restore_model_gpen_applied_to_main_and_boost_nodes():
 # swapped face BEFORE it is pasted back onto the base.
 # ---------------------------------------------------------------------------
 def test_faceswap_boost_on_by_default_node_present_with_exact_params_and_wired():
+    prev_swap = settings.NUDE_BASE_FACE_SWAP
     prev_boost = settings.NUDE_BASE_FACE_BOOST
     prev_model = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    settings.NUDE_BASE_FACE_SWAP = True  # documents the "swap enabled" scenario
     settings.NUDE_BASE_FACE_BOOST = True
     settings.NUDE_BASE_FACE_RESTORE_MODEL = "GPEN-BFR-512.onnx"
     try:
@@ -337,12 +360,15 @@ def test_faceswap_boost_on_by_default_node_present_with_exact_params_and_wired()
         assert wf["12"]["class_type"] == "ReActorFaceSwap"
         assert wf["12"]["inputs"]["face_boost"] == [boost_id, 0]
     finally:
+        settings.NUDE_BASE_FACE_SWAP = prev_swap
         settings.NUDE_BASE_FACE_BOOST = prev_boost
         settings.NUDE_BASE_FACE_RESTORE_MODEL = prev_model
 
 
 def test_faceswap_boost_disabled_omits_node_graph_otherwise_unchanged():
+    prev_swap = settings.NUDE_BASE_FACE_SWAP
     prev_boost = settings.NUDE_BASE_FACE_BOOST
+    settings.NUDE_BASE_FACE_SWAP = True  # documents the "swap enabled" scenario
     settings.NUDE_BASE_FACE_BOOST = False
     try:
         wf = build_faceswap_workflow("BASE_generated.png", "HERO_original.png")
@@ -355,7 +381,187 @@ def test_faceswap_boost_disabled_omits_node_graph_otherwise_unchanged():
         # pre-boost shape: exactly the original 4 node ids, nothing extra.
         assert set(wf.keys()) == {"10", "11", "12", "13"}
     finally:
+        settings.NUDE_BASE_FACE_SWAP = prev_swap
         settings.NUDE_BASE_FACE_BOOST = prev_boost
+
+
+# ---------------------------------------------------------------------------
+# Worker run-flow — settings.NUDE_BASE_FACE_SWAP gates whether
+# NudeBaseWorker._process_job submits the second (ReActor) workflow at all.
+# OFF (default): exactly one workflow (the t2i base) is submitted, and its own
+# output is what gets persisted — no hero download, no second submit_and_poll.
+# ON: the legacy two-workflow chain runs, and the FACE-SWAPPED output (not the
+# raw t2i base) is what gets persisted. Drives the real JobManager (mirrors
+# test_video_endpoint_routing.py's convention) through the same
+# create_job -> get_next_nude_base_job -> get_job sequence _worker_loop uses,
+# then calls _process_job directly so status/queue bookkeeping (mark_nude_base_done
+# via task_done()) is exercised exactly like production.
+# ---------------------------------------------------------------------------
+class _FakeRunPodClient:
+    """
+    Records every submitted workflow (+ its staged images) and completes each
+    immediately with a distinct, ORDERED fake payload, so a test can tell which
+    submission's output ended up persisted. Mirrors RunPodServerlessClient's
+    async submit()/status() contract closely enough for runpod_runner.run_workflow
+    to drive to completion on the first poll (no real HTTP, no real sleep).
+    """
+
+    def __init__(self, outputs):
+        self.submitted = []  # [{"workflow": dict, "images": list|None}, ...], submit order
+        self._outputs = list(outputs)
+
+    async def submit(self, workflow, images=None, webhook_url=None,
+                      execution_timeout_ms=None, ttl_ms=None):
+        self.submitted.append({"workflow": workflow, "images": images})
+        return f"rp_{len(self.submitted)}"
+
+    async def status(self, runpod_id: str) -> dict:
+        idx = int(runpod_id.rsplit("_", 1)[1]) - 1
+        b64 = base64.b64encode(self._outputs[idx]).decode("ascii")
+        return {
+            "status": "COMPLETED",
+            "output": {"images": [{"filename": "out.png", "type": "base64", "data": b64}]},
+        }
+
+
+class _FakeStorage:
+    """
+    Mirrors StorageService.save_image / generate_signed_url (the non-Supabase
+    persist branch _process_job takes when supabase_storage_service=None) just
+    enough to record which bytes were persisted, without touching the filesystem
+    or requiring real PNG bytes (StorageService.save_image round-trips through PIL).
+    """
+
+    def __init__(self):
+        self.saved = []  # [(image_bytes, job_id), ...]
+
+    def save_image(self, image_data, job_id, format="PNG"):
+        self.saved.append((image_data, job_id))
+        return f"nude_bases/{job_id}.png", f"hash-{job_id}"
+
+    def generate_signed_url(self, relative_path, expiry_minutes=None):
+        return f"https://example.local/{relative_path}", None
+
+
+def _nude_base_request(character_id="c1"):
+    return NudeBaseGenerateRequest(
+        persona=_persona(),
+        hero_image_url="https://x.supabase.co/hero.png",
+        character_id=character_id,
+        seed=stable_nude_base_seed(character_id),
+    )
+
+
+async def _run_nude_base_job(runpod_client, storage):
+    """
+    Build a real JobManager + NudeBaseWorker, enqueue one nude_base job exactly
+    as the endpoint does (create_job), pop it exactly as _worker_loop does
+    (get_next_nude_base_job -> get_job), then run _process_job directly. Returns
+    the job's final state.
+    """
+    job_manager = JobManager()
+    worker = NudeBaseWorker(
+        job_manager=job_manager,
+        comfyui_client=None,
+        storage_service=storage,
+        workflow_path=str(_T2I_TEMPLATE_PATH),
+        supabase_storage_service=None,
+        runpod_client=runpod_client,
+    )
+    worker._t2i_template = json.loads(_T2I_TEMPLATE_PATH.read_text())
+
+    created = await job_manager.create_job(_nude_base_request(), user_id="admin-1", job_type="nude_base")
+    job_id = await job_manager.get_next_nude_base_job()
+    assert job_id == created.job_id
+    job = await job_manager.get_job(job_id)
+
+    await worker._process_job(job)
+
+    return await job_manager.get_job(job_id)
+
+
+def test_process_job_face_swap_off_by_default_submits_only_t2i_workflow():
+    prev = settings.NUDE_BASE_FACE_SWAP
+    settings.NUDE_BASE_FACE_SWAP = False
+    try:
+        t2i_bytes = b"T2I_BASE_BYTES"
+        runpod = _FakeRunPodClient(outputs=[t2i_bytes])
+        storage = _FakeStorage()
+
+        job = asyncio.run(_run_nude_base_job(runpod, storage))
+
+        # Exactly ONE workflow submitted (the t2i base) — no faceswap round-trip.
+        assert len(runpod.submitted) == 1
+        wf = runpod.submitted[0]["workflow"]
+        assert runpod.submitted[0]["images"] is None      # pure t2i: no input images staged
+        assert not any(n.get("class_type") == "ReActorFaceSwap" for n in wf.values())
+        assert "110" in wf and "125" in wf                # t2i graph node ids present
+
+        # The t2i output IS the persisted final image — no second, swapped bytes.
+        assert len(storage.saved) == 1
+        saved_bytes, saved_job_id = storage.saved[0]
+        assert saved_bytes == t2i_bytes
+        assert saved_job_id == job.job_id
+
+        assert job.status == JobStatus.SUCCEEDED
+        assert job.preview_url == f"https://example.local/nude_bases/{job.job_id}.png"
+        assert job.image_hash == f"hash-{job.job_id}"
+    finally:
+        settings.NUDE_BASE_FACE_SWAP = prev
+
+
+def test_process_job_face_swap_on_submits_t2i_then_faceswap_workflow():
+    prev_swap = settings.NUDE_BASE_FACE_SWAP
+    prev_model = settings.NUDE_BASE_FACE_RESTORE_MODEL
+    prev_boost = settings.NUDE_BASE_FACE_BOOST
+    settings.NUDE_BASE_FACE_SWAP = True
+    settings.NUDE_BASE_FACE_RESTORE_MODEL = "GPEN-BFR-512.onnx"
+    settings.NUDE_BASE_FACE_BOOST = True
+    # _process_job downloads the hero photo unconditionally in this branch; stub
+    # the module-level helper so the test makes no real network call (mirrors how
+    # the other tests in this file pin settings.* directly rather than using a
+    # pytest fixture — this file's tests run standalone via __main__ too).
+    prev_download = nbw._download_image
+    nbw._download_image = lambda url, timeout=30: b"HERO_BYTES"
+    try:
+        t2i_bytes = b"T2I_BASE_BYTES"
+        swapped_bytes = b"FACESWAPPED_BYTES"
+        runpod = _FakeRunPodClient(outputs=[t2i_bytes, swapped_bytes])
+        storage = _FakeStorage()
+
+        job = asyncio.run(_run_nude_base_job(runpod, storage))
+
+        # TWO workflows submitted, in order: the t2i base, then the ReActor face-swap.
+        assert len(runpod.submitted) == 2
+        t2i_wf = runpod.submitted[0]["workflow"]
+        assert runpod.submitted[0]["images"] is None
+        assert not any(n.get("class_type") == "ReActorFaceSwap" for n in t2i_wf.values())
+
+        swap_wf = runpod.submitted[1]["workflow"]
+        reactor_nodes = [n for n in swap_wf.values() if n.get("class_type") == "ReActorFaceSwap"]
+        assert len(reactor_nodes) == 1
+        reactor = reactor_nodes[0]["inputs"]
+        # Exact GPEN/FaceBoost params — same contract test_faceswap_* assert above.
+        assert reactor["face_restore_model"] == "GPEN-BFR-512.onnx"
+        assert reactor["codeformer_weight"] == REACTOR_CODEFORMER_WEIGHT == 0.7
+        assert reactor["face_restore_visibility"] == REACTOR_FACE_RESTORE_VISIBILITY == 0.65
+        assert any(n.get("class_type") == "ReActorFaceBoost" for n in swap_wf.values())
+        # Two staged input images (base + hero) shipped alongside the swap submit.
+        staged_names = {img["name"] for img in runpod.submitted[1]["images"]}
+        assert len(staged_names) == 2
+
+        # The FACE-SWAPPED bytes (not the raw t2i base) are what gets persisted.
+        assert len(storage.saved) == 1
+        saved_bytes, saved_job_id = storage.saved[0]
+        assert saved_bytes == swapped_bytes
+        assert saved_job_id == job.job_id
+
+        assert job.status == JobStatus.SUCCEEDED
+    finally:
+        settings.NUDE_BASE_FACE_SWAP = prev_swap
+        settings.NUDE_BASE_FACE_RESTORE_MODEL = prev_model
+        settings.NUDE_BASE_FACE_BOOST = prev_boost
+        nbw._download_image = prev_download
 
 
 # ---------------------------------------------------------------------------

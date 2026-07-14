@@ -388,6 +388,35 @@ def test_floral_maxi_low_suggestive_are_one_piece_without_separates_phrasing():
     print("WS-M OK: floral maxi LOW/SUGGESTIVE one-piece, no separates phrasing, explicitness kept")
 
 
+def test_one_piece_clause_bans_swimwear_and_bodysuit_misreading():
+    """07-14 live bug: bodycon_dress (a dress-class, ONE_PIECE_GARMENT_OUTFITS enum)
+    rendered as a navy SWIMSUIT/leotard instead of a dress, because plain "one-piece
+    garment" leans on the edit model's swimwear/bodysuit training association. The
+    reworded clause must keep the original anti-separates intent ("not a top and
+    skirt") while explicitly ruling out the bodysuit/leotard/swimsuit misreading, and
+    the gating (which outfits carry the clause) must be unchanged."""
+    from api.v1.endpoints.outfit import ONE_PIECE_GARMENT_CLAUSE, ONE_PIECE_GARMENT_OUTFITS
+
+    clause = ONE_PIECE_GARMENT_CLAUSE.lower()
+    assert "top and skirt" in clause, "lost the original anti-separates wording"
+    for banned in ("bodysuit", "leotard", "swimsuit"):
+        assert banned in clause, f"clause doesn't rule out the '{banned}' misreading"
+
+    # BODYCON_DRESS is the outfit that actually broke in production — confirm it is
+    # still gated (gating itself must not have widened/narrowed) and that the fixed
+    # clause reaches its rendered prompt.
+    assert OutfitType.BODYCON_DRESS in ONE_PIECE_GARMENT_OUTFITS
+    p = outfit_ep.build_prompt(OutfitType.BODYCON_DRESS, None, NudityLevel.LOW).lower()
+    assert ONE_PIECE_GARMENT_CLAUSE.lower() in p
+    for banned in ("bodysuit", "leotard", "swimsuit"):
+        assert banned in p
+
+    # Cultural one-piece outfits (kimono/sari/cheongsam/hanbok) are NOT dress-shaped,
+    # so the clause must stay garment-neutral rather than assert a literal "dress".
+    assert "dress" not in clause
+    print("WS-M OK: one-piece clause bans bodysuit/leotard/swimsuit misreading, keeps anti-separates intent + gating")
+
+
 # ---------------------------------------------------------------------------
 # c16 — every selected generation option verifiably lands in the final prompt,
 # and the scene clause sits before persona flavor (not buried at the tail)
@@ -1476,6 +1505,7 @@ def _run_all():
         test_one_piece_clause_present_for_dress_class_and_absent_for_separates,
         test_one_piece_clause_survives_dress_mode_and_detail_dominant,
         test_floral_maxi_low_suggestive_are_one_piece_without_separates_phrasing,
+        test_one_piece_clause_bans_swimwear_and_bodysuit_misreading,
     ]
     failures = 0
     for fn in tests:

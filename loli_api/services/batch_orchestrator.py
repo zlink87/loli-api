@@ -22,6 +22,7 @@ from models.batch import BatchCreate, BatchRead, BatchEstimate, BatchControls
 from models.scene import SceneSpec
 from models.trait_profile import TraitProfile
 from services import story_planner
+from services import scene_direction
 from services.story_planner import Character
 from services.scene_mapper import scene_to_pipeline_request, resolve_seed
 from services.trait_profile_merge import apply_trait_profile
@@ -180,6 +181,15 @@ class BatchOrchestrator:
         # Persist the resolved provider on the batch row so silent Venice->deterministic
         # fallbacks (the Venice client never raises) are visible after the fact.
         await self.batch_store.set_planner_provider(batch.id, provider)
+        # WS-SD: Venice writes each item's photographic staging (HOW it looks) on the FINAL,
+        # already-coherent facts. Best-effort + validated + fallback-safe (never raises;
+        # provider "deterministic"/no key -> a no-op that leaves the fields None). SKIPPED
+        # on a dry_run: a preview must stay network-free (this is the batch's one live
+        # planning-time enrichment call), so the writer is only invoked for a real launch.
+        if not body.dry_run:
+            scenes = await scene_direction.apply_scene_directions(
+                scenes, controls, settings=self.settings
+            )
 
         rows = []
         for s in scenes:

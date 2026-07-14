@@ -1,0 +1,312 @@
+{
+  "109": {
+    "inputs": {
+      "image": "gen-source.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Image1 (source character)"
+    }
+  },
+  "170": {
+    "inputs": {
+      "image": "pose_ref.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Image2 (pose reference)"
+    }
+  },
+  "210": {
+    "inputs": {
+      "image": "hero_face.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Face reference (hero) - ReActor source"
+    }
+  },
+  "301": {
+    "inputs": {
+      "unet_name": "qwen_image_edit_2511_fp8mixed.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Qwen-Image-Edit-2511 (full, fp8)"
+    }
+  },
+  "302": {
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP (Qwen2.5-VL)"
+    }
+  },
+  "303": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE (Qwen-Image)"
+    }
+  },
+  "304": {
+    "inputs": {
+      "model": [
+        "301",
+        0
+      ],
+      "lora_name": "URP_20.safetensors",
+      "strength_model": 0.8
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Realism LoRA (ultra-realistic skin)"
+    }
+  },
+  "305": {
+    "inputs": {
+      "model": [
+        "304",
+        0
+      ],
+      "lora_name": "qwen-image-edit-plus-nsfw-lora.safetensors",
+      "strength_model": 0.65
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "NSFW LoRA (edit)"
+    }
+  },
+  "306": {
+    "inputs": {
+      "model": [
+        "305",
+        0
+      ],
+      "lora_name": "qwen-edit-skin.safetensors",
+      "strength_model": 1.0
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Skin Realism LoRA (dark asset, anti-plastic skin texture)"
+    }
+  },
+  "114": {
+    "inputs": {
+      "prompt": "Make the person in image 1 do the exact same pose of the person in image 2. Changing the style and background of the image of the person in image 1 is not permitted, so don't do it. The new pose should be pixel accurate to the pose we are trying to copy. The position of the arms and head and legs should be the same as the pose we are trying to copy. Change the field of view and angle to match exactly image 2. Head tilt and eye gaze pose should match the person in image 2. Keep the original apperance, body proportion, leg proportion, skin type and outfit, facial features, background scene from image 1.",
+      "clip": [
+        "302",
+        0
+      ],
+      "vae": [
+        "303",
+        0
+      ],
+      "image1": [
+        "109",
+        0
+      ],
+      "image2": [
+        "170",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Positive (source + pose reference)"
+    }
+  },
+  "115": {
+    "inputs": {
+      "prompt": "blurry, low resolution, deformed hands, deformed fingers, fused fingers, extra fingers, missing fingers, malformed nails, ugly toenails, deformed toes, extra toes, fused toes, poorly drawn lips, asymmetrical eyes, blurry eyes, deformed hairline, bad anatomy, imperfect body proportions, unnatural curves, cartoonish, artifacts, watermark, text, logos, mutated hands, mutated feet, extra limbs, poorly detailed skin, plastic skin, shiny skin, low detail nails, distorted pose, unnatural flexibility artifacts, flat lighting, low contrast, elderly or childish",
+      "clip": [
+        "302",
+        0
+      ],
+      "vae": [
+        "303",
+        0
+      ],
+      "image1": [
+        "109",
+        0
+      ],
+      "image2": [
+        "170",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Negative (live at cfg 2.5; injected by preparer on the 2511 tier)"
+    }
+  },
+  "134": {
+    "inputs": {
+      "reference_latents_method": "index_timestep_zero",
+      "conditioning": [
+        "114",
+        0
+      ]
+    },
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "Edit Model Reference Method (positive)"
+    }
+  },
+  "135": {
+    "inputs": {
+      "reference_latents_method": "index_timestep_zero",
+      "conditioning": [
+        "115",
+        0
+      ]
+    },
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "Edit Model Reference Method (negative)"
+    }
+  },
+  "93": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "170",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Size output latent to pose reference (1MP)"
+    }
+  },
+  "88": {
+    "inputs": {
+      "pixels": [
+        "93",
+        0
+      ],
+      "vae": [
+        "303",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode (latent shape)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "seed": 810536768582078,
+      "steps": 20,
+      "cfg": 2.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": [
+        "306",
+        0
+      ],
+      "positive": [
+        "134",
+        0
+      ],
+      "negative": [
+        "135",
+        0
+      ],
+      "latent_image": [
+        "88",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler (full re-pose, cfg 2.5)"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "303",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "215": {
+    "inputs": {
+      "enabled": true,
+      "boost_model": "GPEN-BFR-512.onnx",
+      "interpolation": "Bicubic",
+      "visibility": 1.0,
+      "codeformer_weight": 0.5,
+      "restore_with_main_after": false
+    },
+    "class_type": "ReActorFaceBoost",
+    "_meta": {
+      "title": "ReActor Face Boost (GPEN-BFR sharpen, dark asset)"
+    }
+  },
+  "200": {
+    "inputs": {
+      "enabled": true,
+      "input_image": [
+        "8",
+        0
+      ],
+      "swap_model": "inswapper_128.onnx",
+      "facedetection": "retinaface_resnet50",
+      "face_restore_model": "codeformer-v0.1.0.pth",
+      "face_restore_visibility": 0.65,
+      "codeformer_weight": 0.7,
+      "detect_gender_input": "no",
+      "detect_gender_source": "no",
+      "input_faces_index": "0",
+      "source_faces_index": "0",
+      "console_log_level": 1,
+      "source_image": [
+        "210",
+        0
+      ],
+      "face_boost": [
+        "215",
+        0
+      ]
+    },
+    "class_type": "ReActorFaceSwap",
+    "_meta": {
+      "title": "ReActor Face Swap (lock hero face)"
+    }
+  },
+  "164": {
+    "inputs": {
+      "images": [
+        "200",
+        0
+      ],
+      "filename_prefix": "pose_edit"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image (face-locked)"
+    }
+  }
+}

@@ -777,8 +777,16 @@ def test_validate_enforces_time_ramp_and_manual_bypasses():
     # enforce_beat_pool=False (director path) -> no pool constrains time, ramp applied outright.
     on = validate_and_repair([s.model_copy(deep=True) for s in scattered], char, 6, controls,
                              enforce_beat_pool=False)
-    assert [s.time_of_day for s in on] == sp._time_ramp(6, 1)   # curated onto the ramp
-    assert any(s.time_of_day != TimeOfDayType.NIGHT for s in on)
+    # The safety-net ramp overrode the scattered NIGHT stamps — the day now flows forward
+    # (not a flat block of night). These six identical-location scenes trip the location usage
+    # cap, which relocates the overflow; WS1a then snaps each relocated scene's time onto its
+    # NEW location's allowed set, so the ramp is applied AND every final time is coherent with
+    # its final location (no beach@night — the exact real-world-sense guarantee). That
+    # per-location snap is why this is no longer a byte-equal-to-_time_ramp assertion.
+    assert any(s.time_of_day != TimeOfDayType.NIGHT for s in on)     # ramp overrode the flat NIGHT
+    assert len({s.time_of_day for s in on}) > 1                       # the ramp spread applied
+    for s in on:
+        assert sp._time_ok_at(s.time_of_day, s.location), (s.time_of_day.value, s.location.value)
     # Manual path (enforce_time_ramp=False) leaves the times exactly as supplied.
     off = validate_and_repair([s.model_copy(deep=True) for s in scattered], char, 6, controls,
                               enforce_beat_pool=False, enforce_nudity_ramp=False,
@@ -1541,11 +1549,19 @@ def test_jogging_only_in_outdoor_or_gym_locations_any_seed():
                 assert sp._pose_outfit_ok(s.pose, s.outfit), (occ, seed, s.pose, s.outfit)
 
 
-def test_pose_location_guard_never_breaks_authored_beats_except_jogging_cafe():
-    # The guard is a coherence-correct SUPERSET of every hand-authored (pose, location) pairing
-    # the planner can produce — the SOLE deliberate exclusion is jogging @ cafe (the fix). If a
-    # future template authors a new pairing outside the guard, this test flags it (the compat
-    # pass would otherwise silently "repair" a coherent beat).
+def test_pose_location_guard_deliberate_authored_beat_exclusions():
+    # The guard is a coherence-correct SUPERSET of the hand-authored (pose, location) pairings,
+    # WITH a small set of DELIBERATE exclusions the compat pass repairs on purpose. If a future
+    # template authors a new pairing outside this set, this test flags it (the compat pass would
+    # otherwise silently "repair" a coherent beat). The exclusions:
+    #   * jogging @ cafe                      — WS-P: jogging only reads outdoors/at a gym.
+    #   * sitting_legs_wide_open @ office     — WS1c: a spread pose needs a private venue, not a
+    #   * spread_legs @ gym / yoga_studio       public workplace/gym (the reported "spread pose on
+    #                                           nightclub furniture" class of failure). These 3
+    #                                           authored "spicy workplace" pairings are repaired to
+    #                                           a decent pose (e.g. bending_over) at those venues.
+    # NOTE: all_fours @ gym/yoga_studio is NOT rejected — its explicit _POSE_LOCATION_GUARD entry
+    # (a coherent post-workout stretch) WINS over the private-only rule (see _pose_ok_at).
     arcs = {}
     for lst in _st.ARC_TEMPLATES.values():
         for a in lst:
@@ -1562,7 +1578,27 @@ def test_pose_location_guard_never_breaks_authored_beats_except_jogging_cafe():
                 for loc in beat.location_pool:
                     if not sp._pose_ok_at(pose, loc):
                         rejected.add((pose.value, loc.value))
-    assert rejected == {(PoseType.JOGGING.value, LocationType.CAFE.value)}, rejected
+    assert rejected == {
+        (PoseType.JOGGING.value, LocationType.CAFE.value),
+        (PoseType.SITTING_LEGS_WIDE_OPEN.value, LocationType.OFFICE.value),
+        (PoseType.SPREAD_LEGS.value, LocationType.GYM.value),
+        (PoseType.SPREAD_LEGS.value, LocationType.YOGA_STUDIO.value),
+    }, rejected
+    # all_fours reads coherent as a post-workout stretch at the gym/yoga_studio — the explicit
+    # guard entry WINS over the private-only rule, so it is NOT repaired away there.
+    assert sp._pose_ok_at(PoseType.ALL_FOURS, LocationType.GYM)
+    assert sp._pose_ok_at(PoseType.ALL_FOURS, LocationType.YOGA_STUDIO)
+    # Every private-only pose stays barred from a public venue it is NOT explicitly guard-allowed
+    # at (WS1c invariant, with the guard-allowlist precedence). spread_legs & sitting_legs_wide_open
+    # have no guard entry -> rejected at EVERY public venue; all_fours only at its guard's public
+    # venues (gym/yoga_studio).
+    for pose in sp.PRIVATE_ONLY_POSES:
+        guard = sp._POSE_LOCATION_GUARD.get(pose.value)
+        for loc in LocationType:
+            if not sv.is_public_venue(loc):
+                continue
+            guard_allows = guard is not None and loc.value in guard
+            assert sp._pose_ok_at(pose, loc) == guard_allows, (pose, loc)
 
 
 def test_ws_p_preserves_all_invariants_on_24_item_multiday_plan():
@@ -1575,12 +1611,17 @@ def test_ws_p_preserves_all_invariants_on_24_item_multiday_plan():
     # It is a meaningful case: WS-P actually moved poses.
     assert [s.pose for s in out] != [s.pose for s in off]
 
-    # (1) WS-P touched ONLY pose/pose_detail — so the nudity ramp, outfit, location, time and the
-    #     A2 expression assignment are all preserved EXACTLY (swaps never perturb them).
+    # (1) WS-P touched ONLY pose/pose_detail — so the nudity ramp, outfit, location and time are
+    #     all preserved EXACTLY (swaps never perturb them). `staging` AND `expression` are allowed
+    #     to differ too, because both are pure derivations of the FINAL scene facts assigned AFTER
+    #     every repair: `staging` from (seed, index, location, pose-class), and `expression` (WS1b)
+    #     from (pose-class, exposure, venue) — so a WS-P pose move that changes an item's pose-CLASS
+    #     legitimately re-derives its compatible expression, exactly as it re-derives its staging.
+    #     That is the compat guard, not a perturbation of an existing pick.
     for a, b in zip(out, off):
         da, db = a.model_dump(), b.model_dump()
         changed = {k for k in da if da[k] != db.get(k)}
-        assert changed <= {"pose", "pose_detail"}, changed
+        assert changed <= {"pose", "pose_detail", "staging", "expression"}, changed
 
     # (2) pose <-> location AND pose <-> outfit compatible everywhere (the WS-P goal).
     for s in out:

@@ -10,9 +10,9 @@ These phrases describe ONLY the environment — never the person — so they com
 cleanly with the identity-preserving background edit.
 """
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from models.enums import InteriorStyleType, PaletteType
+from models.enums import InteriorStyleType, LocationType, PaletteType, PoseType
 from services.attribute_phrases import phrase, KINK_PHRASES, PERSONALITY_PHRASES
 
 
@@ -77,6 +77,537 @@ LIGHTING_PHRASES = {
     "backlit_rim": "dramatic backlit rim lighting",
     "overcast": "soft diffuse overcast light",
 }
+
+
+# ---------------------------------------------------------------------------
+# Scene STAGING — where in the space the body actually is (WS-STAGE, Part A)
+# ---------------------------------------------------------------------------
+# The reported bug: "Bodycon Dress · Sitting Legs Wide Open" at a nightclub rendered
+# as the girl sitting cross-legged barefoot ON THE BAR COUNTER. The scene text named
+# only the VENUE ("a vibrant nightclub with...") — nothing said what she sits ON or
+# where she is in the room — so the full-frame pose re-diffusion improvised an absurd
+# surface. STAGING_PHRASES supplies a scenery-anchored fragment per (location, pose
+# CLASS) that names the concrete furniture/surface, folded into BOTH the background
+# scene text (after the location phrase) and the pose step's target-pose sentence.
+#
+# Every pose is bucketed into a small POSE CLASS (below); a phrase pool is authored per
+# (location x class) only where it makes sense. A (location, class) combo with no pool
+# yields "" — a clean skip — so a lying pose that lands somewhere with no lying surface
+# is left unanchored rather than given an absurd one (the planner does NOT relocate it;
+# location repair already ran). Phrases are lowercase fragments that read naturally after
+# a comma, name the surface/furniture ONLY, and NEVER mention identity/clothing/nudity or
+# add other people (coverage- and hygiene-tested).
+
+# Pose-class labels (module constants so callers don't hard-code the strings).
+POSE_CLASS_SITTING = "sitting"
+POSE_CLASS_STANDING = "standing"
+POSE_CLASS_LYING = "lying"
+POSE_CLASS_KNEELING = "kneeling"
+POSE_CLASS_ATHLETIC = "athletic"
+POSE_CLASS_OTHER = "other"
+
+# Every PoseType value -> its staging class (coverage-tested against PoseType). The
+# activity poses (eating/cooking/opening_fridge) and bending_over are OTHER: their own
+# description already names the surface (a table, the stove, the fridge), so no extra
+# anchor is needed. squatting/jogging are ATHLETIC (self-evident stance). all_fours is
+# grouped with KNEELING (a floor/bed pose); spread_legs reads as a reclining pose ->
+# LYING (its description leads "lying back or sitting…"), so it only anchors where a
+# lying surface exists (private interiors), else stays empty.
+_POSE_CLASS: Dict[str, str] = {
+    PoseType.STANDING_LEANING.value: POSE_CLASS_STANDING,
+    PoseType.SITTING.value: POSE_CLASS_SITTING,
+    PoseType.SITTING_LEGS_WIDE_OPEN.value: POSE_CLASS_SITTING,
+    PoseType.SOFA.value: POSE_CLASS_SITTING,
+    PoseType.LYING_BACK.value: POSE_CLASS_LYING,
+    PoseType.LYING_STOMACH.value: POSE_CLASS_LYING,
+    PoseType.KNEELING.value: POSE_CLASS_KNEELING,
+    PoseType.BENDING_OVER.value: POSE_CLASS_OTHER,
+    PoseType.HANDS_BEHIND_HEAD.value: POSE_CLASS_STANDING,
+    PoseType.SQUATTING.value: POSE_CLASS_ATHLETIC,
+    PoseType.ALL_FOURS.value: POSE_CLASS_KNEELING,
+    PoseType.SPREAD_LEGS.value: POSE_CLASS_LYING,
+    PoseType.EATING.value: POSE_CLASS_OTHER,
+    PoseType.JOGGING.value: POSE_CLASS_ATHLETIC,
+    PoseType.OPENING_FRIDGE.value: POSE_CLASS_OTHER,
+    PoseType.COOKING.value: POSE_CLASS_OTHER,
+}
+
+
+def pose_class(pose) -> str:
+    """Staging pose-class for a PoseType (or its raw value); OTHER when unknown/None."""
+    return _POSE_CLASS.get(getattr(pose, "value", pose), POSE_CLASS_OTHER)
+
+
+# STAGING_PHRASES[location_value][pose_class] -> a tuple of scenery-anchored fragments.
+# Every LocationType has an entry (coverage-tested); within it, SITTING/STANDING are
+# authored wherever they make sense, LYING/KNEELING only where a real reclining/floor
+# surface exists (private interiors, beach/pool/park/garden, studios). A missing combo
+# means "no staging" (clean skip). NO absurd surfaces (never a countertop/table AS a
+# seat — a stool/bench/chair instead).
+STAGING_PHRASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    # ------------------------------------------------------------------ home
+    "home_bedroom": {
+        POSE_CLASS_SITTING: (
+            "sitting on the edge of the bed",
+            "seated on a cushioned bench at the foot of the bed",
+            "sitting back against the headboard among the pillows",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing beside the bed",
+            "standing by the bedroom window",
+        ),
+        POSE_CLASS_LYING: (
+            "stretched out across the bed",
+            "lying back on the pillows",
+            "reclining on the rumpled sheets",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on the soft mattress",
+            "kneeling on the plush bedside rug",
+        ),
+    },
+    "home_living_room": {
+        POSE_CLASS_SITTING: (
+            "sitting on the plush sofa",
+            "seated in a cozy armchair",
+            "perched on the arm of the couch",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing by the living-room window",
+            "standing near the fireplace",
+        ),
+        POSE_CLASS_LYING: (
+            "stretched out on the sofa cushions",
+            "lying back along the length of the couch",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on the soft area rug",
+            "kneeling among the floor cushions",
+        ),
+    },
+    "home_kitchen": {
+        POSE_CLASS_SITTING: (
+            "seated on a kitchen stool at the island",
+            "sitting at the breakfast nook",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the kitchen counter",
+            "leaning against the kitchen island",
+        ),
+    },
+    "home_bathroom": {
+        POSE_CLASS_SITTING: (
+            "seated on the edge of the bathtub",
+            "sitting on a low bathroom stool",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the bathroom vanity",
+            "standing by the large mirror",
+        ),
+        POSE_CLASS_LYING: (
+            "reclining in the bathtub",
+        ),
+    },
+    "home_balcony": {
+        POSE_CLASS_SITTING: (
+            "seated in a balcony lounge chair",
+            "sitting on a cushioned balcony bench",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the balcony railing",
+            "leaning on the balcony rail",
+        ),
+        POSE_CLASS_LYING: (
+            "reclining on the balcony lounger",
+        ),
+    },
+    "home_office": {
+        POSE_CLASS_SITTING: (
+            "seated at the desk in the office chair",
+            "sitting back in the desk chair",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing beside the desk",
+            "standing by the office shelves",
+        ),
+    },
+    # ------------------------------------------------------- workplace venues
+    "office": {
+        POSE_CLASS_SITTING: (
+            "seated at the desk in an office chair",
+            "perched on the edge of the desk",
+            "seated in a chair by the glass wall",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing by the floor-to-ceiling windows",
+            "leaning against the desk",
+        ),
+    },
+    "hospital_ward": {
+        POSE_CLASS_SITTING: (
+            "seated on the edge of the hospital bed",
+            "sitting in the bedside chair",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing beside the hospital bed",
+            "standing by the medical cart",
+        ),
+    },
+    "classroom": {
+        POSE_CLASS_SITTING: (
+            "seated at a classroom desk",
+            "perched on the edge of the teacher's desk",
+            "sitting on a stool by the chalkboard",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the front by the chalkboard",
+            "standing beside a row of desks",
+        ),
+    },
+    "photo_studio": {
+        POSE_CLASS_SITTING: (
+            "seated on a posing stool against the seamless backdrop",
+            "sitting on an apple box on the studio floor",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing against the seamless studio backdrop",
+            "posed on the studio floor under the lights",
+        ),
+        POSE_CLASS_LYING: (
+            "reclining on the studio floor against the backdrop",
+            "lying on a low posing platform",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on the studio floor against the backdrop",
+        ),
+    },
+    "gym": {
+        POSE_CLASS_SITTING: (
+            "seated on a weight bench",
+            "sitting on a stack of gym mats",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing by the weight rack",
+            "standing beside the mirrored wall",
+        ),
+        POSE_CLASS_LYING: (
+            "lying back on an exercise mat",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on an exercise mat",
+        ),
+    },
+    "yoga_studio": {
+        POSE_CLASS_SITTING: (
+            "seated cross-legged on a yoga mat",
+            "sitting on a folded yoga bolster",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the front of a yoga mat",
+            "standing on the warm wooden studio floor",
+        ),
+        POSE_CLASS_LYING: (
+            "lying back on a yoga mat",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on a yoga mat",
+        ),
+    },
+    "restaurant_kitchen": {
+        POSE_CLASS_SITTING: (
+            "perched on a stool by the prep station",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the stainless steel prep counter",
+            "standing by the kitchen line",
+        ),
+    },
+    "library": {
+        POSE_CLASS_SITTING: (
+            "seated at a reading table",
+            "sitting in a leather reading chair",
+            "perched on a library step stool by the shelves",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing between the tall bookshelves",
+            "browsing at a bookshelf",
+        ),
+    },
+    "salon": {
+        POSE_CLASS_SITTING: (
+            "seated in a salon styling chair",
+            "sitting in the reclining wash chair",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing by the styling station",
+            "standing at the salon mirror",
+        ),
+    },
+    "stage": {
+        POSE_CLASS_SITTING: (
+            "seated on a stool center stage",
+            "sitting on the edge of the stage",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing center stage in the spotlight",
+            "standing at the microphone stand",
+        ),
+    },
+    "lab": {
+        POSE_CLASS_SITTING: (
+            "seated on a lab stool at the workbench",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the laboratory bench",
+            "standing by the fume hood",
+        ),
+    },
+    # ---------------------------------------------------------------- outdoors
+    "beach": {
+        POSE_CLASS_SITTING: (
+            "sitting on a beach towel on the sand",
+            "seated on a low beach chair",
+            "perched on a smooth rock by the shore",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the water's edge",
+            "standing on the warm sand",
+        ),
+        POSE_CLASS_LYING: (
+            "lying on a beach towel on the sand",
+            "stretched out on a sun lounger",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on the warm sand",
+        ),
+    },
+    "park": {
+        POSE_CLASS_SITTING: (
+            "seated on a park bench",
+            "sitting on a picnic blanket on the grass",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing on the grassy lawn",
+            "standing beneath a shady tree",
+        ),
+        POSE_CLASS_LYING: (
+            "lying on a picnic blanket on the grass",
+            "stretched out on the lawn",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on the picnic blanket",
+        ),
+    },
+    "city_street": {
+        POSE_CLASS_SITTING: (
+            "seated on a bench along the sidewalk",
+            "sitting on the steps of a storefront",
+            "perched on a low stone ledge",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing on the sidewalk by the storefronts",
+            "leaning against a brick wall",
+        ),
+    },
+    "forest_trail": {
+        POSE_CLASS_SITTING: (
+            "seated on a fallen log",
+            "sitting on a mossy boulder by the trail",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing on the forest path",
+            "standing among the tall trees",
+        ),
+    },
+    "rooftop": {
+        POSE_CLASS_SITTING: (
+            "seated on a rooftop lounge sofa",
+            "sitting on a low rooftop ledge",
+            "perched on a bar stool at the rooftop counter",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the rooftop railing",
+            "standing by the edge overlooking the skyline",
+        ),
+        POSE_CLASS_LYING: (
+            "reclining on a rooftop daybed",
+        ),
+    },
+    "poolside": {
+        POSE_CLASS_SITTING: (
+            "seated on the edge of the pool",
+            "sitting on a poolside lounge chair",
+            "perched on a sunbed by the water",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the pool's edge",
+            "standing by the sun loungers",
+        ),
+        POSE_CLASS_LYING: (
+            "stretched out on a poolside sun lounger",
+            "lying on a towel by the pool",
+        ),
+    },
+    "garden": {
+        POSE_CLASS_SITTING: (
+            "seated on a garden bench",
+            "sitting on a wrought-iron chair among the flowers",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing on the garden path",
+            "standing among the blooming flowerbeds",
+        ),
+        POSE_CLASS_LYING: (
+            "lying on a blanket on the garden lawn",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on the grass among the flowers",
+        ),
+    },
+    # ----------------------------------------------------------- social venues
+    "cafe": {
+        POSE_CLASS_SITTING: (
+            "seated at a small wooden table by the window, coffee cup in front of her",
+            "sitting at a corner cafe table",
+            "perched on a stool at the cafe counter",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the cafe counter",
+            "waiting by the pastry display",
+        ),
+    },
+    "restaurant": {
+        POSE_CLASS_SITTING: (
+            "seated at a candlelit dining table",
+            "sitting in a plush restaurant booth",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing beside the dining table",
+            "waiting near the restaurant bar",
+        ),
+    },
+    "bar": {
+        POSE_CLASS_SITTING: (
+            "perched on a bar stool at the counter",
+            "seated in a corner booth with a drink on the table",
+        ),
+        POSE_CLASS_STANDING: (
+            "leaning against the bar counter",
+            "standing by the shelves of bottles",
+        ),
+    },
+    "nightclub": {
+        POSE_CLASS_SITTING: (
+            "sitting on a plush velvet lounge seat by the wall",
+            "seated in a corner booth with drinks on the table",
+            "perched on a bar stool at the counter",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing at the edge of the dance floor",
+            "leaning against the bar counter",
+        ),
+    },
+    "hotel_room": {
+        POSE_CLASS_SITTING: (
+            "sitting on the edge of the large bed",
+            "seated in a plush armchair by the window",
+            "perched on the chaise at the foot of the bed",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing by the floor-to-ceiling window",
+            "standing beside the bed",
+        ),
+        POSE_CLASS_LYING: (
+            "stretched out across the hotel bed",
+            "reclining against the headboard pillows",
+        ),
+        POSE_CLASS_KNEELING: (
+            "kneeling on the wide hotel bed",
+        ),
+    },
+    "luxury_lounge": {
+        POSE_CLASS_SITTING: (
+            "seated on a plush velvet sofa",
+            "sitting in a deep leather lounge chair",
+            "perched on a velvet ottoman",
+        ),
+        POSE_CLASS_STANDING: (
+            "standing by the marble bar",
+            "standing near the velvet drapes",
+        ),
+        POSE_CLASS_LYING: (
+            "reclining across the velvet chaise lounge",
+        ),
+    },
+    "car_interior": {
+        POSE_CLASS_SITTING: (
+            "seated in the plush leather passenger seat",
+            "sitting back against the car seat",
+        ),
+        POSE_CLASS_LYING: (
+            "reclining across the back seat",
+        ),
+    },
+}
+
+
+def staging_options(location, pose) -> Tuple[str, ...]:
+    """
+    The staging phrase pool for a scene's (location, pose-class), or an empty tuple when
+    the location/class combo has no authored staging (a clean skip). ``location``/``pose``
+    accept an enum or its raw value. The pose is bucketed via ``pose_class`` FIRST, so the
+    returned phrases always match the pose's own class — a sitting scene can only ever draw
+    a sitting anchor, a lying scene a lying anchor (coherence guard).
+    """
+    loc_val = getattr(location, "value", location)
+    cls = pose_class(pose)
+    return STAGING_PHRASES.get(loc_val, {}).get(cls, ())
+
+
+# ---------------------------------------------------------------------------
+# Public-venue solo policy (WS-STAGE, Part B)
+# ---------------------------------------------------------------------------
+# The second reported bug: the pose prompt demanded "She is completely alone in the
+# frame — exactly one person, no other people" even for a NIGHTCLUB, a contradiction the
+# model split by rendering a crowd anyway. For an inherently-populated PUBLIC venue the
+# pose builder swaps that strict clause for a "clear subject / anonymous strangers in the
+# soft-focus background" clause instead. Private venues (every home_*, hotel_room,
+# photo_studio, car_interior — plus solitary-by-nature outdoor/controlled spaces like a
+# forest trail, private garden or lab) keep the STRICT clause. Derived from LocationType;
+# a value absent here is treated as private (strict) — the safe default. Consumed by
+# api.v1.endpoints.pose.build_pose_prompt (the background step needs no change — the
+# person is masked out there).
+PUBLIC_VENUE_LOCATIONS: frozenset = frozenset({
+    LocationType.OFFICE.value,
+    LocationType.HOSPITAL_WARD.value,
+    LocationType.CLASSROOM.value,
+    LocationType.GYM.value,
+    LocationType.YOGA_STUDIO.value,
+    LocationType.RESTAURANT_KITCHEN.value,
+    LocationType.LIBRARY.value,
+    LocationType.SALON.value,
+    LocationType.STAGE.value,
+    LocationType.BEACH.value,
+    LocationType.PARK.value,
+    LocationType.CITY_STREET.value,
+    LocationType.ROOFTOP.value,
+    LocationType.POOLSIDE.value,
+    LocationType.CAFE.value,
+    LocationType.RESTAURANT.value,
+    LocationType.BAR.value,
+    LocationType.NIGHTCLUB.value,
+    LocationType.LUXURY_LOUNGE.value,
+})
+
+
+def is_public_venue(location) -> bool:
+    """
+    True if ``location`` (enum or raw value) is an inherently-populated PUBLIC venue where
+    a strict "completely alone" instruction is self-contradictory, so the pose prompt uses
+    the background-strangers solo clause instead. Everything not in PUBLIC_VENUE_LOCATIONS
+    (unknown/None included) is private -> STRICT solo, the safe default.
+    """
+    return getattr(location, "value", location) in PUBLIC_VENUE_LOCATIONS
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +840,7 @@ def build_scene_background_text(
     lead_text: Optional[str] = None,
     interior_style=None,
     color_palette=None,
+    staging: Optional[str] = None,
 ) -> str:
     """
     Compose location + time + lighting (+ optional mood + free text) into the
@@ -327,6 +859,12 @@ def build_scene_background_text(
     any other location the generic phrase stands. The palette clause (if any) joins the
     LIGHTING section. Both default None -> byte-identical to the pre-trait-profile output,
     so every non-batch caller is unaffected.
+
+    ``staging`` (opt-in, WS-STAGE scene staging): a scenery-anchored fragment naming the
+    concrete surface/furniture the pose uses (e.g. "perched on a bar stool at the counter"),
+    placed IMMEDIATELY AFTER the location phrase so the composed scene says WHERE in the
+    space she is, not just which venue. Only the scene mapper passes it (batch story items);
+    None -> byte-identical to the pre-staging output for every other caller.
     """
     parts: List[str] = []
     if lead_text and lead_text.strip():
@@ -338,6 +876,11 @@ def build_scene_background_text(
         loc = location_phrase(location)
     if loc:
         parts.append(loc)
+    # Staging joins right after the location phrase (before time/lighting) so the scene
+    # names the concrete surface/furniture the pose uses — the fix for the model
+    # improvising an absurd seat when the scene text named only the venue.
+    if staging and staging.strip():
+        parts.append(staging.strip())
     t = phrase(TIME_OF_DAY_PHRASES, time_of_day)
     if t:
         parts.append(t)

@@ -214,6 +214,29 @@ class Settings(BaseSettings):
     # diffusion model can render — instead of flowery narrative prose.
     STORY_PLANNER_TEMPERATURE: float = 0.6
 
+    # Scene-direction writer (WS-SD): the deterministic planner decides WHAT each photo
+    # is (outfit/pose/location/nudity/time — all coherence-guarded); Venice writes HOW IT
+    # LOOKS — 1-3 sentences of concrete photographic staging per item (furniture/objects/
+    # where she is in the space/camera feel), validated hard and fallback-safe. This is
+    # per-item DECORATION, never narrative (the retired STORY mode hallucinated).
+    #   "venice"        -> ONE batched Venice call per batch writes every item's direction
+    #                      (default; each item that fails validation keeps its staging phrase).
+    #   "deterministic" -> Venice is skipped entirely; each item keeps its bare staging phrase
+    #                      (byte-identical to the pre-scene-direction batch).
+    # Uses Venice above. Empty SCENE_DIRECTION_MODEL -> VENICE_MODEL. Works keyless
+    # (no key -> the deterministic path, no network).
+    SCENE_DIRECTION_PROVIDER: str = "venice"
+    # Bounded planning-time enrichment: the batch POST waits at most this long for Venice's
+    # staging pass, and the fallback (each item keeps its bare staging phrase) is SILENT, so
+    # a slow provider can't stall a launch. Kept short on purpose.
+    SCENE_DIRECTION_TIMEOUT_SECONDS: float = 8.0
+    SCENE_DIRECTION_MODEL: str = ""
+    SCENE_DIRECTION_TEMPERATURE: float = 0.7  # literal staging, not flowery prose
+    # A FLOOR, not a cap: scene_direction.write_batch raises the effective max_tokens to
+    # 400 + 130*item_count when a batch needs more, so a large batch can't be silently
+    # truncated into an all-fallback response. Bumped above this only to raise the floor.
+    SCENE_DIRECTION_MAX_TOKENS: int = 4000
+
     # Character generation: run the second detail-refine pass by default
     # (upscale-model round trip + refine steps; same output resolution,
     # ~+50-100% GPU time per image). Requires 4x_Nickelback_70000G.safetensors
@@ -395,6 +418,18 @@ class Settings(BaseSettings):
     # via the pipeline engine) runs UNCHANGED as a fallback. See
     # api/v1/endpoints/nude_base.py and workers/nude_base_worker.py.
     NUDE_BASE_T2I: bool = True
+
+    # -----------------------------------------------------------------------
+    # WS-N face swap — the base is a BODY reference; final faces always come
+    # from the HERO via the pose-step ReActor (every published batch photo's
+    # face is stamped there), so face-locking the base too is unnecessary GPU
+    # work and creates a confusing hero-vs-base identity mismatch in the admin
+    # (the base's own face never reaches a published photo). False (default):
+    # the t2i base worker skips the ReActor face pass entirely — the t2i
+    # output IS the final base image. Set true to restore the old
+    # face-locked bases (the GPEN/FaceBoost restore path below stays wired
+    # and still applies whenever this is on).
+    NUDE_BASE_FACE_SWAP: bool = False
 
     # -----------------------------------------------------------------------
     # WS-N face-restore quality — inswapper_128 synthesizes identity at only

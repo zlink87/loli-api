@@ -1,9 +1,10 @@
 """
-Nude-base worker (WS-N) — text-to-image base + ReActor face lock.
+Nude-base worker (WS-N) — text-to-image base (+ optional ReActor face lock).
 
 Replaces the old edit-based undressing (outfit step in "nude_base" prompt mode +
 background step on the clothed hero) with a deterministic, pose-independent,
-mask-free path. One ``nude_base`` job runs TWO chained GPU steps:
+mask-free path. One ``nude_base`` job runs a TEXT-TO-IMAGE BASE step and an
+OPTIONAL second chained GPU step:
 
   1. TEXT-TO-IMAGE BASE — generated exactly like char-gen (Z-Image Turbo,
      ``COMFYUI_WORKFLOW_PATH``, ``assemble_generation_prompt``) from the
@@ -16,17 +17,23 @@ mask-free path. One ``nude_base`` job runs TWO chained GPU steps:
      model paint a whole second person into a mask — the root cause of the old
      two-headed composite.
 
-  2. FACE LOCK — a single ReActor face pass swaps the ORIGINAL hero photo's face
-     onto that generated base (source = the hero URL, NEVER a generated or
-     intermediate image; node params mirror the pose graphs' node 200 exactly).
-     The base's face is therefore exactly ONE swap generation from the hero, and
-     the face swap is the ONLY post-process applied — no extra restore / upscale
-     pass that could soften it.
+  2. FACE LOCK (optional, OFF by default — ``settings.NUDE_BASE_FACE_SWAP``) — a
+     single ReActor face pass swaps the ORIGINAL hero photo's face onto that
+     generated base (source = the hero URL, NEVER a generated or intermediate
+     image; node params mirror the pose graphs' node 200 exactly). Product
+     decision: the base's own face never reaches a published photo — every batch
+     photo's face is stamped from the HERO at the pose step — so locking the
+     base's face is wasted GPU work and a confusing hero-vs-base identity
+     mismatch in admin. With the flag off, the t2i output from step 1 IS the
+     final base image and this step is skipped entirely (no hero download, no
+     second workflow submit). The flag stays for rollback to the old
+     face-locked bases.
 
 The job finalizes exactly like every other worker (sets ``job.preview_url`` +
-``job.image_hash`` on success), so the nude-base store / status reconcile-on-read
-flow in ``api/v1/endpoints/nude_base.py`` is unchanged. The legacy edit-based path
-stays intact behind ``settings.NUDE_BASE_T2I=False``.
+``job.image_hash`` on success) regardless of which branch produced the final
+bytes, so the nude-base store / status reconcile-on-read flow in
+``api/v1/endpoints/nude_base.py`` is unchanged. The legacy edit-based path stays
+intact behind ``settings.NUDE_BASE_T2I=False``.
 """
 import asyncio
 import base64
@@ -250,7 +257,10 @@ def build_t2i_workflow(t2i_template: dict, persona, seed: int) -> dict:
 
 def build_faceswap_workflow(base_image_name: str, hero_image_name: str) -> dict:
     """
-    Minimal ReActor face-swap graph, authored in code (no new workflow JSON):
+    Minimal ReActor face-swap graph, authored in code (no new workflow JSON).
+    Only invoked by ``_process_job`` when ``settings.NUDE_BASE_FACE_SWAP`` is True
+    (OFF by default — see config.py); the function itself is unconditional so the
+    graph shape can still be unit-tested with the flag ignored:
 
         LoadImage(base)  --input_image-->  ReActorFaceSwap  --> SaveImage
         LoadImage(hero)  --source_image--/
@@ -352,9 +362,10 @@ def _bytes_from_output(first: dict, step: str) -> bytes:
 
 class NudeBaseWorker:
     """
-    Async worker that processes ``nude_base`` jobs: t2i base render -> ReActor face
-    pass, chained in one job. Mirrors the BackgroundWorker/PipelineBackgroundWorker
-    lifecycle (start/stop, template load on start, single worker loop).
+    Async worker that processes ``nude_base`` jobs: t2i base render -> optional
+    ReActor face pass (``settings.NUDE_BASE_FACE_SWAP``, OFF by default), chained
+    in one job. Mirrors the BackgroundWorker/PipelineBackgroundWorker lifecycle
+    (start/stop, template load on start, single worker loop).
     """
 
     def __init__(
@@ -434,7 +445,7 @@ class NudeBaseWorker:
                 await asyncio.sleep(1)
 
     async def _process_job(self, job: Job) -> None:
-        """Run the t2i base render, then the ReActor face pass, then persist."""
+        """Run the t2i base render, then the optional ReActor face pass, then persist."""
         start_time = datetime.utcnow()
         request = job.request
 
@@ -467,26 +478,43 @@ class NudeBaseWorker:
             base_bytes = await asyncio.to_thread(_bytes_from_output, base_outputs[0], "t2i base")
             logger.info(f"[NUDE-BASE] {job.job_id} | base rendered ({len(base_bytes)} bytes)")
 
-            # --- Step 2: ReActor face pass — hero face onto the generated base ---
-            await self.job_manager.update_job_status(
-                job.job_id, JobStatus.RUNNING, progress=0.6
-            )
-            hero_bytes = await asyncio.to_thread(_download_image, request.hero_image_url)
-            base_name, images = _stage_image(base_bytes, "nudebase_base")
-            hero_name, hero_images = _stage_image(hero_bytes, "nudebase_hero")
-            images.extend(hero_images)
+            # --- Step 2: optional ReActor face pass — hero face onto the generated
+            # base. OFF by default (settings.NUDE_BASE_FACE_SWAP=False): the base's
+            # own face never reaches a published photo (every batch photo's face is
+            # stamped from the HERO at the pose step), so swapping it here is wasted
+            # GPU work and a false identity signal in admin. When off, the t2i output
+            # from step 1 IS the final base image — same upload/status flow below,
+            # just without the second workflow round-trip (no hero download, no
+            # second submit_and_poll).
+            if settings.NUDE_BASE_FACE_SWAP:
+                await self.job_manager.update_job_status(
+                    job.job_id, JobStatus.RUNNING, progress=0.6
+                )
+                hero_bytes = await asyncio.to_thread(_download_image, request.hero_image_url)
+                base_name, images = _stage_image(base_bytes, "nudebase_base")
+                hero_name, hero_images = _stage_image(hero_bytes, "nudebase_hero")
+                images.extend(hero_images)
 
-            face_workflow = build_faceswap_workflow(base_name, hero_name)
-            face_outputs = await runpod_runner.run_workflow(
-                self.runpod_client, self.job_manager, job.job_id, face_workflow,
-                images=images, progress_start=0.6, progress_end=0.9,
-            )
-            if not face_outputs:
-                raise RuntimeError("No image returned from face-swap step")
-            final_bytes = await asyncio.to_thread(_bytes_from_output, face_outputs[0], "face-swap")
-            logger.info(
-                f"[NUDE-BASE] {job.job_id} | face locked from hero ({len(final_bytes)} bytes)"
-            )
+                face_workflow = build_faceswap_workflow(base_name, hero_name)
+                face_outputs = await runpod_runner.run_workflow(
+                    self.runpod_client, self.job_manager, job.job_id, face_workflow,
+                    images=images, progress_start=0.6, progress_end=0.9,
+                )
+                if not face_outputs:
+                    raise RuntimeError("No image returned from face-swap step")
+                final_bytes = await asyncio.to_thread(_bytes_from_output, face_outputs[0], "face-swap")
+                logger.info(
+                    f"[NUDE-BASE] {job.job_id} | face locked from hero ({len(final_bytes)} bytes)"
+                )
+            else:
+                final_bytes = base_bytes
+                await self.job_manager.update_job_status(
+                    job.job_id, JobStatus.RUNNING, progress=0.9
+                )
+                logger.info(
+                    f"[NUDE-BASE] {job.job_id} | face swap OFF (NUDE_BASE_FACE_SWAP=False) — "
+                    f"t2i base is the final image ({len(final_bytes)} bytes)"
+                )
 
             # --- Persist final output (identical finalize contract to other workers) ---
             await self.job_manager.update_job_status(

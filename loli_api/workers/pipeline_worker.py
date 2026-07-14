@@ -447,6 +447,24 @@ class PipelineBackgroundWorker:
                     # None (interactive callers / no character profile) appends
                     # nothing, same as every other getattr-defensive field above.
                     identity_anchors=getattr(request, "identityAnchors", None),
+                    # WS-STAGE: scenery anchor for this (location, pose-class), e.g.
+                    # "perched on a bar stool at the counter". In the multi-step path it is
+                    # appended to the target-pose sentence; in single-pass build_pose_prompt
+                    # suppresses that append (it already rides scene_text below). None
+                    # (interactive/legacy) appends nothing.
+                    staging=getattr(request, "stagingText", None),
+                    # WS-STAGE Part B: the item's nudity level drives the public-venue solo
+                    # policy — HIGH nudity (or the NAKED outfit) keeps STRICT solo even in a
+                    # public venue. Defensive getattr for non-batch stand-ins.
+                    nudity_level=getattr(request, "nudityLevel", None),
+                    # The outfit ENUM value lets the solo policy detect NAKED robustly, even
+                    # when outfit_continuity_text prepends a caption detail that would defeat a
+                    # prose-prefix sniff of outfit_text. None -> the prefix fallback.
+                    outfit_enum=(
+                        request.outfit.value
+                        if hasattr(request.outfit, "value")
+                        else request.outfit
+                    ),
                     # Single-pass: dress additively from the nude base, and place her in
                     # the composed scene text (request.prompt) instead of "keep image 1's
                     # background". Both no-ops (default) on the legacy multi-step path.

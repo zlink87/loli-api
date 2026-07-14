@@ -806,6 +806,12 @@ class BackgroundEditRequest(BaseModel):
 
 VALID_PIPELINE_STEPS = {"pose", "outfit", "background"}
 
+# Max length of the scenery-anchored staging fragment (stagingText). Also the cutoff
+# scene_mapper uses to decide whether a validated Venice scene-direction fits the pose
+# step's stagingText slot (a longer direction rides the scene text alone) — imported
+# there so the field cap and that cutoff can never drift apart.
+STAGING_TEXT_MAX_LENGTH = 160
+
 
 class PipelineEditRequest(BaseModel):
     """
@@ -1012,6 +1018,20 @@ class PipelineEditRequest(BaseModel):
             "the pose step is the only step that re-diffuses the whole frame, so it is the one "
             "place the location can be re-anchored. Unrecognized values or None leave the "
             "prompt unchanged."
+        ),
+    )
+    stagingText: Optional[str] = Field(
+        default=None,
+        max_length=STAGING_TEXT_MAX_LENGTH,
+        description=(
+            "Optional scenery-anchored staging fragment (e.g. from SceneSpec.staging, "
+            "'perched on a bar stool at the counter'). Names the concrete surface/furniture "
+            "the pose uses, matched to the scene's (location, pose-class). In the MULTI-step "
+            "path it is appended to the pose step's target-pose sentence so the full-frame "
+            "re-diffusion doesn't improvise an absurd seat; in single-pass it already rides "
+            "the composed 'Place her in: {scene_text}' clause, so build_pose_prompt skips "
+            "the target-pose append there to avoid duplication. Scenery ONLY — never "
+            "identity/clothing. None (interactive callers / no staging) appends nothing."
         ),
     )
     interiorStyle: Optional[InteriorStyleType] = Field(

@@ -13,7 +13,7 @@ from typing import List, Optional
 from models.enums import NudityLevel, OutfitType
 from models.batch import BatchControls, SeedStrategy
 from models.scene import SceneSpec
-from models.requests import PipelineEditRequest
+from models.requests import PipelineEditRequest, STAGING_TEXT_MAX_LENGTH
 from services import scene_vocab as sv
 from services import attribute_phrases as ap
 from services import prompt_constants as pc
@@ -223,17 +223,28 @@ def scene_to_pipeline_request(
         else None
     )
 
-    # Additive dressing on a nude base (B2). The swap SOURCE is the character's nude
-    # base (see source_image below) whenever nude_base_url is populated. On a bare
-    # body the "replace" lead ("remove the current outfit and replace it…") is
-    # INCOHERENT — there is no outfit on a nude body to remove, so it no-ops the
-    # garment for some outfits and leaves the body bare. So for a nude source + a real
-    # garment (non-NAKED) we force outfit_prompt_mode="dress" (build_prompt's additive
-    # dress-onto-bare-body lead), overriding controls.outfit_prompt_mode. NAKED never
-    # gets "dress" (there is nothing to add), and a non-nude (hero) source keeps the
-    # admin/controls value. (Deliberately NOT keyed off sourceDressed — that is
-    # default-False for every caller and proves nothing about the source.)
-    nude_source = bool(getattr(character, "nude_base_url", None))
+    # No-pose face guard: the pose step is the ONLY step that stamps the hero's face
+    # (its ReActor pass); the outfit and background steps composite the SOURCE image's own
+    # face back byte-exact. With NUDE_BASE_FACE_SWAP defaulting False the nude base carries
+    # a RANDOM t2i face, so a POSE-LESS item sourced from the nude base would publish that
+    # un-swapped face. A pose-less item therefore falls back to the HERO photo as its swap
+    # source (whose face IS the hero's) and is flagged sourceDressed=True so the outfit
+    # builder uses its dressed-source (GARMENT/replace) mode — the exact pre-nude-base flow
+    # whose composite-back keeps the hero's own face. A POSED item keeps the nude base: the
+    # pose step swaps the hero face onto it. So ``nude_source`` below (the effective "swap
+    # source is the bare nude base" signal) is gated on a pose being present.
+    has_nude_base = bool(getattr(character, "nude_base_url", None))
+    nude_source = has_nude_base and pose is not None
+    source_dressed = has_nude_base and pose is None
+
+    # Additive dressing on a nude base (B2). On a bare body the "replace" lead ("remove the
+    # current outfit and replace it…") is INCOHERENT — there is no outfit on a nude body to
+    # remove, so it no-ops the garment for some outfits and leaves the body bare. So for a
+    # nude source + a real garment (non-NAKED) we force outfit_prompt_mode="dress"
+    # (build_prompt's additive dress-onto-bare-body lead), overriding controls.outfit_prompt_mode.
+    # NAKED never gets "dress" (there is nothing to add); a hero source (no nude base, OR the
+    # pose-less fallback above) keeps the admin/controls value — "replace" is correct there
+    # because the hero is dressed.
     if nude_source and outfit is not None and outfit != OutfitType.NAKED:
         outfit_prompt_mode = "dress"
     else:
@@ -277,6 +288,29 @@ def scene_to_pipeline_request(
     # to the pose tail via the request's lighting/timeOfDay fields (set below), and this
     # scene text becomes the pose prompt's "Place her in:" clause, so composing time/light
     # here too would duplicate that language inside the one pose prompt.
+    # WS-STAGE scene staging: the planner-assigned scenery anchor (e.g. "perched on a bar
+    # stool at the counter") joins right after the location phrase so the scene text names
+    # WHERE in the space she is. Single-pass inherits it automatically (this composed text
+    # becomes the pose prompt's "Place her in: …" clause); the 3-step background step gets
+    # it too. None (no staging for this location/pose-class) composes byte-identically.
+    staging_text = getattr(scene, "staging", None)
+    # WS-SD scene direction: when Venice authored a VALIDATED per-item direction (HOW the
+    # shot looks — furniture/objects/camera feel), it REPLACES the bare `staging` phrase in
+    # the composed scene/background text. `staging` was only a SUGGESTION fed INTO Venice, so
+    # composing both would double it. The pose step's stagingText slot also carries the
+    # direction, but ONLY when it fits that field's 160-char cap (see below), so a longer
+    # direction rides the scene text alone and the pose prompt keeps the short staging phrase.
+    # None (deterministic provider / a validation fallback / legacy scenes) -> the bare
+    # staging phrase stands, byte-identical to the pre-scene-direction batch.
+    # (Local named ``direction_text`` — NOT ``scene_direction`` — so it never shadows the
+    # services.scene_direction module.)
+    direction_text = getattr(scene, "scene_direction", None)
+    bg_staging = direction_text or staging_text
+    pose_staging = (
+        direction_text
+        if (direction_text and len(direction_text) <= STAGING_TEXT_MAX_LENGTH)
+        else staging_text
+    )
     background_text = scene.background_text or sv.build_scene_background_text(
         location=scene.location,
         time_of_day=(None if single_pass_edit else scene.time_of_day),
@@ -288,6 +322,8 @@ def scene_to_pipeline_request(
         # the WS-S gate above). An un-profiled batch (both None) composes byte-identically.
         interior_style=interior_style,
         color_palette=color_palette,
+        # WS-SD: the Venice direction (if any) stands in for the bare staging phrase here.
+        staging=bg_staging,
     )
 
     # Guarantee at least one active step (PipelineEditRequest requires >=1).
@@ -324,9 +360,14 @@ def scene_to_pipeline_request(
     return PipelineEditRequest(
         # NOTE: the planner Character dataclass field is hero_photo_url (story_planner.py).
         # Prefer a nude/undressed base (nude_base_url) as the swap SOURCE so a new garment
-        # renders onto a clean body instead of fighting the hero's existing clothes; None
-        # today (populated by a later agent) -> falls back to the hero photo unchanged.
-        source_image=getattr(character, "nude_base_url", None) or character.hero_photo_url,
+        # renders onto a clean body instead of fighting the hero's existing clothes — but
+        # ONLY for a POSED item (nude_source, above). A pose-less item has no pose step to
+        # stamp the hero face, so it falls back to the hero photo (sourceDressed below) to
+        # avoid publishing the nude base's un-swapped random face. No nude base -> hero.
+        source_image=(
+            getattr(character, "nude_base_url", None) if nude_source
+            else character.hero_photo_url
+        ),
         # WS-S: the ReActor face donor is ALWAYS the sharp original hero photo (never the
         # nude-base/intermediate source_image above), so the pose step swaps the face
         # from a clean image instead of a multiply-edited one. None-safe: getattr keeps
@@ -370,6 +411,14 @@ def scene_to_pipeline_request(
         lighting=_val(scene.lighting),
         timeOfDay=_val(scene.time_of_day),
         location=_val(scene.location),
+        # WS-STAGE / WS-SD: the scenery anchor for THIS (location, pose-class). In the
+        # multi-step path the pose step appends it to the target-pose sentence so the full
+        # re-diffusion names the seat/surface; in single-pass it already rides the composed
+        # scene text above (build_pose_prompt skips the duplicate append when scene_text is
+        # present). When a validated Venice direction exists AND fits stagingText's 160-char
+        # cap it stands in for the bare staging phrase here too (a longer direction rides the
+        # scene text alone — see bg_staging/pose_staging above). None threads nothing.
+        stagingText=pose_staging,
         # D1: concrete per-character identity anchors (hair/eyes/build), threaded to
         # BOTH the pose and outfit steps. Unlike lighting/timeOfDay/location above,
         # this is NOT identity-free — it carries the character's own attribute
@@ -392,4 +441,10 @@ def scene_to_pipeline_request(
         # item (see single_pass_edit above); the pipeline worker then runs ONE pose
         # step that dresses + re-scenes from the source. False -> legacy multi-step.
         singlePassEdit=single_pass_edit,
+        # No-pose face guard: True only when a nude base EXISTS but this item has no pose
+        # step, so the source falls back to the (dressed) hero photo — the outfit builder
+        # then uses its GARMENT/replace dressed-source mode and the composite-back keeps the
+        # hero's own face. False for every other item (posed nude-base items, hero-only
+        # characters), byte-identical to before.
+        sourceDressed=source_dressed,
     )

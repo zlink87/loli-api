@@ -4,8 +4,9 @@ Nude-base generation endpoints — ADMIN ONLY.
 WS-N (default, settings.NUDE_BASE_T2I=True): the nude base is now GENERATED from
 scratch (text-to-image, like char-gen) from the character's locked identity + a
 forced NAKED clause + a neutral standing full-body pose + a plain studio backdrop
-+ the NATURAL photo style, at a deterministic per-character seed, then ONE ReActor
-face pass swaps the ORIGINAL hero face onto it — see workers/nude_base_worker.py
++ the NATURAL photo style, at a deterministic per-character seed; an OPTIONAL ReActor
+face pass (settings.NUDE_BASE_FACE_SWAP, default OFF) can then swap the ORIGINAL hero
+face onto it, but by default the t2i output IS the base — see workers/nude_base_worker.py
 (_submit_t2i_nude_base below). This is pose-independent and mask-free, so an unusual
 hero crop can no longer make the model paint a second person into a mask (the old
 two-headed composite that poisoned every downstream batch photo). The LEGACY
@@ -199,9 +200,11 @@ async def _finalize_if_ready(nb: NudeBaseRead) -> NudeBaseRead:
 async def _submit_t2i_nude_base(character, character_id: str, nude_base_store, user_id: str):
     """
     NEW default path (settings.NUDE_BASE_T2I=True): a deterministic text-to-image
-    base render + a single ReActor face lock from the ORIGINAL hero, run as ONE
-    `nude_base` job (workers/nude_base_worker.py chains the two GPU steps). The seed
-    is a stable zlib.crc32 of the character id, so a regenerate reproduces the exact
+    base render, run as ONE `nude_base` job (workers/nude_base_worker.py). The ReActor
+    face lock from the ORIGINAL hero is OPTIONAL and OFF by default
+    (settings.NUDE_BASE_FACE_SWAP=False), so by default the t2i output IS the base — the
+    published batch faces always come from the hero via the pose-step ReActor anyway. The
+    seed is a stable zlib.crc32 of the character id, so a regenerate reproduces the exact
     same base body geometry. Records a `pending` base row against the created job.
     """
     if get_job_manager().is_queue_full(job_type="nude_base"):
@@ -222,7 +225,7 @@ async def _submit_t2i_nude_base(character, character_id: str, nude_base_store, u
     )
     logger.info(
         f"[NUDE-BASE] character {character_id} -> job {job.job_id} "
-        f"(t2i base + ReActor face lock, seed={seed})"
+        f"(t2i base; face lock optional via NUDE_BASE_FACE_SWAP, default off, seed={seed})"
     )
     return nb
 
@@ -318,10 +321,11 @@ async def generate_nude_base(
             return _status_response(existing)
 
     # Two generation paths, selected by settings.NUDE_BASE_T2I:
-    #   * NEW (default): a text-to-image base render + ReActor face lock, run as ONE
-    #     `nude_base` job (workers/nude_base_worker.py). Pose-independent and mask-
-    #     free, so an unusual hero crop can no longer produce the old two-headed
-    #     edit-based composite that poisoned every downstream batch photo.
+    #   * NEW (default): a text-to-image base render (with an OPTIONAL ReActor face lock,
+    #     NUDE_BASE_FACE_SWAP, default OFF), run as ONE `nude_base` job
+    #     (workers/nude_base_worker.py). Pose-independent and mask-free, so an unusual hero
+    #     crop can no longer produce the old two-headed edit-based composite that poisoned
+    #     every downstream batch photo.
     #   * LEGACY (flag False): the edit-based undressing on the hero (outfit step in
     #     "nude_base" prompt mode + background step, via the pipeline engine) — UNCHANGED.
     # Both record a `pending` base row against the created job; GET reconciles it on read.

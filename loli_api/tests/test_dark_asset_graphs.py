@@ -1,5 +1,5 @@
 """
-DARK ASSETS workstream (07-14): three new ComfyUI graphs + one new
+DARK ASSETS workstream (07-14): four new ComfyUI graphs + one new
 ``prepare_pose_workflow`` kwarg. Everything here ships DARK — zero runtime
 behavior change until ops uploads the model files to the RunPod volume and an
 operator flips an env var (see docs/RUNPOD_SETUP.md "Dark quality assets").
@@ -8,18 +8,23 @@ New graphs covered:
   * workflows/pose_2511_skinlora_API.json                    (A: skin LoRA, pose)
   * workflows/outfit_cropstitch_2511full_skinlora_API.json    (A: skin LoRA, outfit)
   * workflows/pose_2511_faceboost_API.json                    (B: GPEN ReActorFaceBoost)
+  * workflows/pose_2511_skinlora_faceboost_API.json           (A+B combined, pose)
 
 Covers:
-  * all three parse as JSON with no dangling node-id references;
+  * all four parse as JSON with no dangling node-id references;
   * the skin-LoRA graphs wire node 306 (LoraLoaderModelOnly, qwen-edit-skin.safetensors
     @ strength_model 1.0) onto node 305's output, node 305 stays softened to 0.65, and
     the node immediately downstream of the LoRA chain is repointed at ["306", 0];
-  * both pose variants (skinlora + faceboost) inherit the CURRENT base pose graph's
-    node 301 (UNETLoader, 2511 marker) and node 200 baked ReActor values
-    (codeformer_weight 0.7 / face_restore_visibility 0.65) untouched, and still trip
-    ``_is_pose_2511_template``;
+  * all three pose variants (skinlora + faceboost + the skinlora+faceboost combo)
+    inherit the CURRENT base pose graph's node 301 (UNETLoader, 2511 marker) and node
+    200 baked ReActor values (codeformer_weight 0.7 / face_restore_visibility 0.65)
+    untouched, and still trip ``_is_pose_2511_template``;
   * the faceboost graph wires node 215 (ReActorFaceBoost) into node 200's optional
     face_boost input;
+  * the combined graph (pose_2511_skinlora_faceboost_API.json) carries BOTH halves at
+    once: it is the skinlora graph (node 306 @ 1.0, node 305 softened to 0.65, sampler
+    reading ["306", 0]) PLUS node 215 exactly as authored on the faceboost graph, wired
+    into node 200's face_boost input — neither half clobbers the other;
   * ``prepare_pose_workflow(face_restore_model=...)`` writes node 200's
     face_restore_model field when truthy, and is a true no-op (byte-identical) when
     omitted/None/empty or when node 200 is absent.
@@ -41,11 +46,14 @@ _NEW_GRAPHS = (
     "pose_2511_skinlora_API.json",
     "outfit_cropstitch_2511full_skinlora_API.json",
     "pose_2511_faceboost_API.json",
+    "pose_2511_skinlora_faceboost_API.json",
 )
 _POSE_VARIANT_GRAPHS = (
     "pose_2511_skinlora_API.json",
     "pose_2511_faceboost_API.json",
+    "pose_2511_skinlora_faceboost_API.json",
 )
+_COMBINED_GRAPH = "pose_2511_skinlora_faceboost_API.json"
 
 
 def _load(name: str) -> dict:
@@ -66,7 +74,7 @@ def _dangling_refs(g: dict):
 
 
 # ---------------------------------------------------------------------------
-# All three new graphs: valid JSON, no dangling node refs
+# All four new graphs: valid JSON, no dangling node refs
 # ---------------------------------------------------------------------------
 def test_new_graphs_parse_as_valid_json():
     for name in _NEW_GRAPHS:
@@ -150,10 +158,11 @@ def test_skinlora_graphs_leave_realism_lora_and_unet_untouched():
 
 
 # ---------------------------------------------------------------------------
-# Both pose variants inherit the CURRENT base graph's node 301 marker + node 200
-# baked ReActor values (codeformer_weight 0.7 / face_restore_visibility 0.65) —
-# these were JUST updated on pose_2511_API.json by a separate, already-finished
-# workstream, so the clones must carry the NEW values, not stale ones.
+# All pose variants (skinlora, faceboost, and the skinlora+faceboost combo) inherit
+# the CURRENT base graph's node 301 marker + node 200 baked ReActor values
+# (codeformer_weight 0.7 / face_restore_visibility 0.65) — these were JUST updated
+# on pose_2511_API.json by a separate, already-finished workstream, so the clones
+# must carry the NEW values, not stale ones.
 # ---------------------------------------------------------------------------
 def test_pose_variants_keep_the_2511_template_marker():
     for name in _POSE_VARIANT_GRAPHS:
@@ -203,6 +212,72 @@ def test_faceboost_graph_has_no_node_306_skin_lora_splice():
     assert "306" not in g
     assert g["305"]["inputs"]["strength_model"] == 0.9  # base value, not softened
     assert g["3"]["inputs"]["model"] == ["305", 0]
+
+
+# ---------------------------------------------------------------------------
+# A+B combined: pose_2511_skinlora_faceboost_API.json = the skinlora graph (node
+# 306 @ 1.0, node 305 softened to 0.65, sampler on ["306", 0]) PLUS node 215
+# (ReActorFaceBoost, copied verbatim from the faceboost graph) wired into node
+# 200's face_boost input — both halves present at once, neither clobbering the
+# other.
+# ---------------------------------------------------------------------------
+def test_combined_graph_has_skinlora_half_wired_same_as_skinlora_graph():
+    g = _load(_COMBINED_GRAPH)
+    assert g["306"]["class_type"] == "LoraLoaderModelOnly"
+    assert g["306"]["inputs"]["lora_name"] == "qwen-edit-skin.safetensors"
+    assert g["306"]["inputs"]["strength_model"] == 1.0
+    assert g["306"]["inputs"]["model"] == ["305", 0]
+    assert g["305"]["inputs"]["strength_model"] == 0.65
+    assert g["3"]["class_type"] == "KSampler"
+    assert g["3"]["inputs"]["model"] == ["306", 0]
+    # Node 305 must have exactly ONE consumer (node 306) — same invariant as the
+    # standalone skinlora graph; the face-boost splice must not add a second reader.
+    consumers_of_305 = [
+        f"{nid}.{k}"
+        for nid, n in g.items()
+        for k, v in n.get("inputs", {}).items()
+        if v == ["305", 0]
+    ]
+    assert consumers_of_305 == ["306.model"]
+
+
+def test_combined_graph_has_faceboost_half_wired_same_as_faceboost_graph():
+    g = _load(_COMBINED_GRAPH)
+    n = g["215"]
+    assert n["class_type"] == "ReActorFaceBoost"
+    i = n["inputs"]
+    assert i["enabled"] is True
+    assert i["boost_model"] == "GPEN-BFR-512.onnx"
+    assert i["interpolation"] == "Bicubic"
+    assert i["visibility"] == 1.0
+    assert i["codeformer_weight"] == 0.5
+    assert i["restore_with_main_after"] is False
+    assert g["200"]["inputs"]["face_boost"] == ["215", 0]
+    # Everything else on node 200 is untouched vs. the skinlora base graph.
+    r = g["200"]["inputs"]
+    assert r["source_image"] == ["210", 0]
+    assert r["input_image"] == ["8", 0]
+    assert r["codeformer_weight"] == 0.7
+    assert r["face_restore_visibility"] == 0.65
+
+
+def test_combined_graph_leaves_realism_lora_and_unet_untouched():
+    g = _load(_COMBINED_GRAPH)
+    assert g["304"]["inputs"]["lora_name"] == "URP_20.safetensors"
+    assert g["304"]["inputs"]["strength_model"] == 0.8
+    assert g["304"]["inputs"]["model"] == ["301", 0]
+    assert g["301"]["class_type"] == "UNETLoader"
+    assert g["301"]["inputs"]["unet_name"] == "qwen_image_edit_2511_fp8mixed.safetensors"
+
+
+def test_combined_graph_both_halves_coexist_without_clobbering():
+    # Sanity check that combining the two variants didn't silently drop either
+    # half: the skin-LoRA chain still reaches the sampler AND the face-boost node
+    # still feeds node 200, at the same time, on the SAME graph.
+    g = _load(_COMBINED_GRAPH)
+    assert "306" in g and "215" in g
+    assert g["3"]["inputs"]["model"] == ["306", 0]
+    assert g["200"]["inputs"]["face_boost"] == ["215", 0]
 
 
 # ---------------------------------------------------------------------------

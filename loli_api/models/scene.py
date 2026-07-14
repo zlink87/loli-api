@@ -86,6 +86,22 @@ class SceneSpec(BaseModel):
             "None (legacy jsonb without this key parses back to enum-description prose)."
         ),
     )
+    staging: Optional[str] = Field(
+        default=None,
+        max_length=160,
+        description=(
+            "Scenery-anchored staging fragment naming the concrete surface/furniture the "
+            "pose sits/stands/lies on for THIS (location, pose-class) — e.g. 'perched on a "
+            "bar stool at the counter' for a sitting pose at a nightclub. Assigned "
+            "deterministically by the planner (validate_and_repair) AFTER pose/location "
+            "repairs settle, from scene_vocab.STAGING_PHRASES, so the full-frame pose "
+            "re-diffusion never improvises an absurd seat. Scenery ONLY — never identity/"
+            "clothing/nudity. Folded into the background scene text (after the location "
+            "phrase) and the pose step's target-pose sentence. Defaults None (legacy jsonb "
+            "without this key parses back to no staging; a pose-class with no phrase pool "
+            "at its location stays None — a clean skip)."
+        ),
+    )
     outfit_detail: Optional[str] = Field(
         default=None,
         max_length=160,
@@ -110,6 +126,32 @@ class SceneSpec(BaseModel):
         description=(
             "Facial expression/mood for this photo (e.g. 'soft sleepy smile'), routed to the pose "
             "step. Expression/mood ONLY — never facial features (eyes, lips, face shape)."
+        ),
+    )
+    scene_direction: Optional[str] = Field(
+        default=None,
+        max_length=340,
+        description=(
+            "Venice-authored photographic staging for THIS photo (1-3 sentences): the concrete "
+            "furniture/objects, where in the space she is, and the camera feel — HOW IT LOOKS, "
+            "on top of the deterministically-decided WHAT (outfit/pose/location/nudity/time). "
+            "Populated AFTER validate_and_repair from the FINAL scene facts (services."
+            "scene_direction.apply_scene_directions), hard-validated to carry NO identity/"
+            "appearance, no clothing outside the item's outfit, no foreign-location tokens, no "
+            "interacting people (anonymous background only at public venues), and no narrative. "
+            "When present the scene mapper uses it INSTEAD of the bare `staging` phrase in the "
+            "composed scene text. None (deterministic provider / a per-item validation fallback / "
+            "legacy jsonb without this key) -> the mapper falls back to `staging` unchanged."
+        ),
+    )
+    direction_source: Optional[str] = Field(
+        default=None,
+        description=(
+            "Provenance of scene_direction: 'venice' (LLM wrote + passed validation), 'fallback' "
+            "(Venice was attempted but this item failed validation or the whole call errored/timed "
+            "out -> kept its staging phrase), or None (the deterministic provider skipped Venice "
+            "entirely / legacy jsonb). Denormalized for after-the-fact visibility, like the batch's "
+            "planner_provider."
         ),
     )
 

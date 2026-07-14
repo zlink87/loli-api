@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth.dependencies import get_current_user
-from models.enums import PoseType, JobStatus, NudityLevel
+from models.enums import PoseType, JobStatus, NudityLevel, OutfitType
 from models.requests import PoseEditRequest
 from models.responses import JobCreateResponse
 from services import pose_assets
@@ -89,9 +89,46 @@ def get_notification_service() -> Optional[NotificationService]:
     return _notification_service
 
 
+# State-of-UNDRESS lead words: text that BEGINS with one of these describes a naked-class
+# state of dress (NAKED-tier continuity prose), not a garment. SINGLE source of truth for
+# both the strict-solo prefix fallback (_pose_keeps_strict_solo) and build_pose_prompt's
+# continuity phrasing below — they used to carry two hand-maintained tuples that diverged.
+_UNDRESS_PREFIXES = ("completely naked", "topless", "fully nude", "nude", "naked")
+
+
 # ---------------------------------------------------------------------------
 # Helper functions (used by PoseBackgroundWorker via import)
 # ---------------------------------------------------------------------------
+def _pose_keeps_strict_solo(
+    nudity_level: Optional[NudityLevel],
+    outfit_text: Optional[str],
+    outfit_enum: Optional[str] = None,
+) -> bool:
+    """
+    WS-STAGE Part B nudity guard: True when the item is explicit enough that even a PUBLIC
+    venue must keep the STRICT solo clause — we never place a crowd, even a soft-focus one,
+    around explicit content. True when the nudity level is HIGH, OR the outfit is the NAKED
+    enum.
+
+    The outfit is checked by ENUM VALUE (``outfit_enum``) when the caller threads it (the
+    batch pipeline does), which is robust even when outfit_continuity_text PREPENDS a caption
+    detail — "a sheer open wrap, topless…" — that would defeat a prose-prefix sniff of
+    ``outfit_text``. Only when ``outfit_enum`` is None (interactive callers that don't thread
+    it) does it FALL BACK to sniffing ``outfit_text``'s leading state-of-undress word. Every
+    other case -> False (the public-venue crowd clause may apply). None/unknown nudity + a
+    normal garment -> False.
+    """
+    nl = str(getattr(nudity_level, "value", nudity_level) or "").lower()
+    if nl == NudityLevel.HIGH.value:
+        return True
+    if outfit_enum is not None:
+        return outfit_enum == OutfitType.NAKED.value
+    # Fallback (interactive callers): sniff the continuity prose's leading state-of-undress
+    # word. "wearing …" is a DRESSED garment and is deliberately NOT in _UNDRESS_PREFIXES.
+    ot = (outfit_text or "").strip().lower()
+    return ot.startswith(_UNDRESS_PREFIXES)
+
+
 def build_pose_prompt(
     pose: PoseType,
     activity: Optional[str] = None,
@@ -104,6 +141,9 @@ def build_pose_prompt(
     identity_anchors: Optional[str] = None,
     scene_text: Optional[str] = None,
     dress_mode: bool = False,
+    staging: Optional[str] = None,
+    nudity_level: Optional[NudityLevel] = None,
+    outfit_enum: Optional[str] = None,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
@@ -223,6 +263,28 @@ def build_pose_prompt(
             keep. The NAKED/undress-prose branch is unaffected: "In image 1 she is
             {prose}; keep her state of dress exactly as in image 1." is literally true
             against a nude-base source, so it stays verbatim in both modes.
+        staging: Optional scenery-anchored fragment (e.g. SceneSpec.staging via
+            PipelineEditRequest.stagingText — "perched on a bar stool at the counter")
+            naming the concrete surface/furniture the pose uses. WS-STAGE: with only the
+            venue named ("a vibrant nightclub…") the full-frame re-diffusion improvised
+            absurd surfaces (sitting on the bar counter); this names the seat/surface
+            instead. Appended to the "The target pose is: {…}" sentence — but ONLY in the
+            MULTI-step path (``scene_text`` is None). In single-pass the staging already
+            rides the composed "Place her in: {scene_text}" clause, so appending here too
+            would DUPLICATE it; the append is suppressed there. None appends nothing.
+        nudity_level: Optional NudityLevel (or its value) for the WS-STAGE Part-B solo
+            policy. A public-venue scene normally swaps the strict "completely alone" solo
+            clause for a "clear subject / anonymous strangers in the soft-focus background"
+            clause — BUT a HIGH nudity level (or a naked-class ``outfit_text``) KEEPS the
+            strict clause everywhere, so a crowd is never placed around explicit content.
+            None -> treated as non-explicit (interactive callers pass none; their location
+            is also None -> strict clause anyway).
+        outfit_enum: Optional outfit ENUM VALUE (e.g. PipelineEditRequest.outfit's value)
+            for the WS-STAGE Part-B solo policy. Threaded by the batch pipeline so
+            _pose_keeps_strict_solo can detect the NAKED tier by its enum value rather than
+            by prose-prefix — robust even when outfit_continuity_text prepends a caption
+            detail ("a sheer open wrap, topless…") that a prefix sniff would miss. None
+            (interactive callers) falls back to sniffing ``outfit_text``, unchanged behavior.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
@@ -234,6 +296,13 @@ def build_pose_prompt(
     pose_detail_clean = sv.strip_companions(pose_detail)
     if pose_detail_clean and pose_detail_clean.strip():
         desc = pose_detail_clean.strip()
+    # WS-STAGE: name the concrete surface/furniture in the target-pose sentence so the
+    # full re-diffusion doesn't improvise an absurd seat. MULTI-step path ONLY: in
+    # single-pass (scene_text set) the staging already rides the "Place her in:
+    # {scene_text}" clause below, so appending here too would duplicate it.
+    staging_clean = (staging or "").strip()
+    if staging_clean and not (scene_text and scene_text.strip()):
+        desc = f"{desc}, {staging_clean}"
     # Keep-the-background instruction (below) REPLACES the former "Adapt the background
     # and environment to suit the pose naturally." — that sentence was the licence the
     # full re-diffusion used to re-invent the location (bedroom -> road).
@@ -278,7 +347,10 @@ def build_pose_prompt(
     # to keep; the default keeps state-of-dress continuity (an outfit step already dressed).
     if outfit_text and outfit_text.strip():
         garment = outfit_text.strip()
-        if garment.lower().startswith(("completely naked", "topless", "wearing", "nude")):
+        # Text that already leads with a state-of-dress word (a naked-class _UNDRESS_PREFIXES
+        # lead, or the dressed "wearing …") is phrased "she is {text}" as-is; anything else is
+        # a bare garment that gets the "she is wearing {text}" lead (branch 3).
+        if garment.lower().startswith(_UNDRESS_PREFIXES + ("wearing",)):
             prompt += (
                 f" In image 1 she is {garment}; keep her state of dress exactly as "
                 f"in image 1."
@@ -300,7 +372,23 @@ def build_pose_prompt(
     # de-bloat (5b): lighting + time-of-day merge into a single clause. Composing the
     # tail as part of the solo sentence also drops the old "…no other people., while…"
     # period-then-comma artifact. Every tail bit is non-empty (guarded), so no ", ,".
-    solo = "She is completely alone in the frame — exactly one person, no other people"
+    #
+    # WS-STAGE Part B: an inherently-populated PUBLIC venue makes a strict "completely
+    # alone" instruction self-contradictory (the model rendered a nightclub crowd anyway),
+    # so there she becomes the clear subject with anonymous strangers kept in the
+    # soft-focus background. Private venues keep the STRICT clause. NUDITY GUARD: HIGH
+    # nudity or a naked-class outfit KEEPS strict solo everywhere — never a crowd around
+    # explicit content. location None/unknown (interactive callers) -> private -> strict.
+    if sv.is_public_venue(location) and not _pose_keeps_strict_solo(
+        nudity_level, outfit_text, outfit_enum
+    ):
+        solo = (
+            "She is the clear subject, sharp and in focus; any other people are anonymous "
+            "strangers in the soft-focus background, never interacting with her, never "
+            "touching her, no other person near the camera"
+        )
+    else:
+        solo = "She is completely alone in the frame — exactly one person, no other people"
     tail: List[str] = []
     # Defensive companion scrub before the activity clause folds in (a stray
     # "… with a partner" would otherwise re-add the extra person the solo forbids).

@@ -275,13 +275,43 @@ def test_outfit_prompt_mode_defaults_to_replace():
 # B2: additive dressing on a nude base overrides the (incoherent) replace mode
 # ---------------------------------------------------------------------------
 def test_nude_base_source_forces_dress_mode_for_garment():
-    # A populated nude_base_url makes the swap SOURCE a bare body, where "replace"
-    # ("remove the current outfit…") is incoherent — the mapper forces "dress".
+    # A populated nude_base_url makes the swap SOURCE a bare body FOR A POSED item, where
+    # "replace" ("remove the current outfit…") is incoherent — the mapper forces "dress".
+    # (A pose is required now: a pose-less item falls back to the hero source, see
+    # test_no_pose_nude_base_falls_back_to_hero_source.)
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT), BatchControls()
+    )
+    assert req.source_image == "https://x.supabase.co/nude.png"
+    assert req.outfitPromptMode == "dress"  # overrides controls' "replace"
+
+
+def test_no_pose_nude_base_falls_back_to_hero_source():
+    # No pose step means no ReActor pass to stamp the hero face; the outfit/background steps
+    # composite the SOURCE face back byte-exact. The nude base carries a random t2i face
+    # (NUDE_BASE_FACE_SWAP off), so a pose-less item must source from the HERO instead —
+    # flagged sourceDressed so the outfit builder uses its dressed-source (replace) mode,
+    # the pre-nude-base flow whose composite-back keeps the hero's own face.
     char = _character()
     char.nude_base_url = "https://x.supabase.co/nude.png"
     req = scene_to_pipeline_request(char, _scene(outfit=OutfitType.BUSINESS_SUIT), BatchControls())
+    assert req.source_image == char.hero_photo_url
+    assert req.sourceDressed is True
+    assert req.outfitPromptMode != "dress"  # hero is dressed -> replace, not additive dress
+
+
+def test_posed_nude_base_still_sources_from_nude_base():
+    # With a pose present the pose step stamps the hero face, so a posed item keeps the nude
+    # base as its swap source (unchanged behavior) and is NOT flagged sourceDressed.
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT), BatchControls()
+    )
     assert req.source_image == "https://x.supabase.co/nude.png"
-    assert req.outfitPromptMode == "dress"  # overrides controls' "replace"
+    assert req.sourceDressed is False
 
 
 def test_no_nude_base_keeps_controls_prompt_mode():

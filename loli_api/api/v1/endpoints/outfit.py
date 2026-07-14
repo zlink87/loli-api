@@ -239,8 +239,17 @@ ONE_PIECE_GARMENT_OUTFITS: frozenset = frozenset(
 
 # Enum-gated constant clause (no free text) appended on the dressed branch of build_prompt
 # for ONE_PIECE_GARMENT_OUTFITS. Counters the "top + skirt" split the edit model falls into
-# on flowing/wrap one-piece dresses.
-ONE_PIECE_GARMENT_CLAUSE = "the outfit is a single one-piece garment, not a top and skirt"
+# on flowing/wrap one-piece dresses. Plain "one-piece garment" alone leans on the edit
+# model's swimwear/bodysuit training association -- live bug (07-14): bodycon_dress
+# rendered as a navy SWIMSUIT/leotard instead of a dress. The explicit ban-list below
+# keeps the anti-separates intent (still says "not a top and skirt") while ruling out
+# that misreading. Kept garment-neutral (no "dress"/"skirt" noun) since this same clause
+# also gates the one-piece CULTURAL outfits (kimono/sari/cheongsam/hanbok), which are
+# not dress-shaped.
+ONE_PIECE_GARMENT_CLAUSE = (
+    "the outfit is a single one-piece garment with a continuous silhouette, "
+    "not a top and skirt, and not a bodysuit, leotard, or swimsuit"
+)
 
 
 def build_prompt(

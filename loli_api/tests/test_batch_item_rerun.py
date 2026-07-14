@@ -27,6 +27,7 @@ from models.enums import NudityLevel, OutfitType, LocationType, PoseType
 from models.batch import BatchControls, BatchItemEdit, BatchItemRerun
 from models.scene import SceneSpec
 from services import story_planner
+from services import scene_vocab as sv
 from services.batch_store import _row_to_item, _row_to_batch
 from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
 from api.v1.endpoints import batches as ep
@@ -220,6 +221,86 @@ def test_edit_near_miss_enum_repaired():
         _scene_spec(), {"location": "home_kitchen"}, BatchControls()
     )
     assert updated.location == LocationType.HOME_KITCHEN
+
+
+_STALE_DIRECTION = "A blurred crowd fills the neon-lit floor behind the low booth."
+
+
+def test_edit_fact_change_clears_stale_scene_direction():
+    # A location change invalidates a Venice direction authored for the OLD place (it names a
+    # crowd that only made sense at the nightclub) -> both direction fields are cleared, so the
+    # mapper falls back to the freshly re-derived staging.
+    stored = _scene_spec(
+        pose=PoseType.SITTING, location=LocationType.NIGHTCLUB,
+        staging="perched on a bar stool at the counter",
+        scene_direction=_STALE_DIRECTION, direction_source="venice",
+    )
+    updated = story_planner.apply_item_scene_edit(
+        stored, {"location": "home_bedroom"}, BatchControls()
+    )
+    assert updated.location == LocationType.HOME_BEDROOM
+    assert updated.scene_direction is None
+    assert updated.direction_source is None
+
+
+def test_edit_fact_change_restages_from_new_location_deterministically():
+    # Staging is re-derived from the NEW (location, pose) and stays class-coherent (a sitting
+    # scene draws a sitting anchor from the new location's pool), never the stale phrase.
+    stored = _scene_spec(
+        pose=PoseType.SITTING, location=LocationType.NIGHTCLUB,
+        staging="perched on a bar stool at the counter",
+    )
+    updated = story_planner.apply_item_scene_edit(
+        stored, {"location": "home_bedroom"}, BatchControls()
+    )
+    options = sv.staging_options(LocationType.HOME_BEDROOM, PoseType.SITTING)
+    assert updated.staging in options
+    assert updated.staging != "perched on a bar stool at the counter"
+    # No RNG -> a repeated identical edit yields the exact same staging.
+    again = story_planner.apply_item_scene_edit(
+        stored, {"location": "home_bedroom"}, BatchControls()
+    )
+    assert again.staging == updated.staging
+
+
+def test_edit_pose_change_restages_to_new_pose_class():
+    # Changing the POSE re-derives staging into the NEW pose-class's pool at the same location.
+    stored = _scene_spec(
+        pose=PoseType.SITTING, location=LocationType.HOME_BEDROOM,
+        staging="sitting on the edge of the bed",
+    )
+    updated = story_planner.apply_item_scene_edit(
+        stored, {"pose": "lying_back"}, BatchControls()
+    )
+    assert sv.pose_class(updated.pose) == sv.POSE_CLASS_LYING
+    assert updated.staging in sv.staging_options(LocationType.HOME_BEDROOM, PoseType.LYING_BACK)
+
+
+def test_edit_clearing_pose_drops_staging():
+    # Clearing the pose (no pose step) buckets to OTHER -> no staging anchor.
+    stored = _scene_spec(
+        pose=PoseType.SITTING, location=LocationType.HOME_BEDROOM,
+        staging="sitting on the edge of the bed",
+    )
+    updated = story_planner.apply_item_scene_edit(stored, {"pose": None}, BatchControls())
+    assert updated.pose is None
+    assert updated.staging is None
+
+
+def test_edit_freetext_only_leaves_direction_and_staging_untouched():
+    # An expression-only (non-fact) edit must NOT clear the direction or re-derive staging.
+    stored = _scene_spec(
+        pose=PoseType.SITTING, location=LocationType.NIGHTCLUB,
+        staging="perched on a bar stool at the counter",
+        scene_direction=_STALE_DIRECTION, direction_source="venice",
+    )
+    updated = story_planner.apply_item_scene_edit(
+        stored, {"expression": "a soft knowing smile"}, BatchControls()
+    )
+    assert updated.staging == "perched on a bar stool at the counter"
+    assert updated.scene_direction == _STALE_DIRECTION
+    assert updated.direction_source == "venice"
+    assert "soft knowing smile" in (updated.expression or "").lower()
 
 
 # --------------------------------------------------------------------------- #
