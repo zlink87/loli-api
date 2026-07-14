@@ -44,7 +44,7 @@ from services.story_planner import Character, DeterministicScenePlanner, validat
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-def _settings(provider="venice", key="test-key"):
+def _settings(provider="venice", key="test-key", chunk_size=3, max_conc=8):
     return SimpleNamespace(
         SCENE_DIRECTION_PROVIDER=provider,
         VENICE_API_KEY=key,
@@ -54,7 +54,14 @@ def _settings(provider="venice", key="test-key"):
         SCENE_DIRECTION_TEMPERATURE=0.7,
         SCENE_DIRECTION_MAX_TOKENS=4000,
         SCENE_DIRECTION_TIMEOUT_SECONDS=20.0,
+        SCENE_DIRECTION_CHUNK_SIZE=chunk_size,
+        SCENE_DIRECTION_MAX_CONCURRENCY=max_conc,
     )
+
+
+def _lines(pairs):
+    """Build the new LINE-based Venice response: one `<index>. <direction>` line per pair."""
+    return "\n".join(f"{i}. {d}" for i, d in pairs)
 
 
 def _scene(i, location, outfit=None, outfit_detail=None, pose=None, staging=None,
@@ -236,12 +243,9 @@ def test_apply_happy_path_sets_venice_source():
         _scene(1, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
                PoseType.LYING_BACK, staging="lying back on the pillows", nudity=NudityLevel.HIGH),
     ]
-    content = json.dumps([
-        {"index": 0, "direction": _VALID_1},
-        {"index": 1, "direction": _VALID_3},
-    ])
+    content = _lines([(0, _VALID_1), (1, _VALID_3)])
     stub = _run_apply(scenes, BatchControls(base_seed=1), _settings(), content)
-    assert stub.calls == 1                                        # ONE batched call
+    assert stub.calls == 1                                        # ONE batched call (fits one chunk)
     assert scenes[0].scene_direction == _VALID_1 and scenes[0].direction_source == "venice"
     assert scenes[1].scene_direction == _VALID_3 and scenes[1].direction_source == "venice"
 
@@ -253,9 +257,9 @@ def test_apply_per_item_validation_failure_falls_back_individually():
         _scene(1, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
                staging="lying back on the pillows"),
     ]
-    content = json.dumps([
-        {"index": 0, "direction": _VALID_1},              # valid
-        {"index": 1, "direction": _INVALID_IDENTITY},     # fails validation -> fallback
+    content = _lines([
+        (0, _VALID_1),              # valid
+        (1, _INVALID_IDENTITY),     # fails validation -> fallback
     ])
     _run_apply(scenes, BatchControls(base_seed=1), _settings(), content)
     assert scenes[0].scene_direction == _VALID_1 and scenes[0].direction_source == "venice"
@@ -354,9 +358,9 @@ def test_apply_per_item_identity_failure_records_rule_others_none():
         _scene(1, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
                staging="lying back on the pillows"),
     ]
-    content = json.dumps([
-        {"index": 0, "direction": _VALID_1},              # valid
-        {"index": 1, "direction": _INVALID_IDENTITY},     # fails the identity rule
+    content = _lines([
+        (0, _VALID_1),              # valid
+        (1, _INVALID_IDENTITY),     # fails the identity rule
     ])
     _run_apply(scenes, BatchControls(base_seed=1), _settings(), content)
     assert scenes[0].direction_source == "venice" and scenes[0].direction_error is None
@@ -367,21 +371,20 @@ def test_apply_happy_path_leaves_direction_error_none():
     scenes = [_scene(0, LocationType.NIGHTCLUB, OutfitType.BODYCON_DRESS, "black bodycon dress",
                      staging="perched on a bar stool at the counter")]
     _run_apply(scenes, BatchControls(base_seed=1), _settings(),
-               json.dumps([{"index": 0, "direction": _VALID_1}]))
+               _lines([(0, _VALID_1)]))
     assert scenes[0].direction_source == "venice" and scenes[0].direction_error is None
 
 
-def test_apply_bad_json_records_invalid_json_reason():
-    scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter")]
-    _run_apply(scenes, BatchControls(base_seed=1), _settings(), "not json at all { [")
-    assert scenes[0].direction_source == "fallback" and scenes[0].direction_error == "invalid JSON"
-
-
-def test_apply_truncated_response_records_truncated_reason():
-    # A body that STARTS as a JSON array but never closes its bracket = the max_tokens cutoff.
-    scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter")]
-    _run_apply(scenes, BatchControls(base_seed=1), _settings(), '[{"index": 0, "direction": "warm ligh')
-    assert scenes[0].direction_source == "fallback" and scenes[0].direction_error == "truncated response"
+def test_apply_unparseable_response_records_reason():
+    # Any non-empty body with no parseable `<index>. <direction>` line -> the single
+    # "unparseable response" reason. Under the line format there is no truncated-vs-invalid
+    # distinction any more (the old truncated-JSON test was folded in here). Both a prose body
+    # and a JSON-looking body fail the same way.
+    for content in ("not a single directive line here", '[{"index": 0, "direction": "warm ligh'):
+        scenes = [_scene(0, LocationType.NIGHTCLUB, staging="perched on a bar stool at the counter")]
+        _run_apply(scenes, BatchControls(base_seed=1), _settings(), content)
+        assert scenes[0].direction_source == "fallback"
+        assert scenes[0].direction_error == "unparseable response", content
 
 
 def test_apply_no_key_records_disabled_reason_but_leaves_source_none():
@@ -407,7 +410,7 @@ def _capture_write_batch_max_tokens(n_items: int, setting_max_tokens: int = 4000
 
     async def _fake_chat(_self, messages, *, temperature=0.7, max_tokens=0, model=None):
         captured["max_tokens"] = max_tokens
-        return "[]", {}
+        return "", {}  # content is irrelevant here; only the captured max_tokens is asserted
 
     writer = sd.SceneDirectionWriter(api_key="k", max_tokens=setting_max_tokens)
     saved = vc.VeniceClient.chat
@@ -429,6 +432,124 @@ def test_write_batch_scales_max_tokens_with_item_count():
 def test_write_batch_uses_setting_floor_for_small_batch():
     # A small batch stays at the configured floor (400 + 130*1 = 530 < 4000).
     assert _capture_write_batch_max_tokens(1) == 4000
+
+
+# ---------------------------------------------------------------------------
+# WS-A line parsing: markdown fences are tolerated
+# ---------------------------------------------------------------------------
+def test_apply_fenced_lines_still_parse():
+    # The model wrapping its lines in a ```-fence must still parse (fence stripped).
+    scenes = [_scene(0, LocationType.NIGHTCLUB, OutfitType.BODYCON_DRESS, "black bodycon dress",
+                     staging="perched on a bar stool at the counter"),
+              _scene(1, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
+                     staging="lying back on the pillows", nudity=NudityLevel.HIGH)]
+    fenced = "```\n" + _lines([(0, _VALID_1), (1, _VALID_3)]) + "\n```"
+    _run_apply(scenes, BatchControls(base_seed=1), _settings(), fenced)
+    assert scenes[0].scene_direction == _VALID_1 and scenes[0].direction_source == "venice"
+    assert scenes[1].scene_direction == _VALID_3 and scenes[1].direction_source == "venice"
+
+
+# ---------------------------------------------------------------------------
+# WS-B chunked parallel generation
+# ---------------------------------------------------------------------------
+def _run_apply_fake_write_batch(scenes, settings, fake):
+    """apply_scene_directions with SceneDirectionWriter.write_batch swapped for `fake`
+    (async (self, items, *, hint) -> Optional[List[Optional[str]]]). Manual save/restore so
+    it runs under the __main__ runner too. Inspect a recorder the caller closed over."""
+    saved = sd.SceneDirectionWriter.write_batch
+    sd.SceneDirectionWriter.write_batch = fake
+    try:
+        asyncio.run(sd.apply_scene_directions(scenes, BatchControls(base_seed=1), settings=settings))
+    finally:
+        sd.SceneDirectionWriter.write_batch = saved
+
+
+def _valid_direction_for(marker: str) -> str:
+    """A rule-passing direction carrying a unique, traceable marker token."""
+    return f"A calm, wide, eye-level frame; the far corner soft in shadow. {marker}"
+
+
+def test_apply_chunks_batch_with_local_indices():
+    # N=8, chunk size 3 -> ceil(8/3)=3 calls, and EACH call's items carry LOCAL indices 0..k-1.
+    scenes = [_scene(i, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
+                     staging=f"seat{i}") for i in range(8)]
+    captured = []  # one local-index list per write_batch call
+
+    async def _fake(self, items, *, hint=""):
+        captured.append([it["index"] for it in items])
+        return [_valid_direction_for(it["staging_suggestion"]) for it in items]
+
+    _run_apply_fake_write_batch(scenes, _settings(chunk_size=3), _fake)
+    assert len(captured) == 3                                     # ceil(8/3) chunks == 3 calls
+    # every call's indices are LOCAL and contiguous from 0 (never the global scene index).
+    assert all(idxs == list(range(len(idxs))) for idxs in captured), captured
+    assert sorted(len(x) for x in captured) == [2, 3, 3]         # 3 + 3 + 2 = 8
+
+
+def test_apply_chunk_failure_isolated_to_its_items():
+    # One chunk fails (returns None); only ITS scenes fall back, the rest are venice.
+    scenes = [_scene(i, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
+                     staging=f"seat{i}") for i in range(8)]
+
+    async def _fake(self, items, *, hint=""):
+        markers = [it["staging_suggestion"] for it in items]
+        if "seat3" in markers:                                    # the middle chunk [3,4,5]
+            return None
+        return [_valid_direction_for(m) for m in markers]
+
+    _run_apply_fake_write_batch(scenes, _settings(chunk_size=3), _fake)
+    for i, s in enumerate(scenes):
+        if i in (3, 4, 5):
+            assert s.scene_direction is None and s.direction_source == "fallback", i
+        else:
+            assert s.direction_source == "venice", i
+
+
+def test_apply_global_mapping_across_chunks():
+    # Each scene ends up with the direction the fake returned for ITS position (chunk
+    # boundaries must not scramble which scene gets which text).
+    scenes = [_scene(i, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
+                     staging=f"seat{i}") for i in range(8)]
+
+    async def _fake(self, items, *, hint=""):
+        return [_valid_direction_for(it["staging_suggestion"]) for it in items]
+
+    _run_apply_fake_write_batch(scenes, _settings(chunk_size=3), _fake)
+    for i, s in enumerate(scenes):
+        assert s.direction_source == "venice", i
+        assert s.scene_direction.endswith(f"seat{i}"), (i, s.scene_direction)
+
+
+def test_apply_single_chunk_when_scenes_fit_size():
+    # Parity with pre-chunking: len(scenes) <= chunk size -> exactly ONE write_batch call.
+    scenes = [_scene(i, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
+                     staging=f"seat{i}") for i in range(3)]
+    calls = {"n": 0}
+
+    async def _fake(self, items, *, hint=""):
+        calls["n"] += 1
+        return [_valid_direction_for(it["staging_suggestion"]) for it in items]
+
+    _run_apply_fake_write_batch(scenes, _settings(chunk_size=3), _fake)
+    assert calls["n"] == 1
+
+
+def test_apply_max_concurrency_caps_inflight_calls():
+    # SCENE_DIRECTION_MAX_CONCURRENCY is read from settings and bounds concurrent calls: with
+    # chunk size 1 (6 chunks) and max_conc 2, at most 2 write_batch calls are ever in flight.
+    scenes = [_scene(i, LocationType.HOME_BEDROOM, OutfitType.SATIN_ROBE, "satin robe",
+                     staging=f"seat{i}") for i in range(6)]
+    state = {"inflight": 0, "peak": 0}
+
+    async def _fake(self, items, *, hint=""):
+        state["inflight"] += 1
+        state["peak"] = max(state["peak"], state["inflight"])
+        await asyncio.sleep(0)                                    # yield so other chunks can start
+        state["inflight"] -= 1
+        return [_valid_direction_for(it["staging_suggestion"]) for it in items]
+
+    _run_apply_fake_write_batch(scenes, _settings(chunk_size=1, max_conc=2), _fake)
+    assert state["peak"] == 2                                     # capped at the configured max
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +583,7 @@ def test_deterministic_fields_unchanged_whether_venice_runs():
     before = _dump_without_direction(base)
     # run the (mocked-valid) writer over a copy and confirm ONLY the direction fields changed.
     copy = [s.model_copy(deep=True) for s in base]
-    content = json.dumps([{"index": i, "direction": _VALID_3} for i in range(len(copy))])
+    content = _lines([(i, _VALID_3) for i in range(len(copy))])
     _run_apply(copy, controls, _settings(), content)
     assert _dump_without_direction(copy) == before
     assert any(s.direction_source for s in copy)  # the writer really ran

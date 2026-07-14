@@ -11,10 +11,12 @@ scene fact — it only decorates the already-final ones, and anything it emits t
 change a fact, name identity/clothing/a different place, or invent people is rejected.)
 
 Shape (mirrors scene_writer / trait_profile_writer):
-  * ONE batched Venice call per batch (a JSON list of every item's facts in, a JSON array
-    of directions out) — never one call per item.
+  * The batch is fanned out into small CONCURRENT Venice calls — contiguous chunks of
+    SCENE_DIRECTION_CHUNK_SIZE items (each item's facts go in as JSON; each direction comes
+    back as one `<index>. <direction>` line). Never one call per item, never one call for the
+    whole batch — a bad chunk only loses its own items.
   * NEVER RAISES: VeniceClient swallows transport errors; this module swallows the rest.
-    Provider "deterministic", no API key, a whole-call error/timeout/bad-JSON, or a single
+    Provider "deterministic", no API key, a whole-chunk error/timeout/unparseable response, or a single
     item that fails validation -> that item keeps its bare `staging` phrase
     (scene_direction=None) and the mapper falls back to it. direction_source records the
     provenance ("venice" | "fallback" | None).
@@ -266,8 +268,11 @@ SCENE_DIRECTION_SYSTEM_PROMPT = (
     "name a DIFFERENT location.\n"
     "- NO story, narrative, names, memories, feelings or second person ('you').\n"
     "- NO explicitness beyond the stated nudity band; keep it about the SET.\n\n"
-    "Output STRICT JSON only: an array [{\"index\": <int>, \"direction\": \"<text>\"}, ...] "
-    "with one object per item, same indices as the input. No markdown, no commentary."
+    "Output format: return ONE line per item and nothing else, each line exactly "
+    "`<index>. <direction>` (for example: `0. Wide shot from the balcony; centred on the "
+    "neon dance floor, a blurred crowd behind.`). One line per item, indices matching the "
+    "input, no blank lines between items, no markdown fences, no numbering gaps, no preamble "
+    "or trailing commentary."
 )
 
 
@@ -299,10 +304,10 @@ class SceneDirectionWriter:
         self, items: List[Dict[str, Any]], *, hint: str = ""
     ) -> Optional[List[Optional[str]]]:
         """
-        ONE Venice call for the whole batch. Returns a list of raw direction strings indexed
-        by item index (missing/extra indices -> None at that slot), or None on any whole-call
-        failure (disabled, empty response, unparseable JSON). On a None return, ``last_error``
-        holds a short reason. The caller validates each entry.
+        ONE Venice call for the given items (a chunk). Returns a list of raw direction strings
+        indexed by item index (missing/extra indices -> None at that slot), or None on any
+        whole-call failure (disabled, empty response, unparseable output). On a None return,
+        ``last_error`` holds a short reason. The caller validates each entry.
         """
         self.last_error = None
         if not self.enabled:
@@ -370,56 +375,39 @@ def _build_user_prompt(items: List[Dict[str, Any]], hint: str = "") -> str:
         f"restrictions.\n\n" if hint else ""
     )
     return (
-        f"{hint_line}Write staging for these {len(items)} items. For EACH, return one object "
-        f"{{\"index\", \"direction\"}} — 1-3 sentences (<=320 chars) of concrete visual "
-        f"staging that fits its facts and obeys every restriction.\n\nITEMS:\n{payload}"
+        f"{hint_line}Write staging for these {len(items)} items. For EACH, return one line "
+        f"`<index>. <direction>` — 1-3 sentences (<=320 chars) of concrete visual staging on "
+        f"a SINGLE line that fits its facts and obeys every restriction.\n\nITEMS:\n{payload}"
     )
 
 
 def _parse_directions(raw: str, n: int) -> Optional[List[Optional[str]]]:
-    """Parse the JSON array into a per-index list of raw strings (length n)."""
-    data = _extract_json(raw)
-    arr = None
-    if isinstance(data, list):
-        arr = data
-    elif isinstance(data, dict):
-        # tolerate {"directions": [...]} or {"items": [...]}
-        for key in ("directions", "items", "results"):
-            if isinstance(data.get(key), list):
-                arr = data[key]
-                break
-    if not isinstance(arr, list):
-        return None
-    out: List[Optional[str]] = [None] * n
-    for obj in arr:
-        if not isinstance(obj, dict):
-            continue
-        idx = obj.get("index")
-        direction = obj.get("direction")
-        if isinstance(idx, bool) or not isinstance(idx, int):
-            continue
-        if 0 <= idx < n and isinstance(direction, str):
-            out[idx] = direction
-    return out
-
-
-def _extract_json(raw: Optional[str]):
-    """Tolerant JSON extraction (array or object). Mirrors the other writers."""
+    """Parse line-based `<index>. <direction>` output into a per-index list of raw strings
+    (length n, index -> direction, None for a missing slot). Returns None only when ZERO
+    lines parse. Per-line and escaping-free: one bad line loses only its own item."""
     if not raw:
         return None
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    # First array, then first object.
-    for pattern in (r"\[.*\]", r"\{.*\}"):
-        m = re.search(pattern, raw, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                continue
-    return None
+    lines = raw.splitlines()
+    # Strip a wrapping markdown code fence (leading ```lang and/or trailing ```) so fenced
+    # output still parses.
+    if lines and lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    out: List[Optional[str]] = [None] * n
+    filled = False
+    for line in lines:
+        m = re.match(r"^\s*\[?\s*(\d+)\s*\]?\s*[.)\:\-]\s+(\S.*?)\s*$", line)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        text = m.group(2)
+        if 0 <= idx < n and out[idx] is None:  # first match for an index wins
+            out[idx] = text
+            filled = True
+    if not filled:
+        return None
+    return out
 
 
 def _clip_reason(reason: Optional[str]) -> Optional[str]:
@@ -433,13 +421,11 @@ def _clip_reason(reason: Optional[str]) -> Optional[str]:
 
 
 def _describe_unparseable(content: str) -> str:
-    """Classify a non-empty response _parse_directions could not turn into a list: a body that
-    STARTED as JSON but never closed its bracket is the max_tokens cutoff signature
-    ('truncated response'); anything else is 'invalid JSON'."""
-    stripped = (content or "").strip()
-    if stripped[:1] in ("[", "{") and stripped[-1:] not in ("]", "}"):
-        return "truncated response"
-    return "invalid JSON"
+    """A non-empty response that produced no parseable `<index>. <direction>` line. With the
+    line format there is no JSON-shape signature left to classify, so any such body is simply
+    'unparseable response'. (Only called at write_batch when _parse_directions returned None
+    on a non-empty response.)"""
+    return "unparseable response"
 
 
 def _describe_call_exception(exc: Exception, writer: "SceneDirectionWriter") -> str:
@@ -466,12 +452,16 @@ async def apply_scene_directions(scenes: List, controls, *, settings, batch_id=N
       * "venice" but no VENICE_API_KEY -> Venice can never run; every scene keeps
         scene_direction=None / direction_source=None but gets direction_error="disabled: no
         VENICE_API_KEY" so the misconfig is visible.
-      * "venice" with a key -> ONE batched call; each item whose returned direction passes
-        validation gets scene_direction=text, direction_source="venice", direction_error=None.
-        A WHOLE-CALL failure stamps the SAME reason (timeout/invalid JSON/truncated/empty/
-        exception) on EVERY item; a PER-ITEM rejection records the violated rule name (or
-        "no_direction" when the model omitted the item). All failures set direction_source=
-        "fallback" so the mapper keeps the bare `staging` phrase.
+      * "venice" with a key -> the batch is split into contiguous CHUNKS
+        (SCENE_DIRECTION_CHUNK_SIZE items each) and every chunk is its OWN Venice call, run
+        CONCURRENTLY (bounded by SCENE_DIRECTION_MAX_CONCURRENCY). Each item whose returned
+        direction passes validation gets scene_direction=text, direction_source="venice",
+        direction_error=None. A WHOLE-CALL failure of a chunk stamps the SAME reason
+        (timeout/unparseable/empty/exception) on EVERY item IN THAT CHUNK ONLY (other chunks
+        are unaffected); a PER-ITEM rejection records the violated rule name (or "no_direction"
+        when the model omitted the item). All failures set direction_source="fallback" so the
+        mapper keeps the bare `staging` phrase. With len(scenes) <= chunk size this is exactly
+        one call — identical to the pre-chunking behavior.
     """
     if not scenes:
         return scenes
@@ -480,19 +470,23 @@ async def apply_scene_directions(scenes: List, controls, *, settings, batch_id=N
     if provider != "venice":
         return scenes  # deterministic: skip Venice entirely, leave ALL fields untouched (None)
 
-    writer = SceneDirectionWriter(
-        api_key=getattr(settings, "VENICE_API_KEY", "") or "",
-        base_url=getattr(settings, "VENICE_BASE_URL", "https://api.venice.ai/api/v1"),
-        model=(
-            getattr(settings, "SCENE_DIRECTION_MODEL", "")
-            or getattr(settings, "VENICE_MODEL", "")
-            or "venice-uncensored"
-        ),
-        temperature=getattr(settings, "SCENE_DIRECTION_TEMPERATURE", 0.7),
-        max_tokens=getattr(settings, "SCENE_DIRECTION_MAX_TOKENS", 4000),
-        timeout=getattr(settings, "SCENE_DIRECTION_TIMEOUT_SECONDS", 20.0),
-    )
-    if not writer.enabled:
+    def _make_writer() -> SceneDirectionWriter:
+        # A FRESH writer per chunk: writer.last_error is per-instance mutable state and must
+        # never be shared across the concurrent calls. Params read once from settings here.
+        return SceneDirectionWriter(
+            api_key=getattr(settings, "VENICE_API_KEY", "") or "",
+            base_url=getattr(settings, "VENICE_BASE_URL", "https://api.venice.ai/api/v1"),
+            model=(
+                getattr(settings, "SCENE_DIRECTION_MODEL", "")
+                or getattr(settings, "VENICE_MODEL", "")
+                or "venice-uncensored"
+            ),
+            temperature=getattr(settings, "SCENE_DIRECTION_TEMPERATURE", 0.7),
+            max_tokens=getattr(settings, "SCENE_DIRECTION_MAX_TOKENS", 4000),
+            timeout=getattr(settings, "SCENE_DIRECTION_TIMEOUT_SECONDS", 20.0),
+        )
+
+    if not _make_writer().enabled:
         # Venice was REQUESTED but there is no key, so it can never run. direction_source stays
         # None (Venice was never attempted), but surface WHY on every item.
         reason = _clip_reason("disabled: no VENICE_API_KEY")
@@ -502,57 +496,73 @@ async def apply_scene_directions(scenes: List, controls, *, settings, batch_id=N
             s.direction_error = reason
         return scenes
 
-    items = [_facts_for_scene(i, s, controls) for i, s in enumerate(scenes)]
-    call_error: Optional[str] = None
-    try:
-        raw = await writer.write_batch(items, hint=_demeanor_hint(controls))
-    except Exception as e:  # noqa: BLE001 — a decoration writer must never break a launch
-        raw = None
-        call_error = _describe_call_exception(e, writer)
-        logger.error(f"{tag} SceneDirectionWriter raised; all items fall back: {e}")
-    if raw is None and call_error is None:
-        # write_batch returned None WITHOUT raising (empty/invalid/truncated) — it recorded why.
-        call_error = writer.last_error or "no direction returned"
-    if raw is None:
-        call_error = _clip_reason(call_error)
-        logger.warning(f"{tag} scene-direction whole-call fallback ({call_error}); "
-                       f"all {len(scenes)} items keep their staging phrase")
+    # Contiguous chunks, each an independent concurrent call. size falls back to the whole
+    # batch (one chunk) when the setting is 0/unset; concurrency is capped by a shared semaphore.
+    size = max(1, getattr(settings, "SCENE_DIRECTION_CHUNK_SIZE", 3) or len(scenes))
+    max_conc = max(1, getattr(settings, "SCENE_DIRECTION_MAX_CONCURRENCY", 8))
+    sem = asyncio.Semaphore(max_conc)
+    hint = _demeanor_hint(controls)
+    chunks = [scenes[i:i + size] for i in range(0, len(scenes), size)]
 
-    per_item_failures = 0
-    for i, s in enumerate(scenes):
+    async def _process_chunk(chunk: List) -> None:
+        # LOCAL indices 0..k-1: _facts_for_scene stamps facts["index"]=local_i and write_batch
+        # returns a list indexed by the model's echoed index (0 <= idx < len(chunk)), so raw
+        # maps back to THIS chunk's scenes by POSITION. The global scene index is irrelevant here.
+        items = [_facts_for_scene(local_i, s, controls) for local_i, s in enumerate(chunk)]
+        writer = _make_writer()  # own instance -> own last_error, safe under concurrency
+        call_error: Optional[str] = None
+        try:
+            async with sem:
+                raw = await writer.write_batch(items, hint=hint)
+        except Exception as e:  # noqa: BLE001 — a decoration writer must never break a launch
+            raw = None
+            call_error = _describe_call_exception(e, writer)
+            logger.error(f"{tag} SceneDirectionWriter raised; chunk falls back: {e}")
+        if raw is None and call_error is None:
+            # write_batch returned None WITHOUT raising (empty/unparseable) — it recorded why.
+            call_error = writer.last_error or "no direction returned"
         if raw is None:
-            # Whole-call failure: the SAME reason on every item.
-            s.scene_direction = None
-            s.direction_source = "fallback"
-            s.direction_error = call_error
-            continue
-        cand = raw[i] if i < len(raw) else None
-        if not cand:
-            # The call succeeded but the model omitted (or blanked) this index.
-            s.scene_direction = None
-            s.direction_source = "fallback"
-            s.direction_error = "no_direction"
-            per_item_failures += 1
-            continue
-        valid, rule = validate_scene_direction_reason(
-            cand,
-            location=s.location,
-            outfit=s.outfit,
-            outfit_detail=s.outfit_detail,
-            venue_public=sv.is_public_venue(s.location),
-        )
-        if valid:
-            s.scene_direction = valid
-            s.direction_source = "venice"
-            s.direction_error = None
-        else:
-            # Keep the bare staging phrase as the effective direction (mapper falls back).
-            s.scene_direction = None
-            s.direction_source = "fallback"
-            s.direction_error = rule or "invalid"
-            per_item_failures += 1
+            call_error = _clip_reason(call_error)
+            logger.warning(f"{tag} scene-direction whole-call fallback ({call_error}); "
+                           f"{len(chunk)} items keep their staging phrase")
 
-    if raw is not None and per_item_failures:
-        logger.warning(f"{tag} scene-direction per-item fallback on "
-                       f"{per_item_failures}/{len(scenes)} items (see direction_error)")
+        per_item_failures = 0
+        for local_i, s in enumerate(chunk):
+            if raw is None:
+                # Whole-chunk failure: the SAME reason on every item in this chunk.
+                s.scene_direction = None
+                s.direction_source = "fallback"
+                s.direction_error = call_error
+                continue
+            cand = raw[local_i] if local_i < len(raw) else None
+            if not cand:
+                # The call succeeded but the model omitted (or blanked) this index.
+                s.scene_direction = None
+                s.direction_source = "fallback"
+                s.direction_error = "no_direction"
+                per_item_failures += 1
+                continue
+            valid, rule = validate_scene_direction_reason(
+                cand,
+                location=s.location,
+                outfit=s.outfit,
+                outfit_detail=s.outfit_detail,
+                venue_public=sv.is_public_venue(s.location),
+            )
+            if valid:
+                s.scene_direction = valid
+                s.direction_source = "venice"
+                s.direction_error = None
+            else:
+                # Keep the bare staging phrase as the effective direction (mapper falls back).
+                s.scene_direction = None
+                s.direction_source = "fallback"
+                s.direction_error = rule or "invalid"
+                per_item_failures += 1
+
+        if raw is not None and per_item_failures:
+            logger.warning(f"{tag} scene-direction per-item fallback on "
+                           f"{per_item_failures}/{len(chunk)} items (see direction_error)")
+
+    await asyncio.gather(*[_process_chunk(c) for c in chunks])
     return scenes

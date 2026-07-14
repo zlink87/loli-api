@@ -289,6 +289,12 @@ class Settings(BaseSettings):
     # 400 + 130*item_count when a batch needs more, so a large batch can't be silently
     # truncated into an all-fallback response. Bumped above this only to raise the floor.
     SCENE_DIRECTION_MAX_TOKENS: int = 4000
+    # apply_scene_directions fans the batch out into contiguous chunks of this many items,
+    # each an INDEPENDENT Venice call run concurrently: a bad chunk only loses its own items
+    # (not the whole batch) and each call sees few items (higher-quality staging). Concurrency
+    # is capped by a shared semaphore so a big batch can't open too many calls at once.
+    SCENE_DIRECTION_CHUNK_SIZE: int = 3
+    SCENE_DIRECTION_MAX_CONCURRENCY: int = 8
 
     # Character generation: run the second detail-refine pass by default
     # (upscale-model round trip + refine steps; same output resolution,
