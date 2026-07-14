@@ -153,6 +153,17 @@ class Settings(BaseSettings):
     # file is unstaged. Empty (default) = no injection anywhere.
     POSE_ANATOMY_LORA_NAME: str = ""
     POSE_ANATOMY_LORA_STRENGTH: float = 0.8
+    # Dress-chain garment assertion (ships DARK, default OFF). Only relevant on the 3-step
+    # chain (outfit -> background -> pose) when the OUTFIT step dressed a nude base
+    # additively (outfitPromptMode="dress"): there the pose step's continuity clause says
+    # the garment must stay "exactly as in image 1" — but "image 1" for that assertion is
+    # the freshly-dressed intermediate, so any garment erosion the outfit/background steps
+    # already introduced gets LOCKED IN as the thing to preserve. True switches that pose
+    # step to asserting the garment TEXT instead ("She is wearing {garment}; keep this
+    # exact clothing on her…") so the re-diffusion is anchored to the described garment,
+    # not to a possibly-eroded reference. Ships dark until A/B data shows the 3-step chain
+    # is actually eroding garments; single-pass items (no outfit step) are never affected.
+    POSE_DRESS_CHAIN_ASSERT_GARMENT: bool = False
 
     # WS-N2 (Natural de-synthetic): per-style LoRA strengths for the pose graph's LoRA
     # stack — node 304 (URP realism), 305 (NSFW), 306 (skin) on the skinlora tier. The
@@ -379,6 +390,22 @@ class Settings(BaseSettings):
     # the batch scene mapper sets the per-request flag; interactive /v1/edit is
     # never single-pass.
     BATCH_SINGLE_PASS_EDIT: bool = True
+    # Single-pass ROUTING target (the 07-14 quality-regression revert). Controls WHICH
+    # effective outfits are allowed to collapse to one pose-graph job when
+    # BATCH_SINGLE_PASS_EDIT is on and a nude base + pose exist.
+    #   "naked" (default, current behavior): ONLY a NAKED effective outfit single-passes;
+    #       any real garment routes to the reliable 3-step dresser (outfit -> background
+    #       -> pose), because the full-frame pose graph is not a masked dresser.
+    #   "all": the golden 07-14-MORNING routing — ANY effective outfit single-passes when
+    #       a nude base + pose exist; the one pose job dresses additively
+    #       (outfitPromptMode="dress"). Golden batch 59ca806c proved single-pass dressing
+    #       works, and the 3-step chain's two post-dressing full-frame re-diffusions
+    #       ERODE the garment (items render nude) and re-add plastic skin — so "all"
+    #       restores the pre-7381258e behavior.
+    # Flip via Railway env for the routing A/B — no revert commit needed. Any unrecognized
+    # value degrades to "naked" (the safe NAKED-only gate). scene_mapper stays settings-free:
+    # this arrives there as the single_pass_targets param (same pattern as single_pass).
+    BATCH_SINGLE_PASS_TARGETS: str = "naked"
     # WS3.2: fail fast at batch-worker startup if the batch engine's RESOLVED outfit
     # template is NOT a crop-and-stitch graph (workflow_meta tier "v1") — guards
     # against a mis-deployed environment (e.g. a CI-built image missing the

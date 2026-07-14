@@ -24,7 +24,9 @@ Shape (mirrors scene_writer / trait_profile_writer):
     no identity/appearance vocab (reusing story_planner's identity scrub patterns), no
     clothing outside the item's own outfit, no foreign-location tokens (reusing the
     planner's _LOCATION_CAPTION_TOKENS), no interacting/named people (anonymous background
-    crowd wording allowed ONLY at a public venue), and no story/second-person markers.
+    crowd wording allowed ONLY at a public venue), no story/second-person markers, and no
+    photographic tone/finish vocabulary (light and grade ride their own prompt channel —
+    see _STYLE_TONE_RE).
 """
 from __future__ import annotations
 
@@ -96,6 +98,36 @@ _STORY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Photographic finish/grade/glamour-lighting vocabulary — the tone channel a direction
+# must NEVER write into. A direction describes OBJECTS + CAMERA POSITION only: the scene's
+# light and time are already decided and ride their own prompt channel (scene.lighting /
+# time_of_day flow to the pose tail via the request's lighting/timeOfDay fields — see
+# scene_mapper), so tone words here FIGHT that channel and re-glam the render (live
+# example: "glossy high-key glamour light" landing verbatim and undoing the de-gloss
+# work). Violations are REJECTED, never stripped — stripping breaks the LLM's sentence
+# grammar; the fallback is the known-good bare `staging` phrase, with the rule name
+# ("style_vocab") recorded on direction_error for observability.
+# DELIBERATE EXCLUSIONS (kept legal): practical in-scene light SOURCES ("candlelit
+# corner", "a neon sign", "warm glow of a bedside lamp", "backlit by the window" —
+# set-real staging, physical objects that happen to emit light), and depth-of-field
+# camera language ("shallow depth of field" — the system prompt explicitly asks for
+# camera feel). Bare "studio" and "backdrop" also stay legal (legit studio LOCATIONS);
+# only the studio-LIGHT compounds are banned.
+_STYLE_TONE_RE = re.compile(
+    r"\b(?:"
+    r"gloss(?:y|ed)|glam\w*|high[-\s]?key|low[-\s]?key|"
+    r"rim[-\s]?(?:light\w*|lit)|flares?|spot[-\s]?(?:light\w*|lit)|"
+    r"soft[-\s]?box(?:es)?|strob(?:es?|ing)|"
+    r"studio[-\s]+(?:light\w*|lit)|dramatic(?:ally)?[-\s]+li(?:ght\w*|t)|"
+    r"editorial\w*|cinematic\w*|hdr|bokeh|vignett\w*|"
+    r"colou?r[-\s]?grad\w*|grading|film[-\s]?grain\w*|grainy|"
+    r"(?:over|under)[-\s]?expos\w*|high[-\s]contrast|"
+    r"airbrush\w*|retouch\w*|flawless\w*|photo[-\s]?shoots?|"
+    r"shimmer\w*|glisten\w*|gleam\w*|radian(?:t|ce)|lumin(?:ous\w*|osity)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # People words banned in EVERY venue (named/relational/individuated others).
 _PEOPLE_BANNED_ALWAYS = frozenset({
     "man", "men", "woman", "women", "guy", "guys", "boy", "boys", "lady", "ladies",
@@ -151,6 +183,8 @@ def validate_scene_direction_reason(
       * "identity_vocab"         — story_planner._APPEARANCE_PATTERNS (hair/eyes/skin/person-
                                    noun/age), the planner's identity vocab, or the anatomy list;
       * "story_voice"            — story/second-person markers (she remembers…, you…);
+      * "style_vocab"            — photographic finish/grade/glamour-lighting vocabulary
+                                   (_STYLE_TONE_RE — light/tone ride their own prompt channel);
       * "people_banned"          — relational/individuated people (man/woman/couple/friend/…);
       * "people_in_private"      — anonymous crowd words (people/strangers/crowd) in a PRIVATE venue;
       * "garment_outside_outfit" — a clothing word outside the item's OWN outfit words;
@@ -188,6 +222,12 @@ def validate_scene_direction_reason(
     # Story / second-person voice.
     if _STORY_RE.search(text):
         return None, "story_voice"
+
+    # Photographic tone/finish: light and grade are already decided elsewhere
+    # (scene.lighting / time_of_day ride the pose tail), so a direction that prescribes
+    # them re-glams the render. See _STYLE_TONE_RE for doctrine + deliberate exclusions.
+    if _STYLE_TONE_RE.search(text):
+        return None, "style_vocab"
 
     # People: relational/individuated names are never allowed; background-crowd words are
     # allowed only at a public venue.
@@ -266,6 +306,9 @@ SCENE_DIRECTION_SYSTEM_PROMPT = (
     "at a private venue she is completely alone.\n"
     "- NEVER contradict or relocate the scene: stay inside the given place, and do not "
     "name a DIFFERENT location.\n"
+    "- NEVER prescribe lighting, color grading, or photographic finish (no 'glossy', "
+    "'glamour', 'high-key', 'rim light', 'dramatic spotlight' language) — light and time "
+    "of day are already decided; describe the objects and the camera position only.\n"
     "- NO story, narrative, names, memories, feelings or second person ('you').\n"
     "- NO explicitness beyond the stated nudity band; keep it about the SET.\n\n"
     "Output format: return ONE line per item and nothing else, each line exactly "

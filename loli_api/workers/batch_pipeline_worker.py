@@ -172,14 +172,22 @@ class BatchPipelineWorker:
                 # safe even though the engine is shared across concurrent batch
                 # workers) carries the EXACT composed positive/negative prompt text.
                 step_meta = self.engine.workflow_meta.get(step_name, {})
-                job.debug_meta.setdefault("steps", []).append({
+                step_debug = {
                     "step": step_name,
                     "workflow_path": step_meta.get("path"),
                     "tier": step_meta.get("tier"),
                     "seed": seed,
                     "positive_prompt": step_prompts.get("positive"),
                     "negative_prompt": step_prompts.get("negative"),
-                })
+                }
+                # WS-N2: only present when natural/candid scaling actually wrote LoRA
+                # strengths this step — keeps the debug entry shape backward-compatible
+                # (mirrors PipelineBackgroundWorker._process_job). Previously dropped here,
+                # so a single-pass batch item's per-step trace lost its LoRA fingerprint.
+                lora_scales_applied = step_prompts.get("loraScales")
+                if lora_scales_applied:
+                    step_debug["loraScales"] = lora_scales_applied
+                job.debug_meta.setdefault("steps", []).append(step_debug)
 
             await self.job_manager.update_job_status(
                 job.job_id, JobStatus.RUNNING, progress=0.85, image_generated_at=datetime.utcnow()

@@ -19,6 +19,17 @@ def _settings():
         BATCH_MAX_INFLIGHT=3,
         BATCH_ITEM_MAX_ATTEMPTS=2,
         RUNPOD_POLL_INTERVAL_SECONDS=1,
+        # render_env fingerprint fields, read via getattr in _persist_item_debug. A subset is
+        # enough to prove the snapshot is captured; keys absent here degrade to None (the
+        # getattr guard), which the render_env test also asserts.
+        COMFYUI_POSE_WORKFLOW_PATH_2511="/wf/pose_2511_API.json",
+        BATCH_SINGLE_PASS_EDIT=True,
+        BATCH_SINGLE_PASS_TARGETS="all",
+        POSE_CFG_SCALE=2.2,
+        NATURAL_LORA_URP="urp.safetensors",
+        NATURAL_LORA_NSFW="nsfw.safetensors",
+        NATURAL_LORA_SKIN="skin.safetensors",
+        SCENE_DIRECTION_PROVIDER="venice",
     )
 
 
@@ -183,6 +194,8 @@ def _job_with_debug_meta():
                     "seed": 42,
                     "positive_prompt": "sitting upright on a chair or seat",
                     "negative_prompt": "low quality, airbrushed skin",
+                    # WS-N2 natural/candid LoRA scaling wrote strengths on this step.
+                    "loraScales": {"304": 0.4, "305": 0.3, "306": 0.5},
                 },
             ]
         },
@@ -214,6 +227,41 @@ def test_success_persists_per_step_debug_onto_item_pipeline_request():
     pose_step = next(s for s in debug["steps"] if s["step"] == "pose")
     assert "sitting upright" in pose_step["positive"]
     assert pose_step["negative"]
+
+
+def test_success_persists_step_workflow_lora_and_render_env():
+    # Observability: the per-step debug payload must carry workflow_path + loraScales (the
+    # latter only when the step wrote LoRA strengths — otherwise present-but-None so the shape
+    # stays stable), plus a top-level render_env fingerprint of the settings that most shape
+    # output, so a regression is attributable to config (an env flip) vs code in one look.
+    store, images = _FakeBatchStore(), _FakeImageStore()
+    store.item_row = {"pipeline_request": {"prompt": "kitchen at dawn, golden light"}}
+    rec = _reconciler(store, images)
+    batch = _batch()
+    batch.planner_provider = "venice"
+
+    asyncio.run(rec._handle_succeeded(batch, _item(), _job_with_debug_meta()))
+
+    _, debug = store.debug_merges[0]
+    # per-step workflow_path + loraScales
+    pose_step = next(s for s in debug["steps"] if s["step"] == "pose")
+    assert pose_step["workflow_path"] == "/wf/pose_2511_API.json"
+    assert pose_step["loraScales"] == {"304": 0.4, "305": 0.3, "306": 0.5}
+    outfit_step = next(s for s in debug["steps"] if s["step"] == "outfit")
+    assert outfit_step["workflow_path"].endswith("outfit_cropstitch_2511full_API.json")
+    assert outfit_step["loraScales"] is None  # step wrote no scales -> present-but-None
+
+    # top-level render_env fingerprint, snapshotted from settings
+    env = debug["render_env"]
+    assert env["pose_graph"] == "/wf/pose_2511_API.json"
+    assert env["single_pass"] is True
+    assert env["single_pass_targets"] == "all"
+    assert env["pose_cfg_scale"] == 2.2
+    assert env["natural_lora"] == ["urp.safetensors", "nsfw.safetensors", "skin.safetensors"]
+    assert env["scene_direction_provider"] == "venice"
+    # settings absent from the stub degrade to None via getattr, never raise
+    assert env["face_restore_model"] is None
+    assert env["pose_output_megapixels"] is None
 
 
 def test_success_without_debug_meta_skips_debug_merge():

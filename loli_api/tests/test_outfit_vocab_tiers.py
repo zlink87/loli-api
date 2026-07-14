@@ -160,6 +160,31 @@ def test_no_outfit_description_contains_skin_sheen_language():
 
 
 # ---------------------------------------------------------------------------
+# MEDIUM-tier coverage guard (product decision 2026-07-14): MEDIUM is real
+# exposure via cleavage/sideboob/underboob but the bust stays COVERED or LINED —
+# an exposed nipple is REVEALING+ vocabulary. Live batches labeled "Partial
+# nudity" rendered exposed nipples because MEDIUM prose asked for them outright
+# ("nipples ... visible through the lace", "shape of nipples is faintly
+# visible"). This sweeps every garment's MEDIUM tier so the wording can't creep
+# back in. NAKED is the single exemption: it is nudity itself, not a garment
+# (the same carve-out OUTFIT_STYLE_TAGS makes) — its MEDIUM ("topless ...") is
+# the entire point of picking NAKED, so re-covering it would make a
+# "partial nudity" NAKED item lie in the opposite direction.
+# ---------------------------------------------------------------------------
+_MEDIUM_NIPPLE_RE = re.compile(r"nipple|areola|topless", re.IGNORECASE)
+
+
+def test_no_garment_medium_tier_exposes_nipples():
+    hits = [
+        (outfit.value, OUTFIT_DESCRIPTIONS[outfit][NudityLevel.MEDIUM])
+        for outfit in OutfitType
+        if outfit is not OutfitType.NAKED
+        and _MEDIUM_NIPPLE_RE.search(OUTFIT_DESCRIPTIONS[outfit][NudityLevel.MEDIUM])
+    ]
+    assert not hits, f"MEDIUM tier(s) use REVEALING+ nipple-exposure vocabulary: {hits}"
+
+
+# ---------------------------------------------------------------------------
 # _GENERATION_DEFAULT_CLOTHING completeness (the no-outfit-selected fallback)
 # ---------------------------------------------------------------------------
 def test_generation_default_clothing_has_all_five_levels():

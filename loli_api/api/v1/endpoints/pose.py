@@ -146,6 +146,7 @@ def build_pose_prompt(
     nudity_level: Optional[NudityLevel] = None,
     outfit_enum: Optional[str] = None,
     face_ref_conditioning: bool = False,
+    assert_garment: bool = False,
 ) -> str:
     """
     Build a dynamic text prompt for the pose workflow based on pose type.
@@ -296,6 +297,17 @@ def build_pose_prompt(
             the identity slip where facial structure derived from the random-face nude base.
             False (default; the 3-step and interactive graphs have no image3 encoder input)
             appends nothing, so their prompt stays byte-identical.
+        assert_garment: Dress-chain garment assertion (ships DARK via
+            POSE_DRESS_CHAIN_ASSERT_GARMENT; set by pipeline_worker only for a 3-step chain
+            that additively dressed a nude base and is NOT single-pass). When True AND
+            ``outfit_text`` is a plain garment (does not already lead with a state-of-dress
+            word, and ``dress_mode`` is off), the garment branch asserts the garment TEXT —
+            "She is wearing {garment}; keep this exact clothing on her, fully intact, rendered
+            completely and realistically." — instead of the default "keep her state of dress
+            … exactly as in image 1" continuity, which would lock in whatever garment erosion
+            the outfit/background re-diffusions introduced. False (default) leaves the
+            continuity phrasing byte-identical; the NAKED/undress-prose and dress_mode branches
+            take precedence, so it only affects the plain-garment continuity case.
 
     Returns:
         A descriptive prompt string for the ComfyUI workflow
@@ -380,6 +392,16 @@ def build_pose_prompt(
             prompt += (
                 f" Dress her in: {garment}; render the clothing fully and "
                 f"realistically on her body."
+            )
+        elif assert_garment:
+            # Dress-chain assertion (POSE_DRESS_CHAIN_ASSERT_GARMENT, dark by default): the
+            # 3-step chain dressed a nude base, so anchoring the garment to "image 1" (the
+            # freshly-dressed intermediate) can lock in erosion the outfit/background steps
+            # introduced. Assert the garment TEXT instead so the re-diffusion rebuilds it
+            # from the description rather than preserving a possibly-degraded reference.
+            prompt += (
+                f" She is wearing {garment}; keep this exact clothing on her, fully "
+                f"intact, rendered completely and realistically."
             )
         else:
             prompt += (

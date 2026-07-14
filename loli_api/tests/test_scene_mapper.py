@@ -657,6 +657,49 @@ def test_single_pass_naked_counts_as_outfit_set():
     assert req.singlePassEdit is True
 
 
+def test_single_pass_targets_all_collapses_garment():
+    # BATCH_SINGLE_PASS_TARGETS="all" (the golden 07-14-morning routing, threaded here as the
+    # single_pass_targets param): a REAL garment on a nude base + pose single-passes too, and
+    # the one pose job dresses additively (outfitPromptMode="dress"). Golden batch 59ca806c
+    # proved single-pass dressing works; the NAKED-only revert (7381258e) sent these through
+    # the erosion-prone 3-step chain instead — this mode restores the pre-regression routing.
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT),
+        BatchControls(), single_pass=True, single_pass_targets="all",
+    )
+    assert req.singlePassEdit is True
+    assert req.outfitPromptMode == "dress"
+
+
+def test_single_pass_targets_default_naked_routes_garment_to_multistep():
+    # Default single_pass_targets ("naked"): the SAME garment item is NOT single-pass — it
+    # routes to the reliable 3-step dresser (the full-frame pose graph can't be trusted to add
+    # an occluding garment over the bare body). singlePassEdit False, garment + pose intact.
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT),
+        BatchControls(), single_pass=True,  # single_pass_targets defaults to "naked"
+    )
+    assert req.singlePassEdit is False
+    assert req.outfit == OutfitType.BUSINESS_SUIT
+    assert req.pose == PoseType.SITTING
+
+
+def test_single_pass_targets_unrecognized_degrades_to_naked():
+    # An unrecognized BATCH_SINGLE_PASS_TARGETS value must degrade to the safe NAKED-only
+    # gate, never accidentally single-pass a garment (which would render nude).
+    char = _character()
+    char.nude_base_url = "https://x.supabase.co/nude.png"
+    req = scene_to_pipeline_request(
+        char, _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT),
+        BatchControls(), single_pass=True, single_pass_targets="bogus",
+    )
+    assert req.singlePassEdit is False
+
+
 def test_single_pass_fallback_keeps_three_step_fields_intact():
     # Not eligible (no nude base) -> the legacy multi-step request is byte-identical: source
     # is the clothed hero, and outfit + background(prompt) + pose all remain set.

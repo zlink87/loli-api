@@ -17,7 +17,12 @@ explicit — LOW < SUGGESTIVE < MEDIUM < REVEALING < HIGH:
                shorter hem, deeper neckline, one strap down, a hint of skin —
                no exposed nipples/genitals, nothing explicit.
   * MEDIUM     partial nudity: unbuttoned/undone, lingerie peeking through,
-               real exposure (cleavage, sideboob, underboob).
+               real exposure (cleavage, sideboob, underboob) — but the bust stays
+               COVERED or LINED: naming nipples, or sheer-over-a-bare-bust wording
+               that renders them, is REVEALING+ vocabulary, never MEDIUM (product
+               decision 2026-07-14, guard-tested in test_outfit_vocab_tiers). NAKED
+               is the one exemption — it is nudity itself, not a garment, so its
+               "partial nudity" IS topless.
   * REVEALING  mostly undone or displaced: garment barely covering, one or
                both breasts exposed or fully sheer, bottoms pushed aside or
                pulled down but not removed — more exposed than MEDIUM, short
@@ -50,7 +55,7 @@ OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
     OutfitType.WHITE_SUMMER_DRESS: {
         NudityLevel.LOW: "a light white summer dress with a flowing A-line skirt, thin adjustable straps, hem fluttering just above the knees",
         NudityLevel.SUGGESTIVE: "a light white summer dress in thinner fabric, one strap slipping off the shoulder, hem fluttering higher above the knees, no bra hinted beneath the fabric",
-        NudityLevel.MEDIUM: "a thin white summer dress that hints at the silhouette underneath in bright light, no bra so the shape of nipples is faintly visible, hem fluttering above the knees",
+        NudityLevel.MEDIUM: "a thin white summer dress that hints at the silhouette underneath in bright light, a low scooped neckline baring deep cleavage, hem fluttering at mid-thigh",
         NudityLevel.REVEALING: "a sheer white summer dress that turns see-through in direct light, no bra so the outline of her nipples shows plainly through the fabric, hem riding up to the tops of the thighs",
         NudityLevel.HIGH: "a whisper-thin, almost transparent white summer dress that turns completely see-through in light, no bra or panties so hard nipples and the dark triangle of pubic hair are clearly visible, hem fluttering just below the curve of the ass",
     },
@@ -78,7 +83,7 @@ OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
     OutfitType.BUSINESS_SUIT: {
         NudityLevel.LOW: "a tailored black business suit with a crisp buttoned blouse underneath, blazer sharply cut, trousers fitted and professional",
         NudityLevel.SUGGESTIVE: "a tailored black business suit with the blouse's top buttons undone, blazer fitted close, trousers riding low enough to show a strip of bare waist",
-        NudityLevel.MEDIUM: "a tailored black business suit with blazer unbuttoned over a sheer blouse, deep cleavage visible, trousers fitted tightly around hips",
+        NudityLevel.MEDIUM: "a tailored black business suit with blazer unbuttoned over a sheer blouse, a black lace bra beneath it, deep cleavage visible, trousers fitted tightly around hips",
         NudityLevel.REVEALING: "a tailored black business suit with the blazer worn open over an unbuttoned, sheer blouse baring one breast, trousers unfastened and riding low on the hips",
         NudityLevel.HIGH: "a severely tailored black business suit worn completely unbuttoned, no blouse or bra underneath so full breasts hang free, trousers slung dangerously low to show the top of the pubic cleft",
     },
@@ -260,7 +265,7 @@ OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
     OutfitType.SATIN_SLIP_DRESS: {
         NudityLevel.LOW: "a champagne satin slip dress with thin straps, fabric skimming her curves, knee-length and elegant",
         NudityLevel.SUGGESTIVE: "a champagne satin slip dress with one thin strap slipping off the shoulder, fabric skimming closer to her curves, hem shortened above the knee",
-        NudityLevel.MEDIUM: "a champagne satin slip dress with thin straps, fabric clinging to curves, short hem showing thighs, nipples hinted through the satin",
+        NudityLevel.MEDIUM: "a champagne satin slip dress with thin straps, a low cowl neckline baring deep cleavage, fabric clinging to curves, short hem showing thighs",
         NudityLevel.REVEALING: "a champagne satin slip dress with both straps loosened and slipping, fabric clinging to reveal the shape of her nipples through the satin, hem riding up to the thighs",
         NudityLevel.HIGH: "a champagne satin slip so short it rides above the ass cheeks, thin straps fallen off shoulders leaving breasts fully bare and nipples hard",
     },
@@ -302,7 +307,7 @@ OUTFIT_DESCRIPTIONS: Dict[OutfitType, Dict[NudityLevel, str]] = {
     OutfitType.LACE_BODYSUIT: {
         NudityLevel.LOW: "a black lace-trimmed bodysuit with a smooth opaque lining beneath the lace, hugging her curves modestly, elegant and confident",
         NudityLevel.SUGGESTIVE: "a black lace-trimmed bodysuit with a thinner lining that hints at the shape of her curves, hugging her body closely, elegant with a teasing edge",
-        NudityLevel.MEDIUM: "a sheer black lace bodysuit with strategic coverage, nipples and skin visible through the lace pattern, hugging every curve",
+        NudityLevel.MEDIUM: "a black lace bodysuit with sheer lace panels at the waist and hips, an opaque-lined bust with deep cleavage on show, hugging every curve",
         NudityLevel.REVEALING: "a sheer black lace bodysuit with the lace pattern doing little to hide her nipples, one strap slipped off the shoulder, hugging every curve",
         NudityLevel.HIGH: "a sheer black lace bodysuit with open cups and crotchless design, nipples and bare folds completely uncovered",
     },

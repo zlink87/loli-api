@@ -288,6 +288,31 @@ def test_compute_estimate_reflects_single_pass_collapse():
     assert with_base.items_total == without_base.items_total == 4
 
 
+def test_compute_estimate_all_targets_collapses_garment_items():
+    # BATCH_SINGLE_PASS_TARGETS="all" routes DRESSED items through single-pass too, so the
+    # estimate must count 1 job per garment item (matching what the reconciler enqueues), not
+    # the legacy 3. Mirrors test_compute_estimate_reflects_single_pass_collapse for "all".
+    all_settings = SimpleNamespace(
+        RUNPOD_AVG_STEP_SECONDS=60, BATCH_WORKER_POOL_SIZE=1,
+        RUNPOD_GPU_USD_PER_SECOND=0.0, BATCH_SINGLE_PASS_EDIT=True,
+        BATCH_SINGLE_PASS_TARGETS="all",
+    )
+    scenes = [
+        _scene(pose=PoseType.SITTING, outfit=OutfitType.BUSINESS_SUIT, global_index=i)
+        for i in range(4)
+    ]
+    est = compute_estimate(scenes, BatchControls(), all_settings, has_nude_base=True)
+    assert est.est_runpod_jobs == 4          # 4 garment items x 1 pose job (all-mode collapse)
+    # Same garment scenes under the default NAKED-only routing stay at the legacy 3 steps.
+    naked_settings = SimpleNamespace(
+        RUNPOD_AVG_STEP_SECONDS=60, BATCH_WORKER_POOL_SIZE=1,
+        RUNPOD_GPU_USD_PER_SECOND=0.0, BATCH_SINGLE_PASS_EDIT=True,
+        BATCH_SINGLE_PASS_TARGETS="naked",
+    )
+    est_naked = compute_estimate(scenes, BatchControls(), naked_settings, has_nude_base=True)
+    assert est_naked.est_runpod_jobs == 12   # 4 items x 3 steps
+
+
 def test_compute_estimate_flag_off_is_legacy_even_with_base():
     off_settings = SimpleNamespace(
         RUNPOD_AVG_STEP_SECONDS=60, BATCH_WORKER_POOL_SIZE=1,

@@ -304,6 +304,13 @@ def photo_style_template(style, time_of_day=None) -> str:
 # "candid_phone" stays empty — the raw phone-cam opt-out adds no retouch clause, so
 # it can never smooth skin (fully doctrine-compliant by omission).
 # ---------------------------------------------------------------------------
+# The polished suffix's generic key-light phrase, extracted to ONE source of truth so
+# apply_edit_photo_style can surgically DROP it when the scene supplies its own lighting
+# (see its scene_lighting kwarg). Interpolated into the "polished" clause below, so the
+# rendered suffix stays byte-identical to the old inline literal — the trailing comma+space
+# is deliberate (it joins straight into "…and a softly blurred background…").
+_POLISHED_KEY_LIGHT_FRAGMENT = "a soft flattering key light, "
+
 EDIT_PHOTO_STYLE_SUFFIXES = {
     "natural": (
         "Shoot this as a real, unstaged photo: accurate natural exposure, "
@@ -314,8 +321,9 @@ EDIT_PHOTO_STYLE_SUFFIXES = {
     ),
     "polished": (
         "Give this a professional photographic retouch of light only: balanced "
-        "exposure, gentle contrast, accurate true-to-life color, a soft flattering "
-        "key light, and a softly blurred background with shallow depth of field. Do "
+        "exposure, gentle contrast, accurate true-to-life color, "
+        f"{_POLISHED_KEY_LIGHT_FRAGMENT}"
+        "and a softly blurred background with shallow depth of field. Do "
         "not smooth, blur, or retouch the skin itself — keep every pore and fine "
         "skin texture exactly real, skin tone even and consistent with the face; "
         "keep every fine detail of the clothing crisp and intact."
@@ -342,7 +350,7 @@ EDIT_PHOTO_STYLE_TAIL_ECHOES = {
 }
 
 
-def apply_edit_photo_style(prompt: str, style=None) -> str:
+def apply_edit_photo_style(prompt: str, style=None, scene_lighting: bool = False) -> str:
     """
     LEAD an edit-step prompt with the photo-style clause for `style`, keeping a
     short tail echo so the finish binds at both ends of the positive.
@@ -356,6 +364,13 @@ def apply_edit_photo_style(prompt: str, style=None) -> str:
     Accepts a PhotoStyleType, its string value, or None. Returns the prompt
     unchanged for None, unknown styles, or styles with an empty clause
     (candid_phone = legacy raw behavior, adds no retouch language).
+
+    ``scene_lighting`` (default False): when True AND the resolved style is "polished",
+    drop the generic ``_POLISHED_KEY_LIGHT_FRAGMENT`` ("a soft flattering key light, ")
+    from the lead before prepending. The pose step passes this when the scene carries its
+    own lighting/time-of-day (which already re-light the frame via build_pose_prompt), so
+    the polished wrapper's canned key light doesn't override a candlelit/neon/dim scene.
+    Default False leaves the lead byte-identical, so every other call site is unchanged.
     """
     if not style:
         return prompt
@@ -363,6 +378,11 @@ def apply_edit_photo_style(prompt: str, style=None) -> str:
     lead = EDIT_PHOTO_STYLE_SUFFIXES.get(key)
     if not lead:
         return prompt
+    # Scene supplies its own lighting -> strip the polished wrapper's generic key-light
+    # phrase so it can't flatten a candlelit/neon/dim scene. Only "polished" carries the
+    # fragment; the .replace no-ops on any other style even if scene_lighting is True.
+    if scene_lighting and key == "polished":
+        lead = lead.replace(_POLISHED_KEY_LIGHT_FRAGMENT, "")
     body = (prompt or "").strip()
     if not body:
         return lead

@@ -63,6 +63,33 @@ def test_apply_polished_leads_with_clause():
     assert out.endswith(EDIT_PHOTO_STYLE_TAIL_ECHOES["polished"])
 
 
+def test_apply_polished_scene_lighting_drops_key_light():
+    # Scene-lit pose step: when the item carries its own lighting/time-of-day (which already
+    # re-light the frame via build_pose_prompt), the polished wrapper's generic "soft
+    # flattering key light" fights that scene light — so scene_lighting=True drops JUST that
+    # fragment from the polished lead. Only the pose call site passes it.
+    prompt = "Change the person's clothing to: red evening gown"
+    lit = apply_edit_photo_style(prompt, PhotoStyleType.POLISHED, scene_lighting=True)
+    assert "soft flattering key light" not in lit
+    assert prompt in lit                                     # body still preserved
+    assert lit.startswith("Give this a professional photographic retouch")  # still leads polished
+    # The remaining lead reads cleanly (the comma-joined fragment was removed whole).
+    assert "true-to-life color, and a softly blurred" in lit
+
+    # Default (scene_lighting False / omitted) keeps the key light, byte-identical.
+    assert (
+        apply_edit_photo_style(prompt, PhotoStyleType.POLISHED, scene_lighting=False)
+        == apply_edit_photo_style(prompt, PhotoStyleType.POLISHED)
+    )
+    assert "a soft flattering key light," in apply_edit_photo_style(prompt, PhotoStyleType.POLISHED)
+
+    # scene_lighting on a non-polished style is a no-op (only polished carries the fragment).
+    assert (
+        apply_edit_photo_style(prompt, PhotoStyleType.NATURAL, scene_lighting=True)
+        == apply_edit_photo_style(prompt, PhotoStyleType.NATURAL)
+    )
+
+
 def test_suffixes_never_touch_identity():
     # "face" is intentionally allowed ONLY inside the "skin tone even and
     # consistent with the face" clause (natural/polished/studio) — it anchors

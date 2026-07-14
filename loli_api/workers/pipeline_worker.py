@@ -470,6 +470,19 @@ class PipelineBackgroundWorker:
             # scene ("Place her in:"). Both default off for the legacy multi-step path
             # (outfit/background already rendered), keeping that prompt byte-identical.
             single_pass_edit = getattr(request, "singlePassEdit", False)
+            # Dress-chain garment assertion (ships DARK behind POSE_DRESS_CHAIN_ASSERT_GARMENT).
+            # ONLY the 3-step chain that additively DRESSED a nude base (outfitPromptMode
+            # "dress") AND is NOT single-pass reaches this: there the default outfit-continuity
+            # clause tells the pose step to keep the garment "exactly as in image 1" — but that
+            # "image 1" is the freshly-dressed intermediate, so any erosion the outfit/background
+            # re-diffusions already introduced becomes the thing to preserve. When the flag is on,
+            # build_pose_prompt instead asserts the garment TEXT (anchored to the description, not
+            # the possibly-eroded reference). Single-pass items (no outfit step) and replace-mode /
+            # continuity items never satisfy dress_chain, so default output stays byte-identical.
+            dress_chain = (
+                getattr(request, "outfitPromptMode", None) == "dress"
+            ) and not single_pass_edit
+            assert_garment = dress_chain and settings.POSE_DRESS_CHAIN_ASSERT_GARMENT
             prompt = apply_edit_photo_style(
                 build_pose_prompt(
                     request.pose,
@@ -534,6 +547,11 @@ class PipelineBackgroundWorker:
                     # background". Both no-ops (default) on the legacy multi-step path.
                     dress_mode=single_pass_edit,
                     scene_text=(request.prompt if single_pass_edit else None),
+                    # Dress-chain garment assertion (dark by default; see dress_chain above).
+                    # True only for a flag-enabled 3-step dress-chain pose step; flips the
+                    # continuity clause to assert the garment TEXT instead of "keep it exactly
+                    # as in image 1". False (default / single-pass / replace mode) is a no-op.
+                    assert_garment=assert_garment,
                     # WS-F: only the faceref pose graph wires the hero donor (node 210)
                     # into the prompt ENCODERS as image3, so only there does the extra
                     # "render that same face" clause have a conditioning image to bind to.
@@ -551,6 +569,13 @@ class PipelineBackgroundWorker:
                     ),
                 ),
                 photo_style,
+                # Scene-lit pose step: when the item carries its own lighting/time-of-day
+                # (they ride the pose tail via build_pose_prompt above), the polished
+                # wrapper's generic "soft flattering key light" fights that scene light — a
+                # candlelit bar renders flatly bright. scene_lighting drops JUST that fragment
+                # for the polished style; None/absent lighting -> False -> byte-identical
+                # wrapper. Only this pose call site passes it; outfit/background are untouched.
+                scene_lighting=bool(getattr(request, "lighting", None)),
             )
             # D2: per-request ReActor overrides win when set; None (the common
             # case) falls back to the server-wide settings default exactly as

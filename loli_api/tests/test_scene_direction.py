@@ -98,8 +98,10 @@ def _run_apply(scenes, controls, settings, content):
     return stub
 
 
+# NOTE: this fixture used to end "...and glittering bokeh" — "bokeh" is photographic-FINISH
+# vocab the style_vocab rule now rejects (depth-of-field CAMERA language stays legal).
 _VALID_1 = ("Colored lights wash across a low velvet booth and a mirrored back wall; the "
-            "camera sits at eye level with a shallow depth of field and glittering bokeh.")
+            "camera sits at eye level with a shallow depth of field.")
 _VALID_3 = ("Warm lamplight pools over a rumpled bed and a bedside table; shot from a low "
             "three-quarter angle, close and intimate, the far corner soft in shadow.")
 _INVALID_IDENTITY = "Soft light falls across her blonde hair beside the tall window."
@@ -231,6 +233,24 @@ def test_validator_garment_plural_tolerance_reuses_planner_set():
         "A charcoal suit hangs on the rail; wide, cool, symmetrical.",
         location=L.OFFICE, outfit=O.BUSINESS_SUIT, outfit_detail="grey suit", venue_public=True,
     ) is not None
+
+
+def test_validator_rejects_style_tone_vocab():
+    # Photographic finish/grade/glamour-light vocabulary is rejected outright (reason
+    # "style_vocab"): light and grade ride their own prompt channel (scene.lighting /
+    # time_of_day on the pose tail), so a direction prescribing them re-glams the render.
+    L = LocationType
+    assert sd.validate_scene_direction_reason(
+        "Glossy high-key glamour light washes over the set.",
+        location=L.HOME_BEDROOM)[1] == "style_vocab"
+    # objects + camera position + depth-of-field feel: exactly what the prompt asks for.
+    assert sd.validate_scene_direction(
+        "Wide shot at eye level; a marble counter behind her, shallow depth of field.",
+        location=L.HOME_KITCHEN) is not None
+    # practical, set-real light SOURCES are staging, not grade — still legal.
+    assert sd.validate_scene_direction(
+        "Candlelit corner table with a warm lamp glow.",
+        location=L.RESTAURANT, venue_public=True) is not None
 
 
 # ---------------------------------------------------------------------------

@@ -908,6 +908,47 @@ def test_pose_prompt_outfit_continuity_phrasing():
 
 
 # ---------------------------------------------------------------------------
+# assert_garment (dress-chain garment assertion, POSE_DRESS_CHAIN_ASSERT_GARMENT, dark by
+# default): a plain garment is asserted by TEXT ("keep this exact clothing on her…") instead
+# of the default "exactly as in image 1" continuity, so a 3-step dress-chain pose step rebuilds
+# the garment from the description rather than locking in whatever erosion the outfit/background
+# re-diffusions introduced. NAKED/undress-prose and dress_mode branches take precedence.
+# ---------------------------------------------------------------------------
+def test_pose_prompt_assert_garment_asserts_text_not_image1():
+    garment = "a tailored charcoal business suit"
+    # assert_garment on a plain garment -> the TEXT-assertion phrasing, and NO "exactly as in
+    # image 1" (which is what would lock in an eroded reference).
+    a = pose_ep.build_pose_prompt(PoseType.SITTING, outfit_text=garment, assert_garment=True)
+    assert (
+        f" She is wearing {garment}; keep this exact clothing on her, fully intact, "
+        f"rendered completely and realistically." in a
+    )
+    assert "exactly as in image 1" not in a
+
+    # Default (assert_garment False) keeps the image-1 continuity phrasing byte-identical.
+    d = pose_ep.build_pose_prompt(PoseType.SITTING, outfit_text=garment)
+    assert (
+        f"In image 1 she is wearing {garment}; keep her state of dress and every garment "
+        f"exactly as in image 1, fully intact." in d
+    )
+    assert "keep this exact clothing on her" not in d
+
+    # dress_mode (single-pass additive) takes precedence over assert_garment.
+    dm = pose_ep.build_pose_prompt(
+        PoseType.SITTING, outfit_text=garment, dress_mode=True, assert_garment=True
+    )
+    assert f"Dress her in: {garment}" in dm
+    assert "keep this exact clothing on her" not in dm
+
+    # NAKED-tier prose (leads with a state word) still takes the "she is {prose}" branch even
+    # with assert_garment set — the assertion only affects a plain garment.
+    naked_tier = OUTFIT_DESCRIPTIONS[OutfitType.NAKED][NudityLevel.HIGH]
+    n = pose_ep.build_pose_prompt(PoseType.SITTING, outfit_text=naked_tier, assert_garment=True)
+    assert f"In image 1 she is {naked_tier}; keep her state of dress exactly as in image 1." in n
+    assert "keep this exact clothing on her" not in n
+
+
+# ---------------------------------------------------------------------------
 # c29 — outfit_continuity_text: detail is ADDITIVELY comma-joined AHEAD of the
 # tier prose (caption + graded prose, dedupe when identical); tier-prose
 # fallback when no detail; None outfit -> None.

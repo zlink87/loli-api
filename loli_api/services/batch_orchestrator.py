@@ -45,31 +45,41 @@ class CharacterNotFound(Exception):
 
 
 def _single_pass_eligible_scene(
-    scene: SceneSpec, controls: BatchControls, *, single_pass: bool, has_nude_base: bool
+    scene: SceneSpec, controls: BatchControls, *, single_pass: bool, has_nude_base: bool,
+    single_pass_targets: str = "naked",
 ) -> bool:
     """Estimate-side mirror of scene_mapper's single-pass eligibility: an item collapses
     to ONE pose-graph job when single-pass is on, the character has a nude base (the swap
-    source), and the scene sets both a (non-blocked) pose and a NAKED outfit. A real garment
-    can't be added by the full-frame pose graph, so it routes to the legacy multi-step path
-    (see scene_to_pipeline_request); only NAKED is single-pass safe."""
+    source), and the scene sets a (non-blocked) pose plus a target-gated outfit.
+
+    ``single_pass_targets`` mirrors BATCH_SINGLE_PASS_TARGETS (see scene_to_pipeline_request):
+    "naked" (default) counts only a NAKED outfit as single-pass safe — a real garment can't
+    be reliably added by the full-frame pose graph, so it routes to the legacy multi-step
+    path; "all" counts ANY set outfit (the golden 07-14-morning routing, one pose job that
+    dresses additively). Unrecognized -> the safe NAKED-only gate."""
     if not (single_pass and has_nude_base):
         return False
     pose_active = scene.pose is not None and scene.pose not in (controls.blocked_poses or [])
     # Advisory cost/time only: this estimate mirror gates on the raw ``scene.outfit`` (not
     # the effective outfit), matching the existing per-step counting pattern below.
-    outfit_active = scene.outfit == OutfitType.NAKED
+    targets_all = str(single_pass_targets or "naked").strip().lower() == "all"
+    outfit_active = (scene.outfit is not None) if targets_all else (scene.outfit == OutfitType.NAKED)
     return pose_active and outfit_active
 
 
 def _active_steps_for_scene(
     scene: SceneSpec, controls: BatchControls, *,
     single_pass: bool = False, has_nude_base: bool = False,
+    single_pass_targets: str = "naked",
 ) -> int:
     # Single-pass collapses an eligible item to ONE pose-graph job (outfit + scene + pose
-    # rendered in one full-frame re-diffusion from the nude base). Defaults (both False)
-    # reproduce the legacy per-step count exactly.
+    # rendered in one full-frame re-diffusion from the nude base). Defaults (single_pass
+    # False, targets "naked") reproduce the legacy per-step count exactly; single_pass_targets
+    # threads through to the eligibility mirror so an "all"-mode estimate counts dressed
+    # items as 1 job too (matching what the reconciler enqueues).
     if _single_pass_eligible_scene(
-        scene, controls, single_pass=single_pass, has_nude_base=has_nude_base
+        scene, controls, single_pass=single_pass, has_nude_base=has_nude_base,
+        single_pass_targets=single_pass_targets,
     ):
         return 1
     steps = 1  # background is effectively always present (location is required)
@@ -83,14 +93,17 @@ def _active_steps_for_scene(
 def compute_estimate(
     scenes: List[SceneSpec], controls: BatchControls, settings, *, has_nude_base: bool = False
 ) -> BatchEstimate:
-    # Read the single-pass flag off settings so the estimate matches what the reconciler
-    # actually enqueues; getattr keeps test settings stubs (which may omit it) on the
-    # legacy count. Eligibility also needs a nude base (the single-pass swap source) —
-    # ``has_nude_base`` is resolved by the caller (launch_batch) so this stays sync/pure.
+    # Read the single-pass flag + routing target off settings so the estimate matches what
+    # the reconciler actually enqueues; getattr keeps test settings stubs (which may omit
+    # them) on the legacy count / NAKED-only gate. Eligibility also needs a nude base (the
+    # single-pass swap source) — ``has_nude_base`` is resolved by the caller (launch_batch)
+    # so this stays sync/pure.
     single_pass = bool(getattr(settings, "BATCH_SINGLE_PASS_EDIT", False))
+    single_pass_targets = getattr(settings, "BATCH_SINGLE_PASS_TARGETS", "naked")
     total_jobs = sum(
         _active_steps_for_scene(
-            s, controls, single_pass=single_pass, has_nude_base=has_nude_base
+            s, controls, single_pass=single_pass, has_nude_base=has_nude_base,
+            single_pass_targets=single_pass_targets,
         )
         for s in scenes
     )
@@ -512,13 +525,16 @@ class BatchReconciler:
     async def _enqueue_item(self, batch: BatchRead, character: Character, item) -> None:
         try:
             scene = SceneSpec(**item.scene_spec)
-            # single_pass is the settings flag (scene_mapper stays settings-free); it only
-            # takes effect when the item is eligible (nude-base source + pose + outfit).
-            # reruns/retries flow through here too, so they inherit it automatically.
-            # getattr keeps test settings stubs (which may omit the field) on the legacy path.
+            # single_pass is the settings flag + single_pass_targets the routing target
+            # (scene_mapper stays settings-free); together they gate whether an eligible item
+            # (nude-base source + pose + target-gated outfit) collapses to one pose job.
+            # reruns/retries flow through here too, so they inherit both automatically.
+            # getattr keeps test settings stubs (which may omit the fields) on the legacy
+            # path / NAKED-only gate.
             request = scene_to_pipeline_request(
                 character, scene, batch.controls, seed=item.seed,
                 single_pass=getattr(self.settings, "BATCH_SINGLE_PASS_EDIT", False),
+                single_pass_targets=getattr(self.settings, "BATCH_SINGLE_PASS_TARGETS", "naked"),
             )
             job = await self.job_manager.create_job(request, BATCH_JOB_OWNER, job_type=BATCH_JOB_TYPE)
             await self.batch_store.update_item_result(
@@ -602,12 +618,43 @@ class BatchReconciler:
                     "seed": s.get("seed"),
                     "positive": s.get("positive_prompt"),
                     "negative": s.get("negative_prompt"),
+                    # WS3.1 workflow path (which resolved graph ran this step) + WS-N2
+                    # LoRA strengths — both already on the live step trace; surfaced here so
+                    # a per-item debug read shows WHICH graph + LoRA stack produced the pixels
+                    # without re-joining character_images.metadata.workflow_meta. None when a
+                    # step predates the field (older in-memory job / test double).
+                    "workflow_path": s.get("workflow_path"),
+                    "loraScales": s.get("loraScales"),
                 }
                 for s in steps
             ],
             # Cheap: already read off the batch row (BatchStore._row_to_batch)
             # with no extra query — see BatchRead.planner_provider's docstring.
             "planner_provider": getattr(batch, "planner_provider", None),
+            # Env fingerprint: the render-time settings that most shape output quality,
+            # snapshotted per item so a regression is attributable to CONFIG (an env flip)
+            # vs CODE in one look, instead of guessing which deploy's settings were live.
+            # All getattr-guarded (test settings stubs may omit any of them) and read off the
+            # same self.settings the reconciler enqueues with. Only persisted when steps exist
+            # (the `if not steps: return` guard above), which is exactly when it's meaningful.
+            "render_env": {
+                "pose_graph": (
+                    getattr(self.settings, "COMFYUI_POSE_WORKFLOW_PATH_2511", "")
+                    or getattr(self.settings, "COMFYUI_POSE_WORKFLOW_PATH", "")
+                ),
+                "single_pass": getattr(self.settings, "BATCH_SINGLE_PASS_EDIT", None),
+                "single_pass_targets": getattr(self.settings, "BATCH_SINGLE_PASS_TARGETS", None),
+                "pose_cfg_scale": getattr(self.settings, "POSE_CFG_SCALE", None),
+                "pose_output_megapixels": getattr(self.settings, "POSE_OUTPUT_MEGAPIXELS", None),
+                "reactor_visibility": getattr(self.settings, "POSE_REACTOR_RESTORE_VISIBILITY", None),
+                "reactor_codeformer": getattr(self.settings, "POSE_REACTOR_CODEFORMER_WEIGHT", None),
+                "face_restore_model": getattr(self.settings, "POSE_REACTOR_FACE_RESTORE_MODEL", None),
+                "natural_lora": [
+                    getattr(self.settings, k, None)
+                    for k in ("NATURAL_LORA_URP", "NATURAL_LORA_NSFW", "NATURAL_LORA_SKIN")
+                ],
+                "scene_direction_provider": getattr(self.settings, "SCENE_DIRECTION_PROVIDER", None),
+            },
         }
         try:
             await self.batch_store.merge_item_debug(item.id, payload)
