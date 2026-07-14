@@ -24,7 +24,7 @@ import io
 import logging
 import threading
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
