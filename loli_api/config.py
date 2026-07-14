@@ -138,6 +138,21 @@ class Settings(BaseSettings):
     # marker). Threaded through prepare_pose_workflow(turbo_finish_denoise=...) by
     # pipeline_worker; a true no-op on every pose graph that lacks node 407.
     POSE_TURBO_FINISH_DENOISE: float = -1.0
+    # CFG experiment knob (07-14): >0 overrides the 2511 pose sampler's baked cfg 2.5
+    # (node 3) so glam/contrast can be A/B'd (try 2.0-2.2) with one env line. The
+    # preparer double-gates on the 2511 template marker, so the distilled v1 Rapid
+    # graph (cfg 1 BY DESIGN) can never be touched. -1.0 sentinel = leave baked.
+    POSE_CFG_SCALE: float = -1.0
+    # Anatomy-detail LoRA slot (07-14, ships DARK until ops picks and stages a file):
+    # when set to a filename that EXISTS in loras/ on the RunPod volume (e.g.
+    # "qwen-anatomy-detail.safetensors"), the pose preparer splices a
+    # LoraLoaderModelOnly node (307) after the skin LoRA (306) — but ONLY on
+    # explicit-tier batch items (effective outfit NAKED + clamped nudity HIGH, the
+    # same exposure gate as the grooming phrase), so dressed/suggestive renders
+    # never load it. Injection instead of baking keeps every graph valid while the
+    # file is unstaged. Empty (default) = no injection anywhere.
+    POSE_ANATOMY_LORA_NAME: str = ""
+    POSE_ANATOMY_LORA_STRENGTH: float = 0.8
 
     # WS-N2 (Natural de-synthetic): per-style LoRA strengths for the pose graph's LoRA
     # stack — node 304 (URP realism), 305 (NSFW), 306 (skin) on the skinlora tier. The

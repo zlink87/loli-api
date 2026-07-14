@@ -598,6 +598,26 @@ class PipelineBackgroundWorker:
                 # leaves the graph's baked 0.32; prepare_pose_workflow no-ops on any pose
                 # graph without node 407.
                 turbo_finish_denoise=settings.POSE_TURBO_FINISH_DENOISE,
+                # CFG experiment knob (07-14): >0 overrides the 2511 sampler's baked
+                # cfg 2.5 (node 3) so glam/contrast can be A/B'd at 2.0-2.2 with one
+                # env line. -1.0 sentinel (default) = baked; the preparer additionally
+                # gates on the 2511 template marker so the distilled v1 graph (cfg 1
+                # by design) can never be touched.
+                cfg_scale=(
+                    settings.POSE_CFG_SCALE if settings.POSE_CFG_SCALE > 0 else None
+                ),
+                # Anatomy-detail LoRA slot (07-14, ships DARK until ops names a file):
+                # injected ONLY on explicit-tier items — request.pubicHair is set by
+                # scene_mapper exactly when effective outfit == NAKED and clamped
+                # nudity == HIGH (the same exposure gate the grooming phrase uses), so
+                # dressed/suggestive renders never load the LoRA. Empty setting ->
+                # None -> no injection anywhere.
+                anatomy_lora_name=(
+                    settings.POSE_ANATOMY_LORA_NAME or None
+                    if getattr(request, "pubicHair", None) is not None
+                    else None
+                ),
+                anatomy_lora_strength=settings.POSE_ANATOMY_LORA_STRENGTH,
             )
         if step_name == "outfit":
             prompt = apply_edit_photo_style(

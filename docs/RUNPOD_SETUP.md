@@ -295,6 +295,7 @@ on the volume AND one of the env vars below is set.
 | `qwen-edit-skin.safetensors` | `loras/` | Skin realism LoRA (node `306` on the new `*_skinlora` graphs) — fights the plastic/waxy skin look, stacked after the realism LoRA (node 304) + softened NSFW LoRA (node 305 @ 0.65) |
 | `GPEN-BFR-512.onnx` | `facerestore_models/` | Sharper, less-waxy face-restore model than the baked CodeFormer, for the pose ReActor pass (node 200, or node `215` `ReActorFaceBoost`) |
 | `workflows/pose_2511_skinlora_faceboost_API.json` | repo (already committed) | Combined pose graph — skin LoRA (node 306 @ 1.0) + GPEN `ReActorFaceBoost` (node 215) together; **recommended pose path** now that both files above are staged on the volume (confirmed 07-14) |
+| `workflows/pose_2511_skinlora_faceref_turbofinish_API.json` | repo (already committed) | Turbo finishing pass pose graph — after the Qwen pose render, a low-denoise Z-Image-Turbo img2img re-skins the frame with Turbo's natural prior (nodes 401-410), THEN ReActor stamps the hero face. Reuses the `z_image_turbo_nvfp4.safetensors` + `qwen_3_4b_fp4_mixed.safetensors` + `ae.safetensors` files already staged for char-gen (§5b wget block). See **§5d** for activation + VRAM math |
 
 **Activation levers** — flip **ONE at a time**, verify a batch, and keep rollback
 simple: revert the env var and restart (no worker-image change needed, same as
@@ -339,6 +340,72 @@ Notes:
   **not** installed in this repo's local `ComfyUI/custom_nodes/`, so re-check
   against the version actually running on the worker image before trusting (C)
   in production.
+
+---
+
+## 5d. Turbo finishing pass (07-14, ships DARK)
+
+**Why:** Qwen pose renders still read glam/synthetic next to the Z-Image-Turbo
+char-gen look. This graph runs a **low-denoise Turbo img2img refine after the Qwen
+pose render** — Qwen keeps owning composition (pose/outfit/scene from the refs);
+Turbo re-skins the frame with its natural prior at denoise ≈0.32; ReActor then stamps
+the hero face **on the refined frame**. One graph, one job.
+
+**Graph:** `workflows/pose_2511_skinlora_faceref_turbofinish_API.json` — a clone of the
+faceref graph with a turbo refine chain (nodes 401-410) spliced between the Qwen
+VAEDecode (node 8) and the ReActor swap (node 200):
+
+| node | class | role |
+|---|---|---|
+| 401 | UNETLoader | `z_image_turbo_nvfp4.safetensors` (turbo diffusion model) |
+| 402 | CLIPLoader | `qwen_3_4b_fp4_mixed.safetensors`, type `lumina2` (turbo TE) |
+| 403 | VAELoader | `ae.safetensors` (Z-Image VAE) |
+| 404 | CLIPTextEncode | turbo positive — preparer mirrors node 114's text into it |
+| 405 | ConditioningZeroOut | turbo negative (zeroed; turbo runs cfg 1) |
+| 406 | VAEEncode | Qwen decode (node 8) → turbo latent |
+| 407 | BasicScheduler | **carries the refine strength: `denoise` (baked 0.32)** |
+| 408 | KSamplerSelect | euler |
+| 409 | SamplerCustom | low-denoise img2img on the turbo model (cfg 1) |
+| 410 | VAEDecode | refined frame → node 200 `input_image` |
+
+**Activation** — flip **ONE** pose graph env var (mutually exclusive with §5c's
+(A)/(C)/(D)); verify a batch; rollback = point it back and restart (no worker-image
+change):
+
+```bash
+COMFYUI_POSE_WORKFLOW_PATH_2511=workflows/pose_2511_skinlora_faceref_turbofinish_API.json
+```
+
+Optional refine-strength tuning (leave unset to keep the graph's baked 0.32):
+
+```bash
+# node 407 BasicScheduler.denoise. -1.0 (default) = leave baked 0.32. Raise toward
+# ~0.40 for a stronger re-skin (more Turbo texture, less Qwen fidelity), lower toward
+# ~0.25 for a gentler pass. Threaded by prepare_pose_workflow(turbo_finish_denoise=...).
+POSE_TURBO_FINISH_DENOISE=0.32
+```
+
+**VRAM arithmetic (48 GB card: A40 / A6000).** The Qwen edit stack stays resident
+across the job: `qwen_image_edit_2511_fp8mixed` (~20 GB) + `qwen_2.5_vl_7b_fp8_scaled`
+(~8 GB) + `qwen_image_vae` (~0.25 GB) + the URP/NSFW/skin LoRAs (~0.6 GB) ≈ **~29 GB**.
+The turbo stack must co-reside to avoid evicting/reloading the ~20 GB Qwen UNET every
+job (thrash costs far more than the refine itself):
+
+- **bf16 (rejected):** `z_image_turbo_bf16` (~12 GB) + `qwen_3_4b` fp16 TE (~8 GB) + `ae`
+  (~0.3 GB) ≈ **~20 GB**. 29 + 20 = **~49 GB > 48 GB** — no headroom for the ~1 MP latent
+  + attention activations; forces per-job UNET offload/reload (thrash) or OOM.
+- **fp4 (chosen):** `z_image_turbo_nvfp4` (~6 GB) + `qwen_3_4b_fp4_mixed` (~3 GB) + `ae`
+  (~0.3 GB) ≈ **~9.3 GB**. 29 + 9.3 = **~38 GB** → **~10 GB headroom**, both stacks
+  co-resident, no thrash.
+
+**Quality tradeoff:** fp4 quantization on the turbo model/TE is acceptable here because
+the pass is a **low-denoise (~0.32) re-skin**, not the compositor — Qwen still renders
+pose/outfit/scene at full fp8. fp4 texture noise on a 32%-strength refine is well below
+the plastic-vs-natural delta this pass exists to close. (Both fp4 files ship in the §5b
+wget block already — no extra staging.)
+
+**Cost:** expect **+~30-60 s/photo** (the extra turbo encode → ~10-step img2img →
+decode). If that latency is unacceptable, roll back to the §5c (D) graph.
 
 ---
 

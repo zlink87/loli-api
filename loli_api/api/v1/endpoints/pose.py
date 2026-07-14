@@ -581,6 +581,9 @@ def prepare_pose_workflow(
     face_restore_model: Optional[str] = None,
     lora_scales: Optional[Dict[str, float]] = None,
     turbo_finish_denoise: Optional[float] = None,
+    cfg_scale: Optional[float] = None,
+    anatomy_lora_name: Optional[str] = None,
+    anatomy_lora_strength: float = 0.0,
 ) -> dict:
     """
     Prepare the pose workflow with injected parameters.
@@ -764,6 +767,51 @@ def prepare_pose_workflow(
         logger.debug(
             f"Set node {_TURBO_FINISH_DENOISE_NODE} turbo-finish denoise: "
             f"{float(turbo_finish_denoise)}"
+        )
+
+    # CFG experiment knob (07-14): >0 overrides the sampler's baked cfg on the
+    # 2511 tier ONLY (node 3, baked 2.5) so glam/contrast can be A/B'd at
+    # 2.0-2.2 via POSE_CFG_SCALE. Double-gated on the 2511 template marker: the
+    # distilled v1 Rapid graph samples at cfg 1 BY DESIGN and must never be
+    # overridden (any other cfg there wrecks the distilled schedule).
+    if (
+        cfg_scale is not None
+        and cfg_scale > 0
+        and _is_pose_2511_template(wf)
+        and "3" in wf
+    ):
+        wf["3"]["inputs"]["cfg"] = float(cfg_scale)
+        logger.debug(f"Set node 3 cfg: {float(cfg_scale)} (2511 tier)")
+
+    # Anatomy-detail LoRA slot (07-14, ships DARK): when a LoRA filename is
+    # configured AND the caller passed one (the batch path passes it only for
+    # explicit-tier items — see pipeline_worker), splice node 307
+    # (LoraLoaderModelOnly) into the stack after node 306 (skin LoRA) and
+    # repoint every consumer of ["306", 0] to ["307", 0]. Injection (rather
+    # than baking the node into the graph JSON) is deliberate: ComfyUI
+    # validates LoRA filenames against the volume at job time, so a baked node
+    # naming a not-yet-staged file would fail EVERY render — injected, the
+    # node exists only on requests that want it, after ops stages the file.
+    # Requires the skinlora-family stack (node 306); no-op elsewhere.
+    if anatomy_lora_name and "306" in wf and "307" not in wf:
+        for node in wf.values():
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            for key, val in inputs.items():
+                if isinstance(val, list) and val == ["306", 0]:
+                    inputs[key] = ["307", 0]
+        wf["307"] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "lora_name": anatomy_lora_name,
+                "strength_model": float(anatomy_lora_strength),
+                "model": ["306", 0],
+            },
+        }
+        logger.debug(
+            f"Injected anatomy LoRA node 307: {anatomy_lora_name} "
+            f"@ {float(anatomy_lora_strength)}"
         )
 
     # Node 115: LIVE negative — Tier-A (2511) pose graph ONLY. The v1 Rapid graph
