@@ -1,0 +1,74 @@
+name: Build video worker image
+
+# Builds Dockerfile.worker.video on a native amd64 runner and publishes it to
+# GHCR under a SEPARATE image name from the image-pipeline worker, so the
+# SHA-pinned loli-api/loli-batch endpoints can never be affected. Point the
+# RunPod video Serverless endpoint at an immutable tag:
+#   ghcr.io/<owner>/loli-video-worker:<sha>
+#
+# Note: worker_custom_nodes/** changes fire BOTH worker builds — intended,
+# both images ship video_bridge.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.worker.video
+      - .dockerignore
+      - .github/workflows/build-worker-video.yml
+      - worker_custom_nodes/**
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-worker-video-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # The base image is ~11 GB; free the runner's disk before pulling/building.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercase the owner for a valid GHCR image name.
+      - name: Compute image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/loli-video-worker" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.worker.video
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:${{ github.sha }}
+
+      - name: Summary
+        run: |
+          echo "Pushed: ${{ steps.img.outputs.name }}:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed: ${{ steps.img.outputs.name }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,57 @@
+# =============================================================================
+# GPU worker image for loli-api REELS ONLY (WAN 2.2 i2v video generation).
+#
+# SEPARATE from Dockerfile.worker on purpose: the image-pipeline endpoints
+# (loli-api / loli-batch) pin ghcr.io/<owner>/loli-worker by SHA and must never
+# be affected by video-stack changes. This image publishes under a DIFFERENT
+# name: ghcr.io/<owner>/loli-video-worker (see build-worker-video.yml).
+#
+# Base = the SAME worker-comfyui 5.8.6 the production handler contract is
+# verified against: its output collector only harvests the "images" key, which
+# is exactly what worker_custom_nodes/video_bridge reports the mp4 under.
+# The bundled ComfyUI (built 2026-06-17) already contains the native frame-
+# interpolation nodes (FrameInterpolationModelLoader / FrameInterpolate,
+# ComfyUI PR #13258) — the reel graphs need NO third-party custom nodes.
+#
+# Models are NOT baked in; they load from the network volume mounted at
+# /runpod-volume/models (loli-video-models-ro, EU-RO-1).
+# =============================================================================
+FROM runpod/worker-comfyui:5.8.6-base
+
+USER root
+
+# --- The one real fix: modern torch cu128 for Ada/Blackwell fp8 support. ---
+# The 5.8.6 base ships an older torch that crashes loading fp8 checkpoints on
+# Ada (sm_89) and Blackwell (sm_120) GPUs — the verified production failure
+# that kept reels dark. torch 2.8 cu128 wheels carry sm_90/sm_100/sm_120
+# kernels and run on any host driver >= 525 via CUDA 12.x minor-version
+# compatibility, so no CUDA-version endpoint filter is needed.
+RUN pip install --no-cache-dir --force-reinstall \
+        torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+# Attention libs compiled against the base image's old torch would break on
+# import after the swap; remove them and let ComfyUI fall back to native SDPA
+# (correct on Blackwell; SageAttention is a deliberate fast-follow, not v1).
+RUN pip uninstall -y xformers flash-attn 2>/dev/null || true
+
+# --- The mp4 bridge (same node the image-pipeline worker ships). ---
+# VideoImagesBridge encodes frames to mp4 and reports it under "images" so
+# worker-comfyui collects it; VHS_VideoCombine's "gifs" key would be dropped.
+RUN pip install --no-cache-dir imageio imageio-ffmpeg
+COPY worker_custom_nodes/video_bridge /comfyui/custom_nodes/video_bridge
+
+# --- Model-path wiring to the network volume. ---
+# The base extra_model_paths.yaml maps the classic folders (loras/, vae/, ...)
+# but omits the newer names the WAN loaders use. Same append as Dockerfile.worker.
+RUN printf '\n  text_encoders: models/text_encoders/\n  diffusion_models: models/diffusion_models/\n' \
+        >> /comfyui/extra_model_paths.yaml
+
+# frame_interpolation is a CORE ComfyUI model folder resolved under
+# folder_paths.models_dir (NOT covered by extra_model_paths). Symlink it to the
+# volume like Dockerfile.worker does for sams/grounding-dino. The target is
+# created by the runtime volume mount; dangling at build time is fine.
+RUN ln -sfn /runpod-volume/models/frame_interpolation /comfyui/models/frame_interpolation
+
+# Inherit the base image's entrypoint (/start.sh) and RunPod handler.
+WORKDIR /
