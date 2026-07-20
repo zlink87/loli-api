@@ -76,6 +76,9 @@ class JobManager:
         self.batch_pipeline_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         # Dedicated queue for admin image-to-video (reel) jobs.
         self.video_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        # Dedicated queue for per-character Video Batch items (submit-only workers),
+        # isolated from the single-clip reel queue above.
+        self.video_batch_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         # Dedicated queue for admin nude-base generation jobs (WS-N text-to-image +
         # ReActor face lock), isolated from interactive traffic. One job runs both
         # chained GPU steps (t2i base -> face pass); see workers/nude_base_worker.py.
@@ -161,7 +164,7 @@ class JobManager:
         Raises:
             asyncio.QueueFull: If queue is at capacity
         """
-        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob", "batch_pipeline_edit": "batjob", "video_gen": "vidjob", "nude_base": "nudejob"}
+        prefix_map = {"text_to_image": "imgjob", "outfit_edit": "outjob", "pose_edit": "posjob", "background_edit": "bgjob", "pipeline_edit": "pipjob", "batch_pipeline_edit": "batjob", "video_gen": "vidjob", "video_batch": "vbatjob", "nude_base": "nudejob"}
         prefix = prefix_map.get(job_type, "job")
         job_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow()
@@ -204,6 +207,8 @@ class JobManager:
             await self.batch_pipeline_queue.put(job_id)
         elif job_type == "video_gen":
             await self.video_queue.put(job_id)
+        elif job_type == "video_batch":
+            await self.video_batch_queue.put(job_id)
         elif job_type == "nude_base":
             await self.nude_base_queue.put(job_id)
         else:
@@ -401,6 +406,14 @@ class JobManager:
         """Mark current video queue task as done."""
         self.video_queue.task_done()
 
+    async def get_next_video_batch_job(self) -> Optional[str]:
+        """Get the next job ID from the dedicated video-batch queue (blocking)."""
+        return await self.video_batch_queue.get()
+
+    def mark_video_batch_done(self) -> None:
+        """Mark current video-batch queue task as done."""
+        self.video_batch_queue.task_done()
+
     async def get_next_creation_job(self) -> Optional[str]:
         """Get the next job ID from the dedicated Batch Character Creation queue (blocking)."""
         return await self.creation_queue.get()
@@ -439,6 +452,8 @@ class JobManager:
             return self.batch_pipeline_queue.qsize()
         elif job_type == "video_gen":
             return self.video_queue.qsize()
+        elif job_type == "video_batch":
+            return self.video_batch_queue.qsize()
         elif job_type == "creation":
             return self.creation_queue.qsize()
         elif job_type == "nude_base":
@@ -461,6 +476,8 @@ class JobManager:
             return self.batch_pipeline_queue.qsize() >= self._max_queue_size
         elif job_type == "video_gen":
             return self.video_queue.qsize() >= self._max_queue_size
+        elif job_type == "video_batch":
+            return self.video_batch_queue.qsize() >= self._max_queue_size
         elif job_type == "nude_base":
             return self.nude_base_queue.qsize() >= self._max_queue_size
         return self.queue.qsize() >= self._max_queue_size

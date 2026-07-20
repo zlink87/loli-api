@@ -36,7 +36,7 @@ from models.requests import (
 )
 from services import prompt_constants as pc
 
-from api.v1.endpoints.video import (
+from services.video_workflow import (
     build_video_prompt,
     prepare_video_workflow,
     prepare_flf2v_workflow,

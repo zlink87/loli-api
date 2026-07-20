@@ -42,6 +42,7 @@ from workers.background_edit_worker import BackgroundEditWorker
 from workers.pipeline_worker import PipelineBackgroundWorker
 from workers.batch_pipeline_worker import BatchPipelineWorker
 from workers.video_worker import VideoBackgroundWorker
+from workers.video_batch_worker import VideoBatchWorker
 from workers.nude_base_worker import NudeBaseWorker
 from services import supabase_db
 from services.character_store import CharacterStore
@@ -55,6 +56,8 @@ from services.batch_store import BatchStore
 from services.nude_base_store import NudeBaseStore
 from services.trait_profile_store import TraitProfileStore
 from services.batch_orchestrator import BatchOrchestrator, BatchReconciler
+from services.video_batch_store import VideoBatchStore
+from services.video_batch_orchestrator import VideoBatchOrchestrator, VideoBatchReconciler
 from models.responses import HealthResponse, ErrorResponse
 from models.enums import PoseType
 from auth.dependencies import create_test_token
@@ -374,6 +377,13 @@ batch_reconciler = None
 batch_engine = None
 batch_workers = []
 
+# --- Per-character Video Batches subsystem (optional; requires Supabase DB AND the
+# lightning video graph AND a dedicated RunPod video endpoint) ---
+video_batch_store = None
+video_batch_orchestrator = None
+video_batch_reconciler = None
+video_batch_workers = []
+
 if supabase_db.is_configured():
     _db = supabase_db.get_supabase_db_client()
     character_store = CharacterStore(_db)
@@ -446,6 +456,60 @@ if supabase_db.is_configured():
             name=f"batch-{i}",
         ))
     logger.info(f"Character Batches enabled: {settings.BATCH_WORKER_POOL_SIZE} batch workers")
+
+    # Per-character Video Batches (submit-only worker + durable reconciler). Fully
+    # INERT unless BOTH master gates are set: the lightning graph
+    # (COMFYUI_VIDEO_LIGHTNING_WORKFLOW_PATH) AND a dedicated RunPod video endpoint
+    # (RUNPOD_VIDEO_ENDPOINT_ID). We reuse the already-built video_runpod_client
+    # (main.py above) and NEVER fall back to the main endpoint — a WAN clip cannot
+    # finish there inside the video timeout.
+    if settings.COMFYUI_VIDEO_LIGHTNING_WORKFLOW_PATH and settings.RUNPOD_VIDEO_ENDPOINT_ID:
+        video_batch_store = VideoBatchStore(_db)
+        video_batch_orchestrator = VideoBatchOrchestrator(
+            job_manager,
+            character_store,
+            video_batch_store,
+            character_image_store,
+            motion_writer,
+            settings,
+            # cancel_batch aborts in-flight RunPod jobs directly via runpod_request_id.
+            video_runpod_client=video_runpod_client,
+        )
+        video_batch_reconciler = VideoBatchReconciler(
+            job_manager,
+            video_batch_store,
+            character_image_store,
+            video_runpod_client,
+            settings,
+            # The v2 video endpoint carries NO BUCKET_* env: the worker returns the mp4
+            # base64 in /status and the reconciler uploads it to Supabase itself.
+            supabase_storage_service=supabase_storage_service,
+        )
+        for i in range(settings.VIDEO_BATCH_WORKER_POOL_SIZE):
+            video_batch_workers.append(VideoBatchWorker(
+                job_manager=job_manager,
+                comfyui_client=comfyui_client,
+                storage_service=storage_service,
+                lightning_workflow_path=settings.COMFYUI_VIDEO_LIGHTNING_WORKFLOW_PATH,
+                video_batch_store=video_batch_store,
+                # quality_mode='max' items render on the baseline graph; lightning-only
+                # when this is empty (select_video_template degrades non-explicit items).
+                baseline_workflow_path=settings.COMFYUI_VIDEO_WORKFLOW_PATH,
+                image_cache_service=image_cache_service,
+                notification_service=notification_service,
+                supabase_storage_service=supabase_storage_service,
+                runpod_client=video_runpod_client,
+                name=f"video-batch-{i}",
+            ))
+        logger.info(
+            f"Video Batches enabled: {len(video_batch_workers)} workers, "
+            f"endpoint={settings.RUNPOD_VIDEO_ENDPOINT_ID}"
+        )
+    else:
+        logger.info(
+            "Video Batches disabled (COMFYUI_VIDEO_LIGHTNING_WORKFLOW_PATH / "
+            "RUNPOD_VIDEO_ENDPOINT_ID unset) — subsystem inert"
+        )
 else:
     logger.info("Character Batches disabled (Supabase DB not configured)")
 
@@ -566,6 +630,8 @@ async def lifespan(app: FastAPI):
         character_image_store=character_image_store,
         batch_store=batch_store,
         batch_orchestrator=batch_orchestrator,
+        video_batch_store=video_batch_store,
+        video_batch_orchestrator=video_batch_orchestrator,
         persona_writer=persona_writer,
         motion_writer=motion_writer,
         chat_persona_store=chat_persona_store,
@@ -599,6 +665,14 @@ async def lifespan(app: FastAPI):
             await w.start()
         if batch_reconciler:
             await batch_reconciler.start()
+        # Video Batches (submit-only workers + durable reconciler). Inert unless the
+        # master gates were set (see the construction block above).
+        for w in video_batch_workers:
+            await w.start()
+        if video_batch_reconciler:
+            await video_batch_reconciler.start()
+        if video_batch_workers:
+            logger.info(f"Video Batches: {len(video_batch_workers)} workers + reconciler started")
 
         # WS3.1 observability: log the REAL resolved workflow (path + tier) per
         # engine now that _load_workflows() has run (pipeline_worker.start() above;
@@ -632,6 +706,10 @@ async def lifespan(app: FastAPI):
         await w.stop()
     if batch_reconciler:
         await batch_reconciler.stop()
+    for w in video_batch_workers:
+        await w.stop()
+    if video_batch_reconciler:
+        await video_batch_reconciler.stop()
     await cleanup_worker.stop()
     await keep_warm_service.stop()
     await image_cache_service.stop_cleanup_worker()

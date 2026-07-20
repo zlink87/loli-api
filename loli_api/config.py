@@ -74,6 +74,36 @@ class Settings(BaseSettings):
     # once the RunPod worker image is confirmed to have the WanFirstLastFrameToVideo
     # node (a deploy-side action) — otherwise generation will fail on that worker.
     COMFYUI_VIDEO_FLF2V_WORKFLOW_PATH: str = ""
+
+    # --- Per-character Video Batches (submit-only worker + durable reconciler) ---
+    # MASTER GATE for the whole video-batch subsystem. EMPTY (default) -> the
+    # subsystem is INERT: main.py does not build the store/orchestrator/reconciler/
+    # worker-pool, and the admin routes 503. Point this at the Lightning i2v graph
+    # ("workflows/wan_i2v_lightning.json") ONLY once the RunPod video worker image is
+    # confirmed to have the Lightning low-noise LoRA + RIFE weights staged on the
+    # volume (a deploy-side action) AND RUNPOD_VIDEO_ENDPOINT_ID is set to the
+    # WAN-capable endpoint — otherwise generation will fail on that worker.
+    COMFYUI_VIDEO_LIGHTNING_WORKFLOW_PATH: str = ""
+    # Number of dedicated video-batch workers (submit-only: each dequeues an item,
+    # stages the still, submits to RunPod, persists runpod_request_id, and is done —
+    # the reconciler owns polling/persistence). Keep RunPod max_workers >= this.
+    VIDEO_BATCH_WORKER_POOL_SIZE: int = 2
+    # Max in-flight (submitted/running) items per batch the reconciler enqueues at a
+    # time (fairness: stops one batch monopolizing the RunPod endpoint).
+    VIDEO_BATCH_MAX_INFLIGHT: int = 2
+    # Per-item retry attempts before an item is marked failed. Attempts are consumed
+    # ONLY by genuine RunPod FAILED/TIMED_OUT — never by deploys (a redeploy recovers
+    # in-flight items via the durable runpod_request_id, no attempt burned).
+    VIDEO_BATCH_ITEM_MAX_ATTEMPTS: int = 2
+    # Default render path when a batch/item does not specify one: "fast" (lightning)
+    # or "max" (baseline). Explicit-tier items always force fast regardless.
+    VIDEO_BATCH_DEFAULT_QUALITY_MODE: str = "fast"
+    # Gate for the explicit action tier (NSFW motion LoRAs). False (default) -> any
+    # explicit-tier item is rejected at launch. Flip true ONLY after the NSFW LoRA
+    # files are confirmed staged on the RunPod volume (the catalog ships PLACEHOLDER
+    # filenames until then).
+    VIDEO_BATCH_EXPLICIT_ENABLED: bool = False
+
     COMFYUI_INPUT_DIR: str = "../ComfyUI/input"
 
     # WS4.1/4.2 — pose face-alignment diagnostics (flag-gated, default OFF).

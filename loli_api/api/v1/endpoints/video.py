@@ -15,17 +15,15 @@ Routes (all require_admin, character-scoped):
 The prompt/workflow helpers here are imported by workers/video_worker.py, mirroring
 how pose_worker imports from pose.py.
 """
-import copy
 import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth.admin import require_admin
-from models.enums import MotionType, JobStatus
+from models.enums import JobStatus
 from models.requests import VideoGenerateRequest, VIDEO_DEFAULT_FPS
 from models.responses import JobCreateResponse
-from services import prompt_constants as pc
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -86,163 +84,19 @@ def get_motion_writer():
 
 
 # ---------------------------------------------------------------------------
-# Motion presets — text descriptions injected into the WAN positive prompt.
+# Motion presets + workflow-prep helpers now live in services/video_workflow.py
+# so the per-character video-batch subsystem can share them without importing this
+# route module. They are RE-EXPORTED here for back-compat: the reel route below and
+# the test suite (tests/test_video_motion.py) still import these names from
+# api.v1.endpoints.video. See services/video_workflow.py for the implementations.
 # ---------------------------------------------------------------------------
-MOTION_DESCRIPTIONS: Dict[MotionType, str] = {
-    MotionType.SUBTLE_IDLE: "subtle idle motion, gentle breathing and micro head movements, then settling into a soft smile toward the camera, static camera",
-    MotionType.SLOW_TURN: "slowly turning head and shoulders to face the camera, then holding the gaze with a soft smile",
-    MotionType.HAIR_IN_WIND: "hair flowing gently in the wind, soft fabric movement, then tucking a strand behind the ear and smiling at the camera",
-    MotionType.HAIR_FLIP: "playfully flipping hair back over the shoulder, then looking to the camera with a warm smile",
-    MotionType.BLOW_KISS: "smiling warmly, leaning slightly toward the camera and blowing a kiss",
-    MotionType.WAVE: "waving a hand at the camera, then a warm friendly smile",
-    MotionType.WALK_TOWARD: "walking slowly toward the camera, then stopping close, leaning in slightly, blinking softly and smiling at the camera",
-    MotionType.LOOK_OVER_SHOULDER: "glancing back over the shoulder, then turning to face the camera with a soft smile",
-    MotionType.WINK: "looking at the camera, smiling and giving a playful wink",
-    MotionType.LIP_BITE: "a soft sultry gaze at the camera, gently biting the lower lip, then a faint smile",
-    MotionType.BEND_TO_CAMERA: "leaning and bending toward the camera, then looking up through the lashes and smiling",
-    MotionType.HEAD_TILT: "tilting the head with curiosity, then a soft smile toward the camera",
-    MotionType.ADJUST_HAIR: "running fingers through the hair, then settling and smiling at the camera",
-    MotionType.GLANCE_UP_THROUGH_LASHES: "looking down, then slowly glancing up at the camera through the lashes with a soft smile",
-    MotionType.GENTLE_LAUGH: "a genuine, gentle laugh, then looking at the camera with a bright smile",
-    MotionType.SHOULDER_SWAY: "swaying the shoulders playfully to a rhythm, ending facing the camera with a smile",
-    MotionType.COME_HITHER: "beckoning toward the camera with a curling finger and a playful smile",
-    MotionType.TWIRL: "turning in a gentle twirl, hair and fabric flaring, then facing the camera with a smile",
-    MotionType.PEACE_SIGN: "raising a playful peace sign near the face, then a wink and a smile at the camera",
-    MotionType.TOUCH_LIPS: "softly touching the lips with a fingertip, gaze to the camera, then a faint smile",
-    MotionType.SLOW_STRETCH: "a slow graceful stretch, relaxing the shoulders, then a soft smile toward the camera",
-    MotionType.LEAN_ON_HAND: "leaning forward toward the camera, resting the chin lightly on a hand, then smiling",
-    MotionType.GAZE_AND_SMILE: "a slow, intimate gaze into the camera that softens into a warm smile",
-    MotionType.NOD_AND_SMILE: "a gentle nod of acknowledgement toward the camera, then a warm smile",
-}
-
-_MAX_LABEL_LEN = 40
-
-
-def motion_label(motion: MotionType) -> str:
-    """Short human caption for the chat quick-action button."""
-    text = motion.value.replace("_", " ").title()
-    return text[:_MAX_LABEL_LEN]
-
-
-def build_video_prompt(motion: MotionType, extra: Optional[str] = None) -> str:
-    """Compose the WAN positive prompt from a motion preset + identity clause.
-
-    When ``extra`` (custom motion text, already LLM-polished by the request path)
-    is supplied it REPLACES the preset entirely; otherwise the ``motion`` preset
-    description is used. The identity-lock ``VIDEO_CONSISTENCY_CLAUSE`` is always
-    appended in either path.
-    """
-    if extra and extra.strip():
-        return f"{extra.strip()}. {pc.VIDEO_CONSISTENCY_CLAUSE}."
-    desc = MOTION_DESCRIPTIONS.get(motion, "subtle natural motion, static camera")
-    return f"{desc}. {pc.VIDEO_CONSISTENCY_CLAUSE}."
-
-
-def prepare_video_workflow(
-    template: dict,
-    source_image: str,
-    prompt: Optional[str] = None,
-    negative_prompt: Optional[str] = None,
-    seed: Optional[int] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
-    length: Optional[int] = None,
-    fps: Optional[int] = None,
-) -> dict:
-    """
-    Prepare the WAN 2.2 i2v workflow (workflows/wan_i2v.json) by mutating the
-    pinned anchor node IDs. Mirrors prepare_pose_workflow (deep-copy + guarded
-    writes).
-
-    Anchor nodes:
-        52  LoadImage        -> inputs.image  (start frame)
-        6   CLIPTextEncode   -> inputs.text   (positive / motion prompt)
-        7   CLIPTextEncode   -> inputs.text   (negative)
-        50  WanImageToVideo  -> inputs.width/height/length
-        57  KSamplerAdvanced -> inputs.noise_seed  (high-noise expert)
-        58  KSamplerAdvanced -> inputs.noise_seed  (low-noise expert)
-        60  VideoImagesBridge -> inputs.frame_rate
-    """
-    wf = copy.deepcopy(template)
-
-    if "52" in wf:
-        wf["52"]["inputs"]["image"] = source_image
-
-    if prompt is not None and "6" in wf:
-        wf["6"]["inputs"]["text"] = prompt
-
-    if negative_prompt is not None and "7" in wf:
-        wf["7"]["inputs"]["text"] = negative_prompt
-
-    if "50" in wf:
-        if width is not None:
-            wf["50"]["inputs"]["width"] = width
-        if height is not None:
-            wf["50"]["inputs"]["height"] = height
-        if length is not None:
-            wf["50"]["inputs"]["length"] = length
-
-    # Seed both experts (high-noise then low-noise) so the clip is reproducible.
-    if seed is not None:
-        for nid in ("57", "58"):
-            if nid in wf:
-                wf[nid]["inputs"]["noise_seed"] = seed
-
-    if fps is not None and "60" in wf:
-        wf["60"]["inputs"]["frame_rate"] = fps
-
-        # When the interpolation variant of the workflow is in use, the clip is
-        # generated at `fps` but has multiplier x more frames after FrameInterpolate;
-        # scale the output frame_rate so playback stays real-time (16fps gen x2 = 32).
-        for node in wf.values():
-            if node.get("class_type") == "FrameInterpolate":
-                multiplier = node.get("inputs", {}).get("multiplier", 1)
-                wf["60"]["inputs"]["frame_rate"] = fps * multiplier
-                break
-
-    return wf
-
-
-def prepare_flf2v_workflow(
-    template: dict,
-    source_image: str,
-    end_image: str,
-    prompt: Optional[str] = None,
-    negative_prompt: Optional[str] = None,
-    seed: Optional[int] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
-    length: Optional[int] = None,
-    fps: Optional[int] = None,
-) -> dict:
-    """
-    Prepare the WAN 2.2 first-last-frame workflow (workflows/wan_i2v_flf2v.json).
-
-    Identical to prepare_video_workflow but for the extra END-frame anchor: this
-    graph's node 50 is a ``WanFirstLastFrameToVideo`` (not ``WanImageToVideo``)
-    that takes both a start_image (node 52) and an end_image (node 53). All the
-    other anchors (prompt/negative/seed/dims/fps) are shared, so we delegate to
-    prepare_video_workflow and only add the node-53 end-image write here.
-
-    Anchor nodes (in addition to prepare_video_workflow's):
-        53  LoadImage  -> inputs.image  (end frame)
-    """
-    wf = prepare_video_workflow(
-        template,
-        source_image,
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        seed=seed,
-        width=width,
-        height=height,
-        length=length,
-        fps=fps,
-    )
-
-    if "53" in wf:
-        wf["53"]["inputs"]["image"] = end_image
-
-    return wf
+from services.video_workflow import (  # noqa: F401  (re-export for back-compat)
+    MOTION_DESCRIPTIONS,
+    build_video_prompt,
+    motion_label,
+    prepare_flf2v_workflow,
+    prepare_video_workflow,
+)
 
 
 # ---------------------------------------------------------------------------

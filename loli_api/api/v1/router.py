@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from .endpoints import (
     generate, jobs, preview, edit, outfit, pose, background, pipeline,
-    characters, batches, video, persona, nude_base, scenes, options,
+    characters, batches, video, video_batches, persona, nude_base, scenes, options,
     trait_profile,
 )
 
@@ -24,6 +24,7 @@ api_router.include_router(pipeline.router)
 api_router.include_router(characters.router)
 api_router.include_router(batches.router)
 api_router.include_router(video.router)
+api_router.include_router(video_batches.router)
 api_router.include_router(persona.router)
 api_router.include_router(nude_base.router)
 api_router.include_router(scenes.router)
@@ -46,6 +47,8 @@ def configure_services(
     character_image_store=None,
     batch_store=None,
     batch_orchestrator=None,
+    video_batch_store=None,
+    video_batch_orchestrator=None,
     persona_writer=None,
     motion_writer=None,
     chat_persona_store=None,
@@ -114,6 +117,13 @@ def configure_services(
         batches.set_batch_store(batch_store)
     if batch_orchestrator is not None:
         batches.set_orchestrator(batch_orchestrator)
+    # Per-character Video Batches (optional — only wired when the Supabase DB is
+    # configured AND the lightning video graph + dedicated RunPod video endpoint are
+    # set; the routes 503 until both stores are injected). See main.py's gate.
+    if video_batch_store is not None:
+        video_batches.set_video_batch_store(video_batch_store)
+    if video_batch_orchestrator is not None:
+        video_batches.set_video_batch_orchestrator(video_batch_orchestrator)
     # Persona/bio writer (Feature 1). Writer works keyless (deterministic); persistence
     # is Supabase-gated (character_store + chat_persona_store).
     if persona_writer is not None:
