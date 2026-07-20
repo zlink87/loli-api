@@ -212,7 +212,7 @@
   },
   "70": {
     "inputs": {
-      "model_name": "rife_v4.26.safetensors"
+      "model_name": "frame_interpolation/rife_v4.26.safetensors"
     },
     "class_type": "FrameInterpolationModelLoader",
     "_meta": {
